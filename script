@@ -1,8 +1,9 @@
--- Player ESP v3: mobile alignment and performance fix.
+-- Player ESP v3.1: top-layer 2D ESP with the mobile performance fixes.
 -- Replace the entire previous LocalScript in StarterPlayerScripts.
 -- Drag the title or ESP button. Minus minimizes; X / "Удалить ESP" unloads.
 -- Mobile starts in Lite mode: 20 Hz, 24 markers, 6 nearby outlines, 6 labels.
 -- Distant/unloaded server characters cannot be recovered by a LocalScript.
+-- ScreenGui priority affects 2D markers, not Roblox's system UI or 3D Highlight.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -18,6 +19,8 @@ local settings = {
     FarDistance = 150, Color = Color3.fromRGB(75, 240, 150),
 }
 local GUI_NAME = "PlayerESPMenu"
+local ESP_DISPLAY_ORDER = 2147483646
+local MENU_DISPLAY_ORDER = 2147483647
 local LEGACY_RENDER = "PlayerESP_Render_" .. localPlayer.UserId
 local RENDER_NAME = LEGACY_RENDER .. "_v3_" .. tostring(os.clock())
 local HIGHLIGHT_NAME = "PlayerESPHighlights_" .. localPlayer.UserId
@@ -54,13 +57,13 @@ local function round(object, radius)
     make("UICorner", { CornerRadius = UDim.new(0, radius) }, object)
 end
 local menuGui = make("ScreenGui", {
-    Name = GUI_NAME, ResetOnSpawn = false, DisplayOrder = 101,
+    Name = GUI_NAME, ResetOnSpawn = false, DisplayOrder = MENU_DISPLAY_ORDER,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
     ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets,
     SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
 }, playerGui)
 local overlayGui = make("ScreenGui", {
-    Name = "PlayerESPOverlay", ResetOnSpawn = false, DisplayOrder = 100,
+    Name = "PlayerESPOverlay", ResetOnSpawn = false, DisplayOrder = ESP_DISPLAY_ORDER,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
     SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
 }, playerGui)
@@ -102,7 +105,7 @@ local panel = make("Frame", {
 round(panel, 12)
 make("UIStroke", { Color = Color3.fromRGB(55, 67, 88), Thickness = 1 }, panel)
 local panelScale = make("UIScale", { Scale = 1 }, panel)
-local dragHandle = button(panel, "PLAYER ESP  ·  v3", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
+local dragHandle = button(panel, "PLAYER ESP  ·  v3.1", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
 dragHandle.Name = "DragHandle"
 dragHandle.BackgroundTransparency = 1
 dragHandle.TextXAlignment = Enum.TextXAlignment.Left
