@@ -1,4 +1,4 @@
--- Player ESP v3.1: top-layer 2D ESP with the mobile performance fixes.
+-- Player ESP v3.2: drone-camera support and recovery after game HUD changes.
 -- Replace the entire previous LocalScript in StarterPlayerScripts.
 -- Drag the title or ESP button. Minus minimizes; X / "Удалить ESP" unloads.
 -- Mobile starts in Lite mode: 20 Hz, 24 markers, 6 nearby outlines, 6 labels.
@@ -22,525 +22,600 @@ local GUI_NAME = "PlayerESPMenu"
 local ESP_DISPLAY_ORDER = 2147483646
 local MENU_DISPLAY_ORDER = 2147483647
 local LEGACY_RENDER = "PlayerESP_Render_" .. localPlayer.UserId
-local RENDER_NAME = LEGACY_RENDER .. "_v3_" .. tostring(os.clock())
 local HIGHLIGHT_NAME = "PlayerESPHighlights_" .. localPlayer.UserId
-local oldMenu = playerGui:FindFirstChild(GUI_NAME)
-if oldMenu then
-    local stop = oldMenu:FindFirstChild("Shutdown")
-    if stop and stop:IsA("BindableEvent") then stop:Fire() end
-    oldMenu:Destroy()
-end
-RunService:UnbindFromRenderStep(LEGACY_RENDER)
-local oldOverlay = playerGui:FindFirstChild("PlayerESPOverlay")
-if oldOverlay then oldOverlay:Destroy() end
-local oldHighlights = Workspace:FindFirstChild(HIGHLIGHT_NAME)
-if oldHighlights then oldHighlights:Destroy() end
+local OWNER_ATTRIBUTE = "PlayerESPControllerToken"
+local runToken = tostring(os.clock()) .. ":" .. tostring({})
+local unloaded, sessionNumber = false, 0
+playerGui:SetAttribute(OWNER_ATTRIBUTE, runToken)
 
-local stopped, dirty = false, true
-local connections, tracked, active, highlightPool = {}, {}, {}, {}
-local cleanup
-local function connect(signal, callback)
-    local connection = signal:Connect(callback)
-    table.insert(connections, connection)
-    return connection
-end
-local function make(className, properties, parent)
-    local object = Instance.new(className)
-    for key, value in pairs(properties) do object[key] = value end
-    object.Parent = parent
-    return object
-end
-local function set(object, property, value)
-    if object[property] ~= value then object[property] = value end
-end
-local function round(object, radius)
-    make("UICorner", { CornerRadius = UDim.new(0, radius) }, object)
-end
-local menuGui = make("ScreenGui", {
-    Name = GUI_NAME, ResetOnSpawn = false, DisplayOrder = MENU_DISPLAY_ORDER,
-    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-    ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets,
-    SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
-}, playerGui)
-local overlayGui = make("ScreenGui", {
-    Name = "PlayerESPOverlay", ResetOnSpawn = false, DisplayOrder = ESP_DISPLAY_ORDER,
-    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-    SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
-}, playerGui)
--- WorldToViewportPoint uses the DEVICE safe area, not the full phone display.
--- Set this explicitly, AFTER construction; don't mix it with ScreenInsets.None.
--- Disable fullscreen extension so full-size marker frames aren't stretched.
-overlayGui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets
-local highlightFolder = make("Folder", { Name = HIGHLIGHT_NAME }, Workspace)
-local shutdown = make("BindableEvent", { Name = "Shutdown" }, menuGui)
-local menuRoot = make("Frame", {
-    Name = "MenuRoot", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
-}, menuGui)
-local textColor = Color3.fromRGB(235, 240, 248)
-local mutedColor = Color3.fromRGB(157, 169, 189)
-local rowColor = Color3.fromRGB(32, 39, 52)
-local function label(parent, text, position, size, fontSize)
-    return make("TextLabel", {
-        BackgroundTransparency = 1, Position = position, Size = size,
-        Text = text, TextColor3 = textColor, Font = Enum.Font.Gotham,
-        TextSize = fontSize or 13, TextXAlignment = Enum.TextXAlignment.Left,
-    }, parent)
-end
-local function button(parent, text, position, size)
-    local result = make("TextButton", {
-        BackgroundColor3 = rowColor, BorderSizePixel = 0,
-        Position = position, Size = size, Text = text, TextColor3 = textColor,
-        Font = Enum.Font.GothamMedium, TextSize = 13, AutoButtonColor = true,
-    }, parent)
-    round(result, 8)
-    return result
-end
-local openButton = button(menuRoot, "ESP", UDim2.fromOffset(12, 12), UDim2.fromOffset(76, 38))
-openButton.Name = "OpenMenu"
-local panel = make("Frame", {
-    Name = "Panel", Position = UDim2.fromOffset(12, 58),
-    Size = UDim2.fromOffset(300, 540), BackgroundColor3 = Color3.fromRGB(19, 24, 34),
-    BorderSizePixel = 0, Active = true, Visible = not mobile,
-}, menuRoot)
-round(panel, 12)
-make("UIStroke", { Color = Color3.fromRGB(55, 67, 88), Thickness = 1 }, panel)
-local panelScale = make("UIScale", { Scale = 1 }, panel)
-local dragHandle = button(panel, "PLAYER ESP  ·  v3.1", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
-dragHandle.Name = "DragHandle"
-dragHandle.BackgroundTransparency = 1
-dragHandle.TextXAlignment = Enum.TextXAlignment.Left
-dragHandle.Font = Enum.Font.GothamBold
-dragHandle.Modal = not mobile
-local minimize = button(panel, "—", UDim2.fromOffset(212, 6), UDim2.fromOffset(36, 36))
-minimize.Name = "MinimizeMenu"
-local closeButton = button(panel, "×", UDim2.fromOffset(254, 6), UDim2.fromOffset(36, 36))
-closeButton.Name = "UnloadMenu"
-closeButton.TextColor3 = Color3.fromRGB(255, 135, 145)
-local subtitle = label(panel, "Тяни за заголовок · — свернуть · × удалить", UDim2.fromOffset(12, 43), UDim2.fromOffset(278, 16), 10)
-subtitle.TextColor3 = mutedColor
-local scroll = make("ScrollingFrame", {
-    Name = "SettingsScroll", Position = UDim2.fromOffset(8, 64),
-    Size = UDim2.new(1, -16, 1, -134), BackgroundTransparency = 1,
-    BorderSizePixel = 0, CanvasSize = UDim2.fromOffset(0, 470),
-    ScrollBarThickness = 3, ScrollBarImageColor3 = mutedColor,
-    ScrollingDirection = Enum.ScrollingDirection.Y,
-    ClipsDescendants = true, Active = true,
-}, panel)
-local status = label(panel, "", UDim2.new(0, 12, 1, -65), UDim2.fromOffset(278, 18), 10)
-status.TextColor3 = mutedColor
-local deleteButton = button(panel, "Удалить ESP", UDim2.new(0, 12, 1, -43), UDim2.new(1, -24, 0, 34))
-deleteButton.Name = "DeleteESP"
-deleteButton.TextColor3 = Color3.fromRGB(255, 145, 155)
-local function setMenuOpen(isOpen)
-    panel.Visible = isOpen
-    dragHandle.Modal = isOpen and not mobile
-end
-connect(minimize.Activated, function() setMenuOpen(false) end)
-connect(closeButton.Activated, function() cleanup() end)
-connect(deleteButton.Activated, function() cleanup() end)
+-- Rebuild only our interface if a vehicle script removes the player's HUD.
+-- The owner token prevents an old/deferred restart replacing a newer launch.
+local function startSession(savedUI)
+    if unloaded or playerGui:GetAttribute(OWNER_ATTRIBUTE) ~= runToken then return end
+    sessionNumber = sessionNumber + 1
+    local RENDER_NAME = LEGACY_RENDER .. "_v32_" .. runToken .. "_" .. sessionNumber
+    local oldMenu = playerGui:FindFirstChild(GUI_NAME)
+    if oldMenu then
+        local stop = oldMenu:FindFirstChild("Shutdown")
+        if stop and stop:IsA("BindableEvent") then stop:Fire() end
+        oldMenu:Destroy()
+    end
+    RunService:UnbindFromRenderStep(LEGACY_RENDER)
+    local oldOverlay = playerGui:FindFirstChild("PlayerESPOverlay")
+    if oldOverlay then oldOverlay:Destroy() end
+    local oldHighlights = Workspace:FindFirstChild(HIGHLIGHT_NAME)
+    if oldHighlights then oldHighlights:Destroy() end
 
--- One shared drag listener: a second finger on the joystick cannot hijack it.
-local drag, suppressUntil = nil, {}
-local function clampPosition(target, x, y)
-    local available, size = menuRoot.AbsoluteSize, target.AbsoluteSize
-    return Vector2.new(
-        math.clamp(x, 0, math.max(0, available.X - size.X)),
-        math.clamp(y, 0, math.max(0, available.Y - size.Y))
-    )
-end
-local function place(target, position)
-    target.Position = UDim2.fromOffset(position.X, position.Y)
-end
-local function draggable(handle, target)
-    connect(handle.InputBegan, function(input)
-        local kind = input.UserInputType
-        if drag or (kind ~= Enum.UserInputType.Touch and kind ~= Enum.UserInputType.MouseButton1) then return end
-        drag = {
-            input = input, touch = kind == Enum.UserInputType.Touch,
-            handle = handle, target = target, moved = false,
-            start = Vector2.new(input.Position.X, input.Position.Y),
-            origin = Vector2.new(target.Position.X.Offset, target.Position.Y.Offset),
-        }
+    local stopped, dirty = false, true
+    local connections, tracked, active, highlightPool = {}, {}, {}, {}
+    local cleanup
+    local function connect(signal, callback)
+        local connection = signal:Connect(callback)
+        table.insert(connections, connection)
+        return connection
+    end
+    local function make(className, properties, parent)
+        local object = Instance.new(className)
+        for key, value in pairs(properties) do object[key] = value end
+        object.Parent = parent
+        return object
+    end
+    local function set(object, property, value)
+        if object[property] ~= value then object[property] = value end
+    end
+    local function round(object, radius)
+        make("UICorner", { CornerRadius = UDim.new(0, radius) }, object)
+    end
+    local menuGui = make("ScreenGui", {
+        Name = GUI_NAME, ResetOnSpawn = false, DisplayOrder = MENU_DISPLAY_ORDER,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets,
+        SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
+    }, playerGui)
+    local overlayGui = make("ScreenGui", {
+        Name = "PlayerESPOverlay", ResetOnSpawn = false, DisplayOrder = ESP_DISPLAY_ORDER,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
+    }, playerGui)
+    -- WorldToViewportPoint uses the DEVICE safe area, not the full phone display.
+    -- Set this explicitly, AFTER construction; don't mix it with ScreenInsets.None.
+    -- Disable fullscreen extension so full-size marker frames aren't stretched.
+    overlayGui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets
+    local highlightFolder = make("Folder", { Name = HIGHLIGHT_NAME }, Workspace)
+    local shutdown = make("BindableEvent", { Name = "Shutdown" }, menuGui)
+    local menuRoot = make("Frame", {
+        Name = "MenuRoot", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+    }, menuGui)
+    local textColor = Color3.fromRGB(235, 240, 248)
+    local mutedColor = Color3.fromRGB(157, 169, 189)
+    local rowColor = Color3.fromRGB(32, 39, 52)
+    local function label(parent, text, position, size, fontSize)
+        return make("TextLabel", {
+            BackgroundTransparency = 1, Position = position, Size = size,
+            Text = text, TextColor3 = textColor, Font = Enum.Font.Gotham,
+            TextSize = fontSize or 13, TextXAlignment = Enum.TextXAlignment.Left,
+        }, parent)
+    end
+    local function button(parent, text, position, size)
+        local result = make("TextButton", {
+            BackgroundColor3 = rowColor, BorderSizePixel = 0,
+            Position = position, Size = size, Text = text, TextColor3 = textColor,
+            Font = Enum.Font.GothamMedium, TextSize = 13, AutoButtonColor = true,
+        }, parent)
+        round(result, 8)
+        return result
+    end
+    local openButton = button(menuRoot, "ESP", UDim2.fromOffset(12, 12), UDim2.fromOffset(76, 38))
+    openButton.Name = "OpenMenu"
+    local panel = make("Frame", {
+        Name = "Panel", Position = UDim2.fromOffset(12, 58),
+        Size = UDim2.fromOffset(300, 540), BackgroundColor3 = Color3.fromRGB(19, 24, 34),
+        BorderSizePixel = 0, Active = true, Visible = not mobile,
+    }, menuRoot)
+    round(panel, 12)
+    make("UIStroke", { Color = Color3.fromRGB(55, 67, 88), Thickness = 1 }, panel)
+    local panelScale = make("UIScale", { Scale = 1 }, panel)
+    local dragHandle = button(panel, "PLAYER ESP  ·  v3.2", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
+    dragHandle.Name = "DragHandle"
+    dragHandle.BackgroundTransparency = 1
+    dragHandle.TextXAlignment = Enum.TextXAlignment.Left
+    dragHandle.Font = Enum.Font.GothamBold
+    dragHandle.Modal = not mobile
+    local minimize = button(panel, "—", UDim2.fromOffset(212, 6), UDim2.fromOffset(36, 36))
+    minimize.Name = "MinimizeMenu"
+    local closeButton = button(panel, "×", UDim2.fromOffset(254, 6), UDim2.fromOffset(36, 36))
+    closeButton.Name = "UnloadMenu"
+    closeButton.TextColor3 = Color3.fromRGB(255, 135, 145)
+    local subtitle = label(panel, "Тяни за заголовок · — свернуть · × удалить", UDim2.fromOffset(12, 43), UDim2.fromOffset(278, 16), 10)
+    subtitle.TextColor3 = mutedColor
+    local scroll = make("ScrollingFrame", {
+        Name = "SettingsScroll", Position = UDim2.fromOffset(8, 64),
+        Size = UDim2.new(1, -16, 1, -134), BackgroundTransparency = 1,
+        BorderSizePixel = 0, CanvasSize = UDim2.fromOffset(0, 470),
+        ScrollBarThickness = 3, ScrollBarImageColor3 = mutedColor,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ClipsDescendants = true, Active = true,
+    }, panel)
+    local status = label(panel, "", UDim2.new(0, 12, 1, -65), UDim2.fromOffset(278, 18), 10)
+    status.TextColor3 = mutedColor
+    local deleteButton = button(panel, "Удалить ESP", UDim2.new(0, 12, 1, -43), UDim2.new(1, -24, 0, 34))
+    deleteButton.Name = "DeleteESP"
+    deleteButton.TextColor3 = Color3.fromRGB(255, 145, 155)
+    local function setMenuOpen(isOpen)
+        panel.Visible = isOpen
+        dragHandle.Modal = isOpen and not mobile
+    end
+    connect(minimize.Activated, function() setMenuOpen(false) end)
+    connect(closeButton.Activated, function() cleanup() end)
+    connect(deleteButton.Activated, function() cleanup() end)
+
+    -- One shared drag listener: a second finger on the joystick cannot hijack it.
+    local drag, suppressUntil = nil, {}
+    local function clampPosition(target, x, y)
+        local available, size = menuRoot.AbsoluteSize, target.AbsoluteSize
+        return Vector2.new(
+            math.clamp(x, 0, math.max(0, available.X - size.X)),
+            math.clamp(y, 0, math.max(0, available.Y - size.Y))
+        )
+    end
+    local function place(target, position)
+        target.Position = UDim2.fromOffset(position.X, position.Y)
+    end
+    local function draggable(handle, target)
+        connect(handle.InputBegan, function(input)
+            local kind = input.UserInputType
+            if drag or (kind ~= Enum.UserInputType.Touch and kind ~= Enum.UserInputType.MouseButton1) then return end
+            drag = {
+                input = input, touch = kind == Enum.UserInputType.Touch,
+                handle = handle, target = target, moved = false,
+                start = Vector2.new(input.Position.X, input.Position.Y),
+                origin = Vector2.new(target.Position.X.Offset, target.Position.Y.Offset),
+            }
+        end)
+    end
+    draggable(dragHandle, panel)
+    draggable(openButton, openButton)
+    connect(UserInputService.InputChanged, function(input)
+        if not drag then return end
+        if drag.touch and input ~= drag.input then return end
+        if not drag.touch and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+        local delta = Vector2.new(input.Position.X, input.Position.Y) - drag.start
+        if delta.Magnitude > 5 then drag.moved = true end
+        if drag.moved then
+            suppressUntil[drag.handle] = os.clock() + 0.25
+            local p = drag.origin + delta
+            place(drag.target, clampPosition(drag.target, p.X, p.Y))
+        end
     end)
-end
-draggable(dragHandle, panel)
-draggable(openButton, openButton)
-connect(UserInputService.InputChanged, function(input)
-    if not drag then return end
-    if drag.touch and input ~= drag.input then return end
-    if not drag.touch and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-    local delta = Vector2.new(input.Position.X, input.Position.Y) - drag.start
-    if delta.Magnitude > 5 then drag.moved = true end
-    if drag.moved then
-        suppressUntil[drag.handle] = os.clock() + 0.25
-        local p = drag.origin + delta
-        place(drag.target, clampPosition(drag.target, p.X, p.Y))
-    end
-end)
-connect(UserInputService.InputEnded, function(input)
-    if not drag then return end
-    if (drag.touch and input == drag.input)
-        or (not drag.touch and input.UserInputType == Enum.UserInputType.MouseButton1) then
-        if drag.moved then suppressUntil[drag.handle] = os.clock() + 0.25 end
-        drag = nil
-    end
-end)
-connect(openButton.Activated, function()
-    if os.clock() >= (suppressUntil[openButton] or 0) then setMenuOpen(not panel.Visible) end
-end)
-connect(UserInputService.InputBegan, function(input, processed)
-    if not processed and not UserInputService:GetFocusedTextBox()
-        and input.KeyCode == Enum.KeyCode.RightShift then setMenuOpen(not panel.Visible) end
-end)
-local function fitPanel()
-    local size = menuRoot.AbsoluteSize
-    if size.X <= 0 or size.Y <= 0 then return end
-    local scale = math.max(0.4, math.min(1, (size.X - 16) / 300))
-    panelScale.Scale = scale
-    -- Scroll the content on short screens instead of shrinking the touch targets.
-    panel.Size = UDim2.fromOffset(300, math.max(170, math.min(540, (size.Y - 16) / scale)))
-    place(panel, clampPosition(panel, panel.Position.X.Offset, panel.Position.Y.Offset))
-    place(openButton, clampPosition(openButton, openButton.Position.X.Offset, openButton.Position.Y.Offset))
-    dirty = true
-end
-connect(menuRoot:GetPropertyChangedSignal("AbsoluteSize"), fitPanel)
-fitPanel()
-
-local toggleButtons, colorStrokes = {}, {}
-local function refreshStyles()
-    for key, item in pairs(toggleButtons) do
-        set(item, "Text", settings[key] and "ВКЛ" or "ВЫКЛ")
-        set(item, "TextColor3", settings[key] and Color3.fromRGB(12, 24, 20) or mutedColor)
-        set(item, "BackgroundColor3", settings[key] and settings.Color or Color3.fromRGB(46, 54, 69))
-    end
-    set(dragHandle, "TextColor3", settings.Color)
-    set(openButton, "TextColor3", settings.Enabled and settings.Color or mutedColor)
-    for _, swatch in ipairs(colorStrokes) do
-        set(swatch.stroke, "Transparency", swatch.color == settings.Color and 0 or 1)
-    end
-    for _, entry in pairs(tracked) do
-        set(entry.line, "BackgroundColor3", settings.Color)
-        set(entry.dot, "BackgroundColor3", settings.Color)
-        entry.clear = nil
-    end
-    dirty = true
-end
-local function addToggle(key, text, index)
-    local row = button(scroll, "", UDim2.fromOffset(4, (index - 1) * 42), UDim2.fromOffset(270, 38))
-    row.Name = key .. "Toggle"
-    label(row, text, UDim2.fromOffset(10, 0), UDim2.fromOffset(194, 38), 12)
-    local badge = label(row, "", UDim2.fromOffset(204, 5), UDim2.fromOffset(58, 28), 11)
-    badge.BackgroundTransparency = 0
-    badge.TextXAlignment = Enum.TextXAlignment.Center
-    round(badge, 6)
-    toggleButtons[key] = badge
-    connect(row.Activated, function()
-        settings[key] = not settings[key]
-        refreshStyles()
+    connect(UserInputService.InputEnded, function(input)
+        if not drag then return end
+        if (drag.touch and input == drag.input)
+            or (not drag.touch and input.UserInputType == Enum.UserInputType.MouseButton1) then
+            if drag.moved then suppressUntil[drag.handle] = os.clock() + 0.25 end
+            drag = nil
+        end
     end)
-end
-addToggle("Enabled", "Весь ESP", 1)
-addToggle("Outlines", "Обводка рядом", 2)
-addToggle("Tracers", "Лучи к игрокам", 3)
-addToggle("FarDots", "Точки вдали", 4)
-addToggle("Labels", "Имена и расстояния", 5)
-addToggle("ThroughWalls", "Сквозь стены", 6)
-addToggle("LiteMode", "Лёгкий режим", 7)
-label(scroll, "Точки начиная с:", UDim2.fromOffset(8, 299), UDim2.fromOffset(250, 22), 12)
-local distanceValue = label(scroll, "", UDim2.fromOffset(54, 328), UDim2.fromOffset(170, 36), 13)
-distanceValue.TextXAlignment = Enum.TextXAlignment.Center
-local minus = button(scroll, "−", UDim2.fromOffset(8, 328), UDim2.fromOffset(38, 36))
-minus.Name = "DistanceMinus"
-local plus = button(scroll, "+", UDim2.fromOffset(232, 328), UDim2.fromOffset(38, 36))
-plus.Name = "DistancePlus"
-local function changeDistance(delta)
-    settings.FarDistance = math.clamp(settings.FarDistance + delta, 25, 2000)
-    distanceValue.Text = tostring(settings.FarDistance) .. " studs"
-    dirty = true
-end
-connect(minus.Activated, function() changeDistance(-25) end)
-connect(plus.Activated, function() changeDistance(25) end)
-changeDistance(0)
-label(scroll, "Цвет", UDim2.fromOffset(8, 383), UDim2.fromOffset(60, 34), 12)
-local colors = {
-    Color3.fromRGB(75, 240, 150), Color3.fromRGB(85, 180, 255),
-    Color3.fromRGB(255, 100, 120), Color3.fromRGB(255, 213, 90), Color3.fromRGB(245, 245, 255),
-}
-for index, color in ipairs(colors) do
-    local swatch = button(scroll, "", UDim2.fromOffset(74 + (index - 1) * 40, 383), UDim2.fromOffset(34, 34))
-    swatch.Name = "Color" .. index
-    swatch.BackgroundColor3 = color
-    local stroke = make("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Thickness = 2, Transparency = 1 }, swatch)
-    table.insert(colorStrokes, { color = color, stroke = stroke })
-    connect(swatch.Activated, function() settings.Color = color; refreshStyles() end)
-end
-local hint = label(scroll, "Лёгкий режим: 24 метки, 6 обводок.\nИмена скрываются, если перекрывают друг друга.", UDim2.fromOffset(8, 432), UDim2.fromOffset(264, 32), 10)
-hint.TextColor3 = mutedColor
-
-local function hide(entry)
-    set(entry.gui, "Visible", false)
-end
-local function releaseHighlight(entry)
-    for _, slot in ipairs(highlightPool) do
-        if slot.entry == entry then
-            slot.entry = nil
-            set(slot.object, "Enabled", false)
-            slot.object.Adornee = nil
-        end
-    end
-    entry.highlight = nil
-end
-local function trackPlayer(player)
-    if player == localPlayer or tracked[player] or player.Parent ~= Players then return end
-    local group = make("Frame", {
-        Name = "Player_" .. player.UserId, Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1, Visible = false,
-    }, overlayGui)
-    local line = make("Frame", {
-        Name = "Tracer", AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = settings.Color, BackgroundTransparency = 0.4,
-        BorderSizePixel = 0, Visible = false, ZIndex = 1,
-    }, group)
-    local dot = make("Frame", {
-        Name = "FarDot", AnchorPoint = Vector2.new(0.5, 0.5),
-        Size = UDim2.fromOffset(mobile and 6 or 8, mobile and 6 or 8),
-        BackgroundColor3 = settings.Color, BorderSizePixel = 0, Visible = false, ZIndex = 3,
-    }, group)
-    round(dot, 8)
-    make("UIStroke", { Color = Color3.fromRGB(12, 17, 24), Thickness = 1 }, dot)
-    local tag = label(group, "", UDim2.fromOffset(0, 0), UDim2.fromOffset(154, 30), mobile and 10 or 11)
-    tag.Name = "PlayerLabel"
-    tag.TextStrokeTransparency = 0.55
-    tag.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-    tag.TextTruncate = Enum.TextTruncate.AtEnd
-    tag.Visible = false
-    tag.ZIndex = 4
-    tracked[player] = { player = player, gui = group, line = line, dot = dot, label = tag, nextLabel = 0, nextRay = 0 }
-    dirty = true
-end
-local function removePlayer(player)
-    local entry = tracked[player]
-    if not entry then return end
-    releaseHighlight(entry)
-    entry.removed = true
-    entry.gui:Destroy()
-    tracked[player] = nil
-    dirty = true
-end
-connect(Players.PlayerAdded, trackPlayer)
-connect(Players.PlayerRemoving, removePlayer)
-for _, player in ipairs(Players:GetPlayers()) do trackPlayer(player) end
-refreshStyles()
-
-local function syncHighlights(wanted, limit)
-    local wantedSet = {}
-    for _, entry in ipairs(wanted) do wantedSet[entry] = true end
-    for _, slot in ipairs(highlightPool) do
-        if slot.entry and not wantedSet[slot.entry] then releaseHighlight(slot.entry) end
-    end
-    while #highlightPool > limit do
-        local slot = table.remove(highlightPool)
-        if slot.entry then slot.entry.highlight = nil end
-        slot.object:Destroy()
-    end
-    for _, entry in ipairs(wanted) do
-        if not entry.highlight then
-            local free
-            for _, slot in ipairs(highlightPool) do
-                if not slot.entry then free = slot; break end
-            end
-            if not free and #highlightPool < limit then
-                free = { object = make("Highlight", {
-                    Name = "OutlineSlot" .. (#highlightPool + 1), Enabled = false,
-                    FillTransparency = 1, OutlineTransparency = 0,
-                }, highlightFolder) }
-                table.insert(highlightPool, free)
-            end
-            if free then
-                free.entry = entry
-                entry.highlight = free.object
-                free.object.Adornee = entry.character
-            end
-        end
-        if entry.highlight then
-            set(entry.highlight, "OutlineColor", settings.Color)
-            set(entry.highlight, "DepthMode", settings.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded)
-            set(entry.highlight, "Enabled", true)
-        end
-    end
-end
-local function alive(entry)
-    return not entry.removed and entry.player.Character == entry.character
-        and entry.root and entry.root:IsDescendantOf(Workspace)
-        and entry.humanoid and entry.humanoid.Parent and entry.humanoid.Health > 0
-end
-local loadedCount, totalCount = 0, 0
-local function refreshTargets(camera, origin)
-    local candidates, wanted = {}, {}
-    loadedCount, totalCount = 0, 0
-    for player, entry in pairs(tracked) do
-        totalCount = totalCount + 1
-        local character = player.Character
-        if entry.character ~= character then
-            releaseHighlight(entry)
-            entry.character = character
-            entry.clear, entry.nextLabel, entry.nextRay = nil, 0, 0
-            local old = character and character:FindFirstChild("ClientPlayerOutline")
-            if old and old:IsA("Highlight") then old:Destroy() end
-        end
-        entry.root = character and character:FindFirstChild("HumanoidRootPart")
-        if entry.root and not entry.root:IsA("BasePart") then entry.root = nil end
-        entry.head = character and character:FindFirstChild("Head")
-        entry.humanoid = character and character:FindFirstChildOfClass("Humanoid")
-        if alive(entry) then
-            loadedCount = loadedCount + 1
-            entry.distance = (entry.root.Position - origin).Magnitude
-            local target = entry.head and entry.head:IsA("BasePart") and entry.head.Position or entry.root.Position
-            local point, onScreen = camera:WorldToViewportPoint(target)
-            if settings.Enabled and onScreen and point.Z > 0 then table.insert(candidates, entry) end
-        end
-    end
-    table.sort(candidates, function(a, b)
-        if a.distance == b.distance then return a.player.UserId < b.player.UserId end
-        return a.distance < b.distance
+    connect(openButton.Activated, function()
+        if os.clock() >= (suppressUntil[openButton] or 0) then setMenuOpen(not panel.Visible) end
     end)
-    local selected = {}
-    active = {}
-    local markerLimit = settings.LiteMode and 24 or 64
-    local outlineLimit = settings.LiteMode and 6 or 16
-    for i = 1, math.min(#candidates, markerLimit) do
-        local entry = candidates[i]
-        active[#active + 1] = entry
-        selected[entry] = true
-        if settings.Outlines and entry.distance < settings.FarDistance and #wanted < outlineLimit then
-            wanted[#wanted + 1] = entry
-        end
-    end
-    for _, entry in pairs(tracked) do if not selected[entry] then hide(entry) end end
-    syncHighlights(wanted, outlineLimit)
-    if panel.Visible then
-        set(status, "Text", (settings.LiteMode and "LITE" or "FULL") .. " · меток " .. #active .. " · игроков " .. loadedCount .. "/" .. totalCount)
-    end
-end
-local rayParams = RaycastParams.new()
-rayParams.FilterType = Enum.RaycastFilterType.Exclude
-rayParams.IgnoreWater = true
-local lastCamera, filterCamera, filterCharacter
-local now, frameElapsed, nextScan = 0, 0, 0
-local previousEnabled = true
-local function hideAll()
-    for _, entry in pairs(tracked) do hide(entry) end
-    syncHighlights({}, settings.LiteMode and 6 or 16)
-end
-local function render(deltaTime)
-    if stopped then return end
-    now, frameElapsed = now + deltaTime, frameElapsed + deltaTime
-    if not settings.Enabled then
-        if previousEnabled or dirty then hideAll(); dirty = false end
-        previousEnabled = false
-        return
-    end
-    if not previousEnabled then dirty = true; previousEnabled = true end
-    local camera = Workspace.CurrentCamera
-    if camera ~= lastCamera then
-        lastCamera = camera
+    connect(UserInputService.InputBegan, function(input, processed)
+        if not processed and not UserInputService:GetFocusedTextBox()
+            and input.KeyCode == Enum.KeyCode.RightShift then setMenuOpen(not panel.Visible) end
+    end)
+    local function fitPanel()
+        local size = menuRoot.AbsoluteSize
+        if size.X <= 0 or size.Y <= 0 then return end
+        local scale = math.max(0.4, math.min(1, (size.X - 16) / 300))
+        panelScale.Scale = scale
+        -- Scroll the content on short screens instead of shrinking the touch targets.
+        panel.Size = UDim2.fromOffset(300, math.max(170, math.min(540, (size.Y - 16) / scale)))
+        place(panel, clampPosition(panel, panel.Position.X.Offset, panel.Position.Y.Offset))
+        place(openButton, clampPosition(openButton, openButton.Position.X.Offset, openButton.Position.Y.Offset))
         dirty = true
-        for _, entry in pairs(tracked) do entry.clear = nil end
-        if not camera then hideAll() end
     end
-    if not camera then return end
-    local interval = settings.LiteMode and 1 / 20 or 1 / 30
-    if not dirty and frameElapsed + 0.000001 < interval then return end
-    frameElapsed = frameElapsed % interval
-    local character = localPlayer.Character
-    local selfRoot = character and character:FindFirstChild("HumanoidRootPart")
-    local origin = selfRoot and selfRoot.Position or camera.CFrame.Position
-    if dirty or now >= nextScan then
-        refreshTargets(camera, origin)
-        nextScan = now + (settings.LiteMode and 0.35 or 0.2)
-        dirty = false
+    connect(menuRoot:GetPropertyChangedSignal("AbsoluteSize"), fitPanel)
+    fitPanel()
+
+    local toggleButtons, colorStrokes = {}, {}
+    local function refreshStyles()
+        for key, item in pairs(toggleButtons) do
+            set(item, "Text", settings[key] and "ВКЛ" or "ВЫКЛ")
+            set(item, "TextColor3", settings[key] and Color3.fromRGB(12, 24, 20) or mutedColor)
+            set(item, "BackgroundColor3", settings[key] and settings.Color or Color3.fromRGB(46, 54, 69))
+        end
+        set(dragHandle, "TextColor3", settings.Color)
+        set(openButton, "TextColor3", settings.Enabled and settings.Color or mutedColor)
+        for _, swatch in ipairs(colorStrokes) do
+            set(swatch.stroke, "Transparency", swatch.color == settings.Color and 0 or 1)
+        end
+        for _, entry in pairs(tracked) do
+            set(entry.line, "BackgroundColor3", settings.Color)
+            set(entry.dot, "BackgroundColor3", settings.Color)
+            entry.clear = nil
+        end
+        dirty = true
     end
-    if camera ~= filterCamera or character ~= filterCharacter then
-        filterCamera, filterCharacter = camera, character
-        local exclude = { camera, highlightFolder }
-        if character then exclude[#exclude + 1] = character end
-        rayParams.FilterDescendantsInstances = exclude
+    local function addToggle(key, text, index)
+        local row = button(scroll, "", UDim2.fromOffset(4, (index - 1) * 42), UDim2.fromOffset(270, 38))
+        row.Name = key .. "Toggle"
+        label(row, text, UDim2.fromOffset(10, 0), UDim2.fromOffset(194, 38), 12)
+        local badge = label(row, "", UDim2.fromOffset(204, 5), UDim2.fromOffset(58, 28), 11)
+        badge.BackgroundTransparency = 0
+        badge.TextXAlignment = Enum.TextXAlignment.Center
+        round(badge, 6)
+        toggleButtons[key] = badge
+        connect(row.Activated, function()
+            settings[key] = not settings[key]
+            refreshStyles()
+        end)
     end
-    local viewport = camera.ViewportSize
-    local lineStart = Vector2.new(viewport.X * 0.5, viewport.Y - (mobile and 64 or 24))
-    local occupied, labelCount = {}, 0
-    local labelLimit = settings.LiteMode and 6 or 14
-    for _, entry in ipairs(active) do
-        if not alive(entry) then
-            if not entry.removed then hide(entry); releaseHighlight(entry) end
-            dirty = true
-        else
-            local targetPosition = entry.head and entry.head.Parent == entry.character and entry.head.Position or entry.root.Position
-            local point, onScreen = camera:WorldToViewportPoint(targetPosition)
-            local visible = onScreen and point.Z > 0
-            if visible and not settings.ThroughWalls then
-                if now >= entry.nextRay or entry.clear == nil then
-                    local hit = Workspace:Raycast(camera.CFrame.Position, targetPosition - camera.CFrame.Position, rayParams)
-                    entry.clear = not hit or hit.Instance:IsDescendantOf(entry.character)
-                    entry.nextRay = now + (settings.LiteMode and 0.25 or 0.15)
-                end
-                visible = entry.clear == true
+    addToggle("Enabled", "Весь ESP", 1)
+    addToggle("Outlines", "Обводка рядом", 2)
+    addToggle("Tracers", "Лучи к игрокам", 3)
+    addToggle("FarDots", "Точки вдали", 4)
+    addToggle("Labels", "Имена и расстояния", 5)
+    addToggle("ThroughWalls", "Сквозь стены", 6)
+    addToggle("LiteMode", "Лёгкий режим", 7)
+    label(scroll, "Точки начиная с:", UDim2.fromOffset(8, 299), UDim2.fromOffset(250, 22), 12)
+    local distanceValue = label(scroll, "", UDim2.fromOffset(54, 328), UDim2.fromOffset(170, 36), 13)
+    distanceValue.TextXAlignment = Enum.TextXAlignment.Center
+    local minus = button(scroll, "−", UDim2.fromOffset(8, 328), UDim2.fromOffset(38, 36))
+    minus.Name = "DistanceMinus"
+    local plus = button(scroll, "+", UDim2.fromOffset(232, 328), UDim2.fromOffset(38, 36))
+    plus.Name = "DistancePlus"
+    local function changeDistance(delta)
+        settings.FarDistance = math.clamp(settings.FarDistance + delta, 25, 2000)
+        distanceValue.Text = tostring(settings.FarDistance) .. " studs"
+        dirty = true
+    end
+    connect(minus.Activated, function() changeDistance(-25) end)
+    connect(plus.Activated, function() changeDistance(25) end)
+    changeDistance(0)
+    label(scroll, "Цвет", UDim2.fromOffset(8, 383), UDim2.fromOffset(60, 34), 12)
+    local colors = {
+        Color3.fromRGB(75, 240, 150), Color3.fromRGB(85, 180, 255),
+        Color3.fromRGB(255, 100, 120), Color3.fromRGB(255, 213, 90), Color3.fromRGB(245, 245, 255),
+    }
+    for index, color in ipairs(colors) do
+        local swatch = button(scroll, "", UDim2.fromOffset(74 + (index - 1) * 40, 383), UDim2.fromOffset(34, 34))
+        swatch.Name = "Color" .. index
+        swatch.BackgroundColor3 = color
+        local stroke = make("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Thickness = 2, Transparency = 1 }, swatch)
+        table.insert(colorStrokes, { color = color, stroke = stroke })
+        connect(swatch.Activated, function() settings.Color = color; refreshStyles() end)
+    end
+    local hint = label(scroll, "Лёгкий режим: 24 метки, 6 обводок.\nРасстояние считается от текущей камеры.", UDim2.fromOffset(8, 432), UDim2.fromOffset(264, 32), 10)
+    hint.TextColor3 = mutedColor
+
+    local function hide(entry)
+        set(entry.gui, "Visible", false)
+    end
+    local function releaseHighlight(entry)
+        for _, slot in ipairs(highlightPool) do
+            if slot.entry == entry then
+                slot.entry = nil
+                set(slot.object, "Enabled", false)
+                slot.object.Adornee = nil
             end
-            local distance = (entry.root.Position - origin).Magnitude
-            -- In Lite mode, dots also cover nearby players outside the outline budget.
-            local showDot = settings.FarDots and (distance >= settings.FarDistance or (settings.Outlines and not entry.highlight))
-            local showLabel = false
-            if visible and settings.Labels and labelCount < labelLimit
-                and (not settings.LiteMode or distance <= 750) then
-                -- Put our small label below/to the side of the built-in name tag.
-                local width, height = math.min(154, viewport.X), 30
-                local x = math.clamp(point.X + 12, 0, math.max(0, viewport.X - width))
-                local y = math.clamp(point.Y + 12, 0, math.max(0, viewport.Y - height))
-                local overlaps = false
-                for _, box in ipairs(occupied) do
-                    if x < box.x + width + 4 and x + width + 4 > box.x
-                        and y < box.y + height + 4 and y + height + 4 > box.y then overlaps = true; break end
+        end
+        entry.highlight = nil
+    end
+    local function trackPlayer(player)
+        if player == localPlayer or tracked[player] or player.Parent ~= Players then return end
+        local group = make("Frame", {
+            Name = "Player_" .. player.UserId, Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1, Visible = false,
+        }, overlayGui)
+        local line = make("Frame", {
+            Name = "Tracer", AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundColor3 = settings.Color, BackgroundTransparency = 0.4,
+            BorderSizePixel = 0, Visible = false, ZIndex = 1,
+        }, group)
+        local dot = make("Frame", {
+            Name = "FarDot", AnchorPoint = Vector2.new(0.5, 0.5),
+            Size = UDim2.fromOffset(mobile and 6 or 8, mobile and 6 or 8),
+            BackgroundColor3 = settings.Color, BorderSizePixel = 0, Visible = false, ZIndex = 3,
+        }, group)
+        round(dot, 8)
+        make("UIStroke", { Color = Color3.fromRGB(12, 17, 24), Thickness = 1 }, dot)
+        local tag = label(group, "", UDim2.fromOffset(0, 0), UDim2.fromOffset(154, 30), mobile and 10 or 11)
+        tag.Name = "PlayerLabel"
+        tag.TextStrokeTransparency = 0.55
+        tag.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+        tag.TextTruncate = Enum.TextTruncate.AtEnd
+        tag.Visible = false
+        tag.ZIndex = 4
+        tracked[player] = { player = player, gui = group, line = line, dot = dot, label = tag, nextLabel = 0, nextRay = 0 }
+        dirty = true
+    end
+    local function removePlayer(player)
+        local entry = tracked[player]
+        if not entry then return end
+        releaseHighlight(entry)
+        entry.removed = true
+        entry.gui:Destroy()
+        tracked[player] = nil
+        dirty = true
+    end
+    connect(Players.PlayerAdded, trackPlayer)
+    connect(Players.PlayerRemoving, removePlayer)
+    for _, player in ipairs(Players:GetPlayers()) do trackPlayer(player) end
+    refreshStyles()
+
+    local function syncHighlights(wanted, limit)
+        local wantedSet = {}
+        for _, entry in ipairs(wanted) do wantedSet[entry] = true end
+        for _, slot in ipairs(highlightPool) do
+            if slot.entry and not wantedSet[slot.entry] then releaseHighlight(slot.entry) end
+        end
+        while #highlightPool > limit do
+            local slot = table.remove(highlightPool)
+            if slot.entry then slot.entry.highlight = nil end
+            slot.object:Destroy()
+        end
+        for _, entry in ipairs(wanted) do
+            if not entry.highlight then
+                local free
+                for _, slot in ipairs(highlightPool) do
+                    if not slot.entry then free = slot; break end
                 end
-                if not overlaps then
-                    occupied[#occupied + 1] = { x = x, y = y }
-                    labelCount = labelCount + 1
-                    showLabel = true
-                    set(entry.label, "Position", UDim2.fromOffset(x, y))
-                    if now >= entry.nextLabel then
-                        set(entry.label, "Text", entry.player.DisplayName .. "\n" .. math.floor(distance + 0.5) .. " studs")
-                        entry.nextLabel = now + (settings.LiteMode and 0.5 or 0.25)
+                if not free and #highlightPool < limit then
+                    free = { object = make("Highlight", {
+                        Name = "OutlineSlot" .. (#highlightPool + 1), Enabled = false,
+                        FillTransparency = 1, OutlineTransparency = 0,
+                    }, highlightFolder) }
+                    table.insert(highlightPool, free)
+                end
+                if free then
+                    free.entry = entry
+                    entry.highlight = free.object
+                    free.object.Adornee = entry.character
+                end
+            end
+            if entry.highlight then
+                set(entry.highlight, "OutlineColor", settings.Color)
+                set(entry.highlight, "DepthMode", settings.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded)
+                set(entry.highlight, "Enabled", true)
+            end
+        end
+    end
+    local function alive(entry)
+        return not entry.removed and entry.player.Character == entry.character
+            and entry.root and entry.root:IsDescendantOf(Workspace)
+            and entry.humanoid and entry.humanoid.Parent and entry.humanoid.Health > 0
+    end
+    local loadedCount, totalCount = 0, 0
+    local function refreshTargets(camera, origin)
+        local candidates, wanted = {}, {}
+        loadedCount, totalCount = 0, 0
+        for player, entry in pairs(tracked) do
+            totalCount = totalCount + 1
+            local character = player.Character
+            if entry.character ~= character then
+                releaseHighlight(entry)
+                entry.character = character
+                entry.clear, entry.nextLabel, entry.nextRay = nil, 0, 0
+                local old = character and character:FindFirstChild("ClientPlayerOutline")
+                if old and old:IsA("Highlight") then old:Destroy() end
+            end
+            entry.root = character and character:FindFirstChild("HumanoidRootPart")
+            if entry.root and not entry.root:IsA("BasePart") then entry.root = nil end
+            entry.head = character and character:FindFirstChild("Head")
+            entry.humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            if alive(entry) then
+                loadedCount = loadedCount + 1
+                entry.distance = (entry.root.Position - origin).Magnitude
+                local target = entry.head and entry.head:IsA("BasePart") and entry.head.Position or entry.root.Position
+                local point, onScreen = camera:WorldToViewportPoint(target)
+                if settings.Enabled and onScreen and point.Z > 0 then table.insert(candidates, entry) end
+            end
+        end
+        table.sort(candidates, function(a, b)
+            if a.distance == b.distance then return a.player.UserId < b.player.UserId end
+            return a.distance < b.distance
+        end)
+        local selected = {}
+        active = {}
+        local markerLimit = settings.LiteMode and 24 or 64
+        local outlineLimit = settings.LiteMode and 6 or 16
+        for i = 1, math.min(#candidates, markerLimit) do
+            local entry = candidates[i]
+            active[#active + 1] = entry
+            selected[entry] = true
+            if settings.Outlines and entry.distance < settings.FarDistance and #wanted < outlineLimit then
+                wanted[#wanted + 1] = entry
+            end
+        end
+        for _, entry in pairs(tracked) do if not selected[entry] then hide(entry) end end
+        syncHighlights(wanted, outlineLimit)
+        if panel.Visible then
+            set(status, "Text", (settings.LiteMode and "LITE" or "FULL") .. " · меток " .. #active .. " · игроков " .. loadedCount .. "/" .. totalCount)
+        end
+    end
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.IgnoreWater = true
+    local lastCamera, lastSubject, lastCameraType, lastScanPosition
+    local filterCamera, filterCharacter
+    local now, frameElapsed, nextScan = 0, 0, 0
+    local previousEnabled = true
+    local function hideAll()
+        for _, entry in pairs(tracked) do hide(entry) end
+        syncHighlights({}, settings.LiteMode and 6 or 16)
+    end
+    local function render(deltaTime)
+        if stopped then return end
+        now, frameElapsed = now + deltaTime, frameElapsed + deltaTime
+        if not settings.Enabled then
+            if previousEnabled or dirty then hideAll(); dirty = false end
+            previousEnabled = false
+            return
+        end
+        if not previousEnabled then dirty = true; previousEnabled = true end
+        local camera = Workspace.CurrentCamera
+        local subject = camera and camera.CameraSubject
+        local cameraType = camera and camera.CameraType
+        if camera ~= lastCamera or subject ~= lastSubject or cameraType ~= lastCameraType then
+            lastCamera = camera
+            lastSubject, lastCameraType = subject, cameraType
+            lastScanPosition = nil
+            dirty = true
+            for _, entry in pairs(tracked) do entry.clear = nil; entry.nextLabel = 0 end
+            if not camera then hideAll() end
+        end
+        if not camera then return end
+        local interval = settings.LiteMode and 1 / 20 or 1 / 30
+        if not dirty and frameElapsed + 0.000001 < interval then return end
+        frameElapsed = frameElapsed % interval
+        local character = localPlayer.Character
+        -- A remotely controlled drone can be kilometres from the avatar.
+        -- Rank players, switch near/far visuals and show distances from the VIEW.
+        local origin = camera.CFrame.Position
+        if lastScanPosition and (origin - lastScanPosition).Magnitude > 80 then dirty = true end
+        if dirty or now >= nextScan then
+            refreshTargets(camera, origin)
+            lastScanPosition = origin
+            nextScan = now + (settings.LiteMode and 0.35 or 0.2)
+            dirty = false
+        end
+        if camera ~= filterCamera or character ~= filterCharacter then
+            filterCamera, filterCharacter = camera, character
+            local exclude = { camera, highlightFolder }
+            if character then exclude[#exclude + 1] = character end
+            rayParams.FilterDescendantsInstances = exclude
+        end
+        local viewport = camera.ViewportSize
+        local lineStart = Vector2.new(viewport.X * 0.5, viewport.Y - (mobile and 64 or 24))
+        local occupied, labelCount = {}, 0
+        local labelLimit = settings.LiteMode and 6 or 14
+        for _, entry in ipairs(active) do
+            if not alive(entry) then
+                if not entry.removed then hide(entry); releaseHighlight(entry) end
+                dirty = true
+            else
+                local targetPosition = entry.head and entry.head.Parent == entry.character and entry.head.Position or entry.root.Position
+                local point, onScreen = camera:WorldToViewportPoint(targetPosition)
+                local visible = onScreen and point.Z > 0
+                if visible and not settings.ThroughWalls then
+                    if now >= entry.nextRay or entry.clear == nil then
+                        local hit = Workspace:Raycast(camera.CFrame.Position, targetPosition - camera.CFrame.Position, rayParams)
+                        entry.clear = not hit or hit.Instance:IsDescendantOf(entry.character)
+                        entry.nextRay = now + (settings.LiteMode and 0.25 or 0.15)
+                    end
+                    visible = entry.clear == true
+                end
+                local distance = (entry.root.Position - origin).Magnitude
+                -- In Lite mode, dots also cover nearby players outside the outline budget.
+                local showDot = settings.FarDots and (distance >= settings.FarDistance or (settings.Outlines and not entry.highlight))
+                local showLabel = false
+                if visible and settings.Labels and labelCount < labelLimit
+                    and (not settings.LiteMode or distance <= 750) then
+                    -- Put our small label below/to the side of the built-in name tag.
+                    local width, height = math.min(154, viewport.X), 30
+                    local x = math.clamp(point.X + 12, 0, math.max(0, viewport.X - width))
+                    local y = math.clamp(point.Y + 12, 0, math.max(0, viewport.Y - height))
+                    local overlaps = false
+                    for _, box in ipairs(occupied) do
+                        if x < box.x + width + 4 and x + width + 4 > box.x
+                            and y < box.y + height + 4 and y + height + 4 > box.y then overlaps = true; break end
+                    end
+                    if not overlaps then
+                        occupied[#occupied + 1] = { x = x, y = y }
+                        labelCount = labelCount + 1
+                        showLabel = true
+                        set(entry.label, "Position", UDim2.fromOffset(x, y))
+                        if now >= entry.nextLabel then
+                            set(entry.label, "Text", entry.player.DisplayName .. "\n" .. math.floor(distance + 0.5) .. " studs")
+                            entry.nextLabel = now + (settings.LiteMode and 0.5 or 0.25)
+                        end
+                    end
+                end
+                set(entry.gui, "Visible", visible and (showDot or settings.Tracers or showLabel))
+                set(entry.label, "Visible", showLabel)
+                if visible then
+                    set(entry.dot, "Visible", showDot)
+                    if showDot then set(entry.dot, "Position", UDim2.fromOffset(point.X, point.Y)) end
+                    set(entry.line, "Visible", settings.Tracers)
+                    if settings.Tracers then
+                        local target = Vector2.new(point.X, point.Y)
+                        local delta, midpoint = target - lineStart, (target + lineStart) * 0.5
+                        set(entry.line, "Position", UDim2.fromOffset(midpoint.X, midpoint.Y))
+                        set(entry.line, "Size", UDim2.fromOffset(delta.Magnitude, 1))
+                        set(entry.line, "Rotation", math.deg(math.atan2(delta.Y, delta.X)))
                     end
                 end
             end
-            set(entry.gui, "Visible", visible and (showDot or settings.Tracers or showLabel))
-            set(entry.label, "Visible", showLabel)
-            if visible then
-                set(entry.dot, "Visible", showDot)
-                if showDot then set(entry.dot, "Position", UDim2.fromOffset(point.X, point.Y)) end
-                set(entry.line, "Visible", settings.Tracers)
-                if settings.Tracers then
-                    local target = Vector2.new(point.X, point.Y)
-                    local delta, midpoint = target - lineStart, (target + lineStart) * 0.5
-                    set(entry.line, "Position", UDim2.fromOffset(midpoint.X, midpoint.Y))
-                    set(entry.line, "Size", UDim2.fromOffset(delta.Magnitude, 1))
-                    set(entry.line, "Rotation", math.deg(math.atan2(delta.Y, delta.X)))
-                end
-            end
         end
     end
+    cleanup = function(recovering)
+        if stopped then return end
+        stopped = true
+        if not recovering then
+            unloaded = true
+            if playerGui:GetAttribute(OWNER_ATTRIBUTE) == runToken then
+                playerGui:SetAttribute(OWNER_ATTRIBUTE, nil)
+            end
+        end
+        RunService:UnbindFromRenderStep(RENDER_NAME)
+        for _, connection in ipairs(connections) do connection:Disconnect() end
+        drag = nil
+        active, tracked, highlightPool = {}, {}, {}
+        highlightFolder:Destroy()
+        overlayGui:Destroy()
+        menuGui:Destroy()
+    end
+    local function recoverInterface()
+        if stopped then return end
+        local saved = {
+            panelPosition = panel.Position, buttonPosition = openButton.Position,
+            menuOpen = panel.Visible, scrollPosition = scroll.CanvasPosition,
+        }
+        cleanup(true)
+        task.defer(function()
+            if not unloaded and playerGui.Parent
+                and playerGui:GetAttribute(OWNER_ATTRIBUTE) == runToken then
+                startSession(saved)
+            end
+        end)
+    end
+    local function keepGuiAvailable(container)
+        connect(container:GetPropertyChangedSignal("Enabled"), function()
+            if not stopped and not container.Enabled then
+                container.Enabled = true
+                dirty = true
+            end
+        end)
+        connect(container.Destroying, recoverInterface)
+        connect(container.AncestryChanged, function()
+            if not stopped and container.Parent ~= playerGui then
+                local restored = pcall(function() container.Parent = playerGui end)
+                if not restored then recoverInterface() end
+            end
+        end)
+        set(container, "Enabled", true)
+    end
+    keepGuiAvailable(menuGui)
+    keepGuiAvailable(overlayGui)
+    -- These roots are always visible; the panel itself still obeys minimize.
+    for _, object in ipairs({ menuRoot, openButton }) do
+        connect(object:GetPropertyChangedSignal("Visible"), function()
+            if not stopped then set(object, "Visible", true) end
+        end)
+    end
+    connect(shutdown.Event, function() cleanup() end)
+    -- Do not tie the overlay to a temporary vehicle/loader script's lifetime.
+    local playerScripts = localPlayer:FindFirstChild("PlayerScripts")
+    if typeof(script) == "Instance" and playerScripts and script:IsDescendantOf(playerScripts) then
+        connect(script.Destroying, function() cleanup() end)
+    end
+    if savedUI then
+        panel.Position, openButton.Position = savedUI.panelPosition, savedUI.buttonPosition
+        if savedUI.scrollPosition then scroll.CanvasPosition = savedUI.scrollPosition end
+        setMenuOpen(savedUI.menuOpen)
+        fitPanel()
+    end
+    -- Read a vehicle camera after the normal camera/character render callbacks.
+    RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Last.Value + 1, render)
 end
-cleanup = function()
-    if stopped then return end
-    stopped = true
-    RunService:UnbindFromRenderStep(RENDER_NAME)
-    for _, connection in ipairs(connections) do connection:Disconnect() end
-    drag = nil
-    active, tracked, highlightPool = {}, {}, {}
-    highlightFolder:Destroy()
-    overlayGui:Destroy()
-    menuGui:Destroy()
-end
-connect(shutdown.Event, cleanup)
-connect(menuGui.Destroying, cleanup)
-if typeof(script) == "Instance" then connect(script.Destroying, cleanup) end
-RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Camera.Value + 1, render)
+
+startSession()
