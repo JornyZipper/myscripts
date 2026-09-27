@@ -1,7 +1,7 @@
--- Player ESP v3.2: drone-camera support and recovery after game HUD changes.
+-- Player ESP v3.3: player outlines at any streamed-in distance.
 -- Replace the entire previous LocalScript in StarterPlayerScripts.
 -- Drag the title or ESP button. Minus minimizes; X / "Удалить ESP" unloads.
--- Mobile starts in Lite mode: 20 Hz, 24 markers, 6 nearby outlines, 6 labels.
+-- Mobile starts in Lite mode: 20 Hz, 24 markers, 6 outlines, 6 labels.
 -- Distant/unloaded server characters cannot be recovered by a LocalScript.
 -- ScreenGui priority affects 2D markers, not Roblox's system UI or 3D Highlight.
 
@@ -33,7 +33,7 @@ playerGui:SetAttribute(OWNER_ATTRIBUTE, runToken)
 local function startSession(savedUI)
     if unloaded or playerGui:GetAttribute(OWNER_ATTRIBUTE) ~= runToken then return end
     sessionNumber = sessionNumber + 1
-    local RENDER_NAME = LEGACY_RENDER .. "_v32_" .. runToken .. "_" .. sessionNumber
+    local RENDER_NAME = LEGACY_RENDER .. "_v33_" .. runToken .. "_" .. sessionNumber
     local oldMenu = playerGui:FindFirstChild(GUI_NAME)
     if oldMenu then
         local stop = oldMenu:FindFirstChild("Shutdown")
@@ -115,7 +115,7 @@ local function startSession(savedUI)
     round(panel, 12)
     make("UIStroke", { Color = Color3.fromRGB(55, 67, 88), Thickness = 1 }, panel)
     local panelScale = make("UIScale", { Scale = 1 }, panel)
-    local dragHandle = button(panel, "PLAYER ESP  ·  v3.2", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
+    local dragHandle = button(panel, "PLAYER ESP  ·  v3.3", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
     dragHandle.Name = "DragHandle"
     dragHandle.BackgroundTransparency = 1
     dragHandle.TextXAlignment = Enum.TextXAlignment.Left
@@ -250,7 +250,7 @@ local function startSession(savedUI)
         end)
     end
     addToggle("Enabled", "Весь ESP", 1)
-    addToggle("Outlines", "Обводка рядом", 2)
+    addToggle("Outlines", "Обводка игроков", 2)
     addToggle("Tracers", "Лучи к игрокам", 3)
     addToggle("FarDots", "Точки вдали", 4)
     addToggle("Labels", "Имена и расстояния", 5)
@@ -422,7 +422,9 @@ local function startSession(savedUI)
             local entry = candidates[i]
             active[#active + 1] = entry
             selected[entry] = true
-            if settings.Outlines and entry.distance < settings.FarDistance and #wanted < outlineLimit then
+            -- FarDistance controls dots only. Outlines have no distance cutoff;
+            -- keep the number budget so distant outlines don't overload phones.
+            if settings.Outlines and #wanted < outlineLimit then
                 wanted[#wanted + 1] = entry
             end
         end
