@@ -1,0 +1,448 @@
+-- Player ESP: outlines, distant dots, tracers, and a settings menu.
+-- Roblox Studio: replace your old LocalScript in
+-- StarterPlayer > StarterPlayerScripts with this entire file.
+-- Right Shift or the ESP button opens/closes the menu.
+-- Distances are in Roblox studs. Only replicated characters can be tracked.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local localPlayer = Players.LocalPlayer
+assert(localPlayer, "Use a LocalScript in StarterPlayerScripts")
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+local settings = {
+    Enabled = true,
+    Outlines = true,
+    Tracers = true,
+    FarDots = true,
+    Labels = true,
+    ThroughWalls = true,
+    FarDistance = 150,
+    Color = Color3.fromRGB(75, 240, 150),
+}
+
+local GUI_NAME = "PlayerESPMenu"
+local RENDER_NAME = "PlayerESP_Render_" .. localPlayer.UserId
+local HIGHLIGHT_NAME = "PlayerESPHighlights_" .. localPlayer.UserId
+local oldMenu = playerGui:FindFirstChild(GUI_NAME)
+if oldMenu then
+    local shutdown = oldMenu:FindFirstChild("Shutdown")
+    if shutdown and shutdown:IsA("BindableEvent") then
+        shutdown:Fire()
+    end
+    oldMenu:Destroy()
+end
+RunService:UnbindFromRenderStep(RENDER_NAME)
+
+local oldOverlay = playerGui:FindFirstChild("PlayerESPOverlay")
+if oldOverlay then oldOverlay:Destroy() end
+local oldHighlights = Workspace:FindFirstChild(HIGHLIGHT_NAME)
+if oldHighlights then oldHighlights:Destroy() end
+
+local connections = {}
+local tracked = {}
+local stopped = false
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(connections, connection)
+    return connection
+end
+
+local function make(className, properties, parent)
+    local object = Instance.new(className)
+    for key, value in pairs(properties) do
+        object[key] = value
+    end
+    object.Parent = parent
+    return object
+end
+
+local function rounded(object, radius)
+    make("UICorner", { CornerRadius = UDim.new(0, radius) }, object)
+end
+
+local menuGui = make("ScreenGui", {
+    Name = GUI_NAME,
+    ResetOnSpawn = false,
+    DisplayOrder = 101,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+-- This separate GUI uses viewport coordinates so tracers align with players.
+local overlayGui = make("ScreenGui", {
+    Name = "PlayerESPOverlay",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    ScreenInsets = Enum.ScreenInsets.None,
+    DisplayOrder = 100,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+local highlightFolder = make("Folder", { Name = HIGHLIGHT_NAME }, Workspace)
+local shutdown = make("BindableEvent", { Name = "Shutdown" }, menuGui)
+local menuRoot = make("Frame", {
+    Name = "MenuRoot",
+    Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1,
+}, menuGui)
+
+local textColor = Color3.fromRGB(236, 240, 247)
+local mutedColor = Color3.fromRGB(157, 169, 189)
+local rowColor = Color3.fromRGB(32, 39, 52)
+
+local function label(parent, text, position, size, fontSize)
+    return make("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = position,
+        Size = size,
+        Text = text,
+        TextColor3 = textColor,
+        Font = Enum.Font.Gotham,
+        TextSize = fontSize or 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, parent)
+end
+
+local function button(parent, text, position, size)
+    local result = make("TextButton", {
+        BackgroundColor3 = rowColor,
+        BorderSizePixel = 0,
+        Position = position,
+        Size = size,
+        Text = text,
+        TextColor3 = textColor,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 14,
+        AutoButtonColor = true,
+    }, parent)
+    rounded(result, 8)
+    return result
+end
+
+local openButton = button(menuRoot, "ESP  /  МЕНЮ", UDim2.fromOffset(12, 12), UDim2.fromOffset(122, 36))
+openButton.Name = "OpenMenu"
+local panel = make("Frame", {
+    Name = "Panel",
+    Position = UDim2.fromOffset(12, 56),
+    Size = UDim2.fromOffset(288, 454),
+    BackgroundColor3 = Color3.fromRGB(19, 24, 34),
+    BorderSizePixel = 0,
+    Active = true,
+}, menuRoot)
+rounded(panel, 12)
+make("UIStroke", { Color = Color3.fromRGB(55, 67, 88), Thickness = 1 }, panel)
+local panelScale = make("UIScale", { Scale = 1 }, panel)
+local title = label(panel, "PLAYER ESP", UDim2.fromOffset(16, 12), UDim2.fromOffset(208, 26), 19)
+title.Font = Enum.Font.GothamBold
+local subtitle = label(panel, "Right Shift — открыть / скрыть", UDim2.fromOffset(16, 39), UDim2.fromOffset(254, 18), 11)
+subtitle.TextColor3 = mutedColor
+local closeButton = button(panel, "×", UDim2.fromOffset(246, 12), UDim2.fromOffset(28, 28))
+closeButton.Name = "CloseMenu"
+closeButton.Modal = true
+
+local function setMenuOpen(isOpen)
+    panel.Visible = isOpen
+    closeButton.Modal = isOpen
+end
+connect(openButton.Activated, function() setMenuOpen(not panel.Visible) end)
+connect(closeButton.Activated, function() setMenuOpen(false) end)
+connect(UserInputService.InputBegan, function(input, gameProcessed)
+    if not gameProcessed and not UserInputService:GetFocusedTextBox()
+        and input.KeyCode == Enum.KeyCode.RightShift then
+        setMenuOpen(not panel.Visible)
+    end
+end)
+
+local function fitPanel()
+    local size = menuRoot.AbsoluteSize
+    if size.X > 0 and size.Y > 0 then
+        panelScale.Scale = math.max(0.25, math.min(1, (size.X - 24) / 288, (size.Y - 68) / 454))
+    end
+end
+connect(menuRoot:GetPropertyChangedSignal("AbsoluteSize"), fitPanel)
+fitPanel()
+
+local toggleButtons = {}
+local colorStrokes = {}
+local function refreshStyles()
+    for key, item in pairs(toggleButtons) do
+        item.Text = settings[key] and "ВКЛ" or "ВЫКЛ"
+        item.TextColor3 = settings[key] and Color3.fromRGB(12, 24, 20) or mutedColor
+        item.BackgroundColor3 = settings[key] and settings.Color or Color3.fromRGB(46, 54, 69)
+    end
+    title.TextColor3 = settings.Color
+    openButton.TextColor3 = settings.Enabled and settings.Color or mutedColor
+    for _, swatch in ipairs(colorStrokes) do
+        swatch.stroke.Transparency = swatch.color == settings.Color and 0 or 1
+    end
+    for _, entry in pairs(tracked) do
+        entry.line.BackgroundColor3 = settings.Color
+        entry.dot.BackgroundColor3 = settings.Color
+        if entry.highlight then
+            entry.highlight.OutlineColor = settings.Color
+            entry.highlight.DepthMode = settings.ThroughWalls
+                and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+        end
+    end
+end
+
+local function addToggle(key, text, index)
+    local row = make("Frame", {
+        Name = key .. "Row",
+        Position = UDim2.fromOffset(12, 66 + (index - 1) * 38),
+        Size = UDim2.fromOffset(264, 32),
+        BackgroundColor3 = rowColor,
+        BorderSizePixel = 0,
+    }, panel)
+    rounded(row, 7)
+    label(row, text, UDim2.fromOffset(10, 0), UDim2.fromOffset(185, 32), 13)
+    local toggle = button(row, "", UDim2.fromOffset(202, 4), UDim2.fromOffset(56, 24))
+    toggle.Name = key .. "Toggle"
+    toggle.TextSize = 11
+    toggleButtons[key] = toggle
+    connect(toggle.Activated, function()
+        settings[key] = not settings[key]
+        refreshStyles()
+    end)
+end
+
+addToggle("Enabled", "ESP включён", 1)
+addToggle("Outlines", "Обводка игроков", 2)
+addToggle("Tracers", "Лучи к игрокам", 3)
+addToggle("FarDots", "Точки вдали", 4)
+addToggle("Labels", "Имя и расстояние", 5)
+addToggle("ThroughWalls", "Видеть сквозь стены", 6)
+
+label(panel, "Точки начиная с:", UDim2.fromOffset(16, 297), UDim2.fromOffset(170, 23), 13)
+local distanceValue = label(panel, "", UDim2.fromOffset(58, 326), UDim2.fromOffset(172, 28), 14)
+distanceValue.TextXAlignment = Enum.TextXAlignment.Center
+local minus = button(panel, "−", UDim2.fromOffset(16, 324), UDim2.fromOffset(32, 30))
+minus.Name = "DistanceMinus"
+local plus = button(panel, "+", UDim2.fromOffset(240, 324), UDim2.fromOffset(32, 30))
+plus.Name = "DistancePlus"
+local function changeDistance(delta)
+    settings.FarDistance = math.clamp(settings.FarDistance + delta, 25, 2000)
+    distanceValue.Text = tostring(settings.FarDistance) .. " studs"
+end
+connect(minus.Activated, function() changeDistance(-25) end)
+connect(plus.Activated, function() changeDistance(25) end)
+changeDistance(0)
+
+label(panel, "Цвет", UDim2.fromOffset(16, 367), UDim2.fromOffset(60, 28), 13)
+local colors = {
+    Color3.fromRGB(75, 240, 150),
+    Color3.fromRGB(85, 180, 255),
+    Color3.fromRGB(255, 100, 120),
+    Color3.fromRGB(255, 213, 90),
+    Color3.fromRGB(245, 245, 255),
+}
+for index, color in ipairs(colors) do
+    local swatch = button(panel, "", UDim2.fromOffset(80 + (index - 1) * 39, 366), UDim2.fromOffset(28, 28))
+    swatch.Name = "Color" .. index
+    swatch.BackgroundColor3 = color
+    local stroke = make("UIStroke", {
+        Color = Color3.fromRGB(255, 255, 255),
+        Thickness = 2,
+        Transparency = 1,
+    }, swatch)
+    table.insert(colorStrokes, { color = color, stroke = stroke })
+    connect(swatch.Activated, function()
+        settings.Color = color
+        refreshStyles()
+    end)
+end
+local status = label(panel, "", UDim2.fromOffset(16, 409), UDim2.fromOffset(260, 22), 11)
+status.TextColor3 = mutedColor
+
+local function removePlayer(player)
+    local entry = tracked[player]
+    if not entry then return end
+    if entry.highlight then entry.highlight:Destroy() end
+    entry.gui:Destroy()
+    tracked[player] = nil
+end
+
+local function trackPlayer(player)
+    if player == localPlayer or tracked[player] or player.Parent ~= Players then return end
+    local group = make("Frame", {
+        Name = "Player_" .. player.UserId,
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Visible = false,
+    }, overlayGui)
+    local line = make("Frame", {
+        Name = "Tracer",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = settings.Color,
+        BackgroundTransparency = 0.22,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 1,
+    }, group)
+    local dot = make("Frame", {
+        Name = "FarDot",
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Size = UDim2.fromOffset(9, 9),
+        BackgroundColor3 = settings.Color,
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = 3,
+    }, group)
+    rounded(dot, 9)
+    make("UIStroke", { Color = Color3.fromRGB(12, 17, 24), Thickness = 2 }, dot)
+    local tag = label(group, "", UDim2.fromOffset(0, 0), UDim2.fromOffset(208, 32), 12)
+    tag.Name = "PlayerLabel"
+    tag.AnchorPoint = Vector2.new(0.5, 1)
+    tag.TextXAlignment = Enum.TextXAlignment.Center
+    tag.TextYAlignment = Enum.TextYAlignment.Bottom
+    tag.TextStrokeTransparency = 0.25
+    tag.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    tag.Visible = false
+    tag.ZIndex = 4
+    tracked[player] = { gui = group, line = line, dot = dot, label = tag }
+end
+
+connect(Players.PlayerAdded, trackPlayer)
+connect(Players.PlayerRemoving, removePlayer)
+for _, player in ipairs(Players:GetPlayers()) do trackPlayer(player) end
+refreshStyles()
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+local labelElapsed = 1
+local rayElapsed = 1
+
+local function render(deltaTime)
+    if stopped then return end
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        for _, entry in pairs(tracked) do
+            entry.gui.Visible = false
+            if entry.highlight then entry.highlight.Enabled = false end
+        end
+        return
+    end
+
+    labelElapsed = labelElapsed + deltaTime
+    rayElapsed = rayElapsed + deltaTime
+    local updateLabels = labelElapsed >= 0.15
+    local updateRays = rayElapsed >= 0.10
+    if updateLabels then labelElapsed = 0 end
+    if updateRays then rayElapsed = 0 end
+
+    local selfCharacter = localPlayer.Character
+    local selfRoot = selfCharacter and selfCharacter:FindFirstChild("HumanoidRootPart")
+    local distanceOrigin = selfRoot and selfRoot.Position or camera.CFrame.Position
+    local viewport = camera.ViewportSize
+    local lineStart = Vector2.new(viewport.X * 0.5, viewport.Y - 24)
+    local exclude = { camera, highlightFolder }
+    if selfCharacter then table.insert(exclude, selfCharacter) end
+    rayParams.FilterDescendantsInstances = exclude
+    local loadedCount, totalCount = 0, 0
+
+    for player, entry in pairs(tracked) do
+        totalCount = totalCount + 1
+        entry.gui.Visible = false
+        if entry.highlight then entry.highlight.Enabled = false end
+        local character = player.Character
+        if character ~= entry.character then
+            if entry.highlight then entry.highlight:Destroy() end
+            entry.highlight = nil
+            entry.character = character
+            entry.clear = nil
+            entry.label.Text = ""
+            -- Remove the outline created by the previous version of this script.
+            local legacy = character and character:FindFirstChild("ClientPlayerOutline")
+            if legacy and legacy:IsA("Highlight") then legacy:Destroy() end
+        end
+
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        local alive = root and root:IsA("BasePart") and root:IsDescendantOf(Workspace)
+            and humanoid and humanoid.Health > 0
+        if alive then
+            loadedCount = loadedCount + 1
+            if settings.Enabled then
+                if settings.Outlines then
+                    if not entry.highlight then
+                        entry.highlight = make("Highlight", {
+                            Name = "Outline_" .. player.UserId,
+                            Adornee = character,
+                            FillTransparency = 1,
+                            OutlineTransparency = 0,
+                            OutlineColor = settings.Color,
+                            DepthMode = settings.ThroughWalls
+                                and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded,
+                        }, highlightFolder)
+                    end
+                    entry.highlight.Enabled = true
+                end
+
+                local distance = (root.Position - distanceOrigin).Magnitude
+                local head = character:FindFirstChild("Head")
+                local targetPosition = head and head:IsA("BasePart") and head.Position or root.Position
+                local projected, onScreen = camera:WorldToViewportPoint(targetPosition)
+                if onScreen and projected.Z > 0 then
+                    if not settings.ThroughWalls and (updateRays or entry.clear == nil) then
+                        local hit = Workspace:Raycast(camera.CFrame.Position, targetPosition - camera.CFrame.Position, rayParams)
+                        entry.clear = not hit or hit.Instance:IsDescendantOf(character)
+                    end
+                    local visible = settings.ThroughWalls or entry.clear == true
+                    entry.gui.Visible = visible
+                    if visible then
+                        local target = Vector2.new(projected.X, projected.Y)
+                        entry.dot.Position = UDim2.fromOffset(target.X, target.Y)
+                        entry.dot.Visible = settings.FarDots and distance >= settings.FarDistance
+                        entry.line.Visible = settings.Tracers
+                        if settings.Tracers then
+                            local delta = target - lineStart
+                            local midpoint = (target + lineStart) * 0.5
+                            entry.line.Position = UDim2.fromOffset(midpoint.X, midpoint.Y)
+                            entry.line.Size = UDim2.fromOffset(delta.Magnitude, 1.5)
+                            entry.line.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+                        end
+                        entry.label.Visible = settings.Labels
+                        entry.label.Position = UDim2.fromOffset(
+                            math.clamp(target.X, math.min(108, viewport.X / 2), math.max(viewport.X - 108, viewport.X / 2)),
+                            math.clamp(target.Y - 10, 34, math.max(34, viewport.Y - 4))
+                        )
+                        if settings.Labels and (updateLabels or entry.label.Text == "") then
+                            entry.label.Text = player.DisplayName .. "\n" .. tostring(math.floor(distance + 0.5)) .. " studs"
+                        end
+                    end
+                end
+            end
+        elseif entry.highlight then
+            entry.highlight:Destroy()
+            entry.highlight = nil
+            entry.clear = nil
+        end
+    end
+    if updateLabels then
+        status.Text = "Игроков загружено: " .. loadedCount .. " / " .. totalCount
+    end
+end
+
+local function cleanup()
+    if stopped then return end
+    stopped = true
+    RunService:UnbindFromRenderStep(RENDER_NAME)
+    for _, connection in ipairs(connections) do connection:Disconnect() end
+    for _, entry in pairs(tracked) do
+        if entry.highlight then entry.highlight:Destroy() end
+    end
+    tracked = {}
+    highlightFolder:Destroy()
+    overlayGui:Destroy()
+    menuGui:Destroy()
+end
+
+connect(shutdown.Event, cleanup)
+connect(menuGui.Destroying, cleanup)
+connect(script.Destroying, cleanup)
+RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Camera.Value + 1, render)
