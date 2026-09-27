@@ -1,5 +1,5 @@
 -- Player ESP v3.3: player outlines at any streamed-in distance.
--- Replace the entire previous LocalScript in StarterPlayerScripts.
+-- Replace the entire previous LocalScript in StarterPlayerScriptsF.
 -- Drag the title or ESP button. Minus minimizes; X / "Удалить ESP" unloads.
 -- Mobile starts in Lite mode: 20 Hz, 24 markers, 6 outlines, 6 labels.
 -- Distant/unloaded server characters cannot be recovered by a LocalScript.
