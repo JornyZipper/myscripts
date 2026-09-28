@@ -1,6 +1,8 @@
---// Mod Menu From Zero
+--// ScriptMM2
 --// Put this LocalScript in: StarterPlayer > StarterPlayerScripts
 --// Designed for your own Roblox Studio game.
+
+local VERSION = "V0.5.0"
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -154,7 +156,7 @@ local function create(className, properties, parent)
 end
 
 --// GUI
-local ScreenGui = create("ScreenGui", {
+local ScriptMM2 = create("ScreenGui", {
     Name = "ModMenuFromZero",
     ResetOnSpawn = false,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -163,7 +165,7 @@ local ScreenGui = create("ScreenGui", {
 
 local Scale = create("UIScale", {
     Scale = 1,
-}, ScreenGui)
+}, ScriptMM2)
 
 local Main = create("Frame", {
     Name = "Main",
@@ -172,7 +174,7 @@ local Main = create("Frame", {
     Size = UDim2.fromOffset(470, 570),
     BackgroundColor3 = Color3.fromRGB(22, 22, 27),
     BorderSizePixel = 0,
-}, ScreenGui)
+}, ScriptMM2)
 
 create("UICorner", {
     CornerRadius = UDim.new(0, 12),
@@ -201,7 +203,7 @@ local Title = create("TextLabel", {
     Position = UDim2.fromOffset(16, 7),
     Size = UDim2.new(1, -120, 0, 24),
     Font = Enum.Font.GothamBold,
-    Text = "Mod Menu | PC",
+    Text = "ScriptMM2 | PC  •  " .. VERSION,
     TextColor3 = Color3.fromRGB(240, 240, 245),
     TextSize = 18,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -291,7 +293,7 @@ local reopen = create("TextButton", {
     Visible = false,
     Active = true,
     AutoButtonColor = false,
-}, ScreenGui)
+}, ScriptMM2)
 
 create("UICorner", {
     CornerRadius = UDim.new(0, 10),
@@ -304,7 +306,7 @@ local MobileFlyControls = create("Frame", {
     Size = UDim2.fromOffset(62, 132),
     BackgroundTransparency = 1,
     Visible = false,
-}, ScreenGui)
+}, ScriptMM2)
 
 local FlyUpButton = create("TextButton", {
     Name = "FlyUp",
@@ -1953,9 +1955,9 @@ local function unload()
         end)
     end
 
-    if ScreenGui then
+    if ScriptMM2 then
         pcall(function()
-            ScreenGui:Destroy()
+            ScriptMM2:Destroy()
         end)
     end
 end
@@ -2028,12 +2030,12 @@ addConnection(unloadButton.MouseButton1Click:Connect(unload))
 
 --// Device-specific UI
 if IsMobile then
-    Title.Text = "Mod Menu | Mobile"
+    Title.Text = "ScriptMM2 | Mobile  •  " .. VERSION
     Status.Text = "Tap MOD to reopen • drag MOD to move"
     Scale.Scale = 0.9
     reopen.Visible = false
 else
-    Title.Text = "Mod Menu | PC"
+    Title.Text = "ScriptMM2 | PC  •  " .. VERSION
     Status.Text = "RightShift = hide/show"
     reopen.Visible = false
     MobileFlyControls.Visible = false
@@ -2045,4 +2047,4 @@ savedFOV = CONFIG.DefaultFOV
 setCharacterMovement()
 refreshRoles()
 
-print("[ModMenu] Loaded successfully. RightShift = show/hide.")
+print("[ScriptMM2] " .. VERSION .. " loaded successfully. RightShift = show/hide.")
