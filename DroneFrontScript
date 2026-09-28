@@ -1,7 +1,8 @@
--- Player + Drone ESP v3.10. Dronefront discovery adapted from the supplied ff.lua.
+-- Player + Drone ESP v3.12. Dronefront discovery adapted from the supplied ff.lua.
 -- Replace the entire previous LocalScript in StarterPlayerScripts.
 -- Drag the title or ESP button. Minus minimizes; X / "Удалить ESP" unloads.
--- Mobile starts in Lite mode: 20 Hz, 24 markers, 6 outlines, 6 labels.
+-- Mobile starts in Lite mode with an optimized budget: 15 Hz, 14 markers, 4 outlines, 4 labels.
+-- Mobile Lite also throttles target scans, drone discovery, team classification and label refreshes.
 -- AUTO mode: current PlaceId/name + runtime signatures choose TLF or generic team detection.
 -- Distant/unloaded server characters cannot be recovered by a LocalScript.
 -- ScreenGui priority affects 2D markers, not Roblox's system UI or 3D Highlight.
@@ -45,6 +46,7 @@ local DRONE_DISPLAY_NAMES = {
     ["drone9"] = "Италмас",
     ["drone10"] = "Серая вдова 1М",
     ["drone11"] = "AQ 400 Серп",
+	["drone12"] = "Морок (Белый)", 
     ["drone13"] = "Шахед-238",
     ["drone14"] = "Лутий (Белый)",
     ["drone15"] = "Шахед 136(Черный)",
@@ -109,6 +111,24 @@ local settings = {
     DroneTeamCheck = false, ShowOwnDrone = false, HideDeadDrones = false,
     FarDistance = 150, Color = Color3.fromRGB(255, 213, 90),
 }
+-- Stronger limits are used only when this is actually a touch device AND Lite mode is enabled.
+-- Desktop Lite keeps the old v3.10 limits/refresh rates.
+local MOBILE_PERF = {
+    RenderHz = 15,
+    MarkerLimit = 14,
+    OutlineLimit = 4,
+    LabelLimit = 4,
+    DroneScanInterval = 1.20,
+    TargetScanInterval = 0.55,
+    PlayerIndexInterval = 0.85,
+    RelationInterval = 1.10,
+    RayInterval = 0.45,
+    LabelInterval = 0.80,
+    MaxPlayerLabelDistance = 600,
+}
+local function mobileLite()
+    return mobile and settings.LiteMode
+end
 local GUI_NAME = "PlayerESPMenu"
 local ESP_DISPLAY_ORDER = 2147483646
 local MENU_DISPLAY_ORDER = 2147483647
@@ -125,7 +145,7 @@ playerGui:SetAttribute(OWNER_ATTRIBUTE, runToken)
 local function startSession(savedUI)
     if unloaded or playerGui:GetAttribute(OWNER_ATTRIBUTE) ~= runToken then return end
     sessionNumber = sessionNumber + 1
-    local RENDER_NAME = LEGACY_RENDER .. "_v310controls_" .. runToken .. "_" .. sessionNumber
+    local RENDER_NAME = LEGACY_RENDER .. "_v311mobile_" .. runToken .. "_" .. sessionNumber
     local LOCK_RENDER_NAME = RENDER_NAME .. "_XLock"
     local oldMenu = playerGui:FindFirstChild(GUI_NAME)
     if oldMenu then
@@ -220,7 +240,7 @@ local function startSession(savedUI)
     round(panel, 12)
     make("UIStroke", { Color = Color3.fromRGB(55, 67, 88), Thickness = 1 }, panel)
     local panelScale = make("UIScale", { Scale = 1 }, panel)
-    local dragHandle = button(panel, "DRONE ESP  ·  v3.10", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
+    local dragHandle = button(panel, "DRONE ESP  ·  v3.11", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
     dragHandle.Name = "DragHandle"
     dragHandle.BackgroundTransparency = 1
     dragHandle.TextXAlignment = Enum.TextXAlignment.Left
@@ -431,7 +451,7 @@ local function startSession(savedUI)
         connect(swatch.Activated, function() settings.Color = color; refreshStyles() end)
     end
     local shortPlace = #PlaceName > 30 and (string.sub(PlaceName, 1, 27) .. "...") or PlaceName
-    local hint = label(scroll, "Плейс: " .. shortPlace .. "\nЖёлтый — БОТ · серый — нет данных\nИгрок: красный — враг, зелёный — свой\nСиний — свой дрон / дрон камеры\nЛучи показываются только к игрокам.\nLITE: всего 24 метки и 6 обводок.", UDim2.fromOffset(8, 792), UDim2.fromOffset(264, 108), 10)
+    local hint = label(scroll, "Плейс: " .. shortPlace .. "\nЖёлтый — БОТ · серый — нет данных\nИгрок: красный — враг, зелёный — свой\nСиний — свой дрон / дрон камеры\nЛучи показываются только к игрокам.\nLITE: телефон 14 меток / 4 обводки / 15 Гц.", UDim2.fromOffset(8, 792), UDim2.fromOffset(264, 108), 10)
     hint.TextColor3 = mutedColor
     hint.TextWrapped = true
     local lockAction = button(scroll, "Захват X: выбрать дрон", UDim2.fromOffset(4, 906), UDim2.fromOffset(270, 38))
@@ -775,6 +795,17 @@ local function startSession(savedUI)
         end
         return index
     end
+    local cachedPlayerIndex, nextPlayerIndexRefresh = nil, 0
+    local function getPlayerIndex()
+        if not settings.DronesEnabled then return nil end
+        local clock = os.clock()
+        local interval = mobileLite() and MOBILE_PERF.PlayerIndexInterval or 0
+        if interval <= 0 or not cachedPlayerIndex or clock >= nextPlayerIndexRefresh then
+            cachedPlayerIndex = buildPlayerIndex()
+            nextPlayerIndexRefresh = clock + interval
+        end
+        return cachedPlayerIndex
+    end
     local function resolveOwner(value, index)
         if typeof(value) == "Instance" then
             if value:IsA("Player") and value.Parent == Players then return value end
@@ -893,7 +924,7 @@ local function startSession(savedUI)
             end
             if oldRelation ~= entry.relation or oldOwner ~= entry.owner
                 or oldControl ~= entry.controlKind or oldPilot ~= entry.pilot then entry.nextLabel = 0 end
-            entry.nextRelation = clock + (settings.LiteMode and 0.75 or 0.4)
+            entry.nextRelation = clock + (mobileLite() and MOBILE_PERF.RelationInterval or (settings.LiteMode and 0.75 or 0.4))
         end
         local oldOwn, oldViewed = entry.own, entry.viewed
         entry.own = entry.pilot == localPlayer or entry.owner == localPlayer
@@ -920,7 +951,7 @@ local function startSession(savedUI)
         local clock = os.clock()
         if not force and clock < (entry.nextRelation or 0) then return end
         entry.relation, entry.relationReason = classifyPlayer(entry.player, entry.character)
-        entry.nextRelation = clock + (settings.LiteMode and 0.75 or 0.4)
+        entry.nextRelation = clock + (mobileLite() and MOBILE_PERF.RelationInterval or (settings.LiteMode and 0.75 or 0.4))
     end
 
     refreshStyles()
@@ -1021,7 +1052,7 @@ local function startSession(savedUI)
     local loadedCount, totalCount = 0, 0
     local function refreshTargets(camera, origin)
         local candidates, wanted = {}, {}
-        local playerIndex = settings.DronesEnabled and buildPlayerIndex() or nil
+        local playerIndex = settings.DronesEnabled and getPlayerIndex() or nil
         loadedCount, totalCount = 0, 0
         for _, entry in pairs(tracked) do
             totalCount = totalCount + 1
@@ -1058,8 +1089,8 @@ local function startSession(savedUI)
             end
         end
         table.sort(candidates, nearer)
-        local markerLimit = settings.LiteMode and 24 or 64
-        local outlineLimit = settings.LiteMode and 6 or 16
+        local markerLimit = mobileLite() and MOBILE_PERF.MarkerLimit or (settings.LiteMode and 24 or 64)
+        local outlineLimit = mobileLite() and MOBILE_PERF.OutlineLimit or (settings.LiteMode and 6 or 16)
         local selected
         active, selected = chooseBudget(candidates, markerLimit)
         -- Outlines have no distance cutoff. FarDistance controls only the dots.
@@ -1199,7 +1230,7 @@ local function startSession(savedUI)
         local clock = os.clock()
         if not settings.ThroughWalls and clock >= (xLock.nextRay or 0) then
             if not clearToDrone(entry, camera) then releaseXLock("Дрон закрыт препятствием — захват снят."); return end
-            xLock.nextRay = clock + (settings.LiteMode and 0.25 or 0.15)
+            xLock.nextRay = clock + (mobileLite() and MOBILE_PERF.RayInterval or (settings.LiteMode and 0.25 or 0.15))
         end
         local frame = camera.CFrame
         local pitch, currentYaw, roll = frame:ToOrientation()
@@ -1246,7 +1277,7 @@ local function startSession(savedUI)
     local previousEnabled = true
     local function hideAll()
         for _, entry in pairs(tracked) do hide(entry) end
-        syncHighlights({}, settings.LiteMode and 6 or 16)
+        syncHighlights({}, mobileLite() and MOBILE_PERF.OutlineLimit or (settings.LiteMode and 6 or 16))
         set(lockReticle, "Visible", false)
     end
     local function render(deltaTime)
@@ -1270,12 +1301,12 @@ local function startSession(savedUI)
             if not camera then hideAll() end
         end
         if not camera then return end
-        local interval = settings.LiteMode and 1 / 20 or 1 / 30
+        local interval = mobileLite() and (1 / MOBILE_PERF.RenderHz) or (settings.LiteMode and 1 / 20 or 1 / 30)
         if not dirty and frameElapsed + 0.000001 < interval then return end
         frameElapsed = frameElapsed % interval
         if settings.DronesEnabled and (dirty or now >= nextDroneScan) then
             scanDrones()
-            nextDroneScan = now + (settings.LiteMode and 0.75 or 0.4)
+            nextDroneScan = now + (mobileLite() and MOBILE_PERF.DroneScanInterval or (settings.LiteMode and 0.75 or 0.4))
         end
         local character = localPlayer.Character
         -- A remotely controlled drone can be kilometres from the avatar.
@@ -1285,7 +1316,7 @@ local function startSession(savedUI)
         if dirty or now >= nextScan then
             refreshTargets(camera, origin)
             lastScanPosition = origin
-            nextScan = now + (settings.LiteMode and 0.35 or 0.2)
+            nextScan = now + (mobileLite() and MOBILE_PERF.TargetScanInterval or (settings.LiteMode and 0.35 or 0.2))
             dirty = false
         end
         if camera ~= filterCamera or character ~= filterCharacter or droneExclusionsDirty then
@@ -1311,7 +1342,7 @@ local function startSession(savedUI)
         end
         local lineStart = Vector2.new(viewport.X * 0.5, viewport.Y - (mobile and 64 or 24))
         local occupied, labelCount = {}, 0
-        local labelLimit = settings.LiteMode and 6 or 14
+        local labelLimit = mobileLite() and MOBILE_PERF.LabelLimit or (settings.LiteMode and 6 or 14)
         for _, entry in ipairs(active) do
             if not alive(entry) or not allowedTarget(entry) then
                 if not entry.removed then hide(entry); releaseHighlight(entry) end
@@ -1324,7 +1355,7 @@ local function startSession(savedUI)
                     if now >= entry.nextRay or entry.clear == nil then
                         local hit = Workspace:Raycast(camera.CFrame.Position, targetPosition - camera.CFrame.Position, rayParams)
                         entry.clear = not hit or hit.Instance:IsDescendantOf(entry.character)
-                        entry.nextRay = now + (settings.LiteMode and 0.25 or 0.15)
+                        entry.nextRay = now + (mobileLite() and MOBILE_PERF.RayInterval or (settings.LiteMode and 0.25 or 0.15))
                     end
                     visible = entry.clear == true
                 end
@@ -1335,9 +1366,19 @@ local function startSession(savedUI)
                 local labelsEnabled = entry.kind == "drone" and settings.DroneLabels
                     or entry.kind == "player" and settings.Labels
                 if visible and labelsEnabled and labelCount < labelLimit
-                    and (entry.kind == "drone" or not settings.LiteMode or distance <= 750) then
+                    and (entry.kind == "drone" or not settings.LiteMode or distance <= (mobileLite() and MOBILE_PERF.MaxPlayerLabelDistance or 750)) then
                     local isDrone = entry.kind == "drone"
                     local width, height = math.min(isDrone and 280 or 154, viewport.X), isDrone and 56 or 30
+                    -- Scale drone text down with distance so far-away drones do not clutter the screen.
+                    if isDrone then
+                        local titleBase = mobile and 16 or 18
+                        local infoBase = mobile and 10 or 11
+                        local distanceScale = math.clamp(1 - math.max(0, distance - 150) / 1200 * 0.45, 0.55, 1)
+                        local titleSize = math.max(mobile and 9 or 10, math.floor(titleBase * distanceScale + 0.5))
+                        local infoSize = math.max(8, math.floor(infoBase * distanceScale + 0.5))
+                        set(entry.label, "TextSize", titleSize)
+                        if entry.info then set(entry.info, "TextSize", infoSize) end
+                    end
                     -- Drone title above the model, with smaller distance/control text below it.
                     local x = math.clamp(isDrone and (point.X - width * 0.5) or (point.X + 12), 0, math.max(0, viewport.X - width))
                     local y = math.clamp(isDrone and (point.Y - height - 12) or (point.Y + 12), 0, math.max(0, viewport.Y - height))
@@ -1377,7 +1418,7 @@ local function startSession(savedUI)
                             else
                                 set(entry.label, "Text", relationText .. " · " .. entry.player.DisplayName .. "\n" .. math.floor(distance + 0.5) .. " studs")
                             end
-                            entry.nextLabel = now + (settings.LiteMode and 0.5 or 0.25)
+                            entry.nextLabel = now + (mobileLite() and MOBILE_PERF.LabelInterval or (settings.LiteMode and 0.5 or 0.25))
                         end
                     end
                 end
