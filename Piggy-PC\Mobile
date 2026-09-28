@@ -1,0 +1,1373 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+--------------------------------------------------
+-- DEVICE
+--------------------------------------------------
+
+local IS_MOBILE = UserInputService.TouchEnabled
+	and not UserInputService.KeyboardEnabled
+
+local DEVICE_NAME = IS_MOBILE and "Mobile" or "PC"
+
+--------------------------------------------------
+-- VERSION
+--------------------------------------------------
+
+local VERSION = "V0.1.0"
+
+--------------------------------------------------
+-- SETTINGS
+--------------------------------------------------
+
+local WALK_SPEED = 50
+local FLY_SPEED = 60
+
+local MIN_WALK_SPEED = 16
+local MAX_WALK_SPEED = 150
+
+local MIN_FLY_SPEED = 20
+local MAX_FLY_SPEED = 150
+
+--------------------------------------------------
+-- STATES
+--------------------------------------------------
+
+local infiniteJumpEnabled = false
+local speedEnabled = false
+local noclipEnabled = false
+local flyEnabled = false
+local godModeEnabled = false
+
+--------------------------------------------------
+-- OBJECTS
+--------------------------------------------------
+
+local flyVelocity = nil
+local flyGyro = nil
+
+local godHealthConnection = nil
+
+local originalCollision = {}
+
+--------------------------------------------------
+-- MOBILE FLY INPUT
+--------------------------------------------------
+
+local mobileFly = {
+	Forward = false,
+	Backward = false,
+	Left = false,
+	Right = false,
+	Up = false,
+	Down = false
+}
+
+--------------------------------------------------
+-- GUI
+--------------------------------------------------
+
+local gui = Instance.new("ScreenGui")
+gui.Name = IS_MOBILE and "ModMenu_Mobile" or "ModMenu_PC"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = playerGui
+
+--------------------------------------------------
+-- HELPERS
+--------------------------------------------------
+
+local function getCharacter()
+	return player.Character or player.CharacterAdded:Wait()
+end
+
+local function getHumanoid()
+	local character = getCharacter()
+	return character:WaitForChild("Humanoid")
+end
+
+local function setButtonState(button, enabled, onText, offText)
+	if enabled then
+		button.Text = onText
+		button.BackgroundColor3 = Color3.fromRGB(40, 150, 80)
+	else
+		button.Text = offText
+		button.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+	end
+end
+
+--------------------------------------------------
+-- NOCLIP
+--------------------------------------------------
+
+local function enableNoclip()
+	local character = player.Character
+
+	if not character then
+		return
+	end
+
+	for _, object in ipairs(character:GetDescendants()) do
+		if object:IsA("BasePart") then
+			if originalCollision[object] == nil then
+				originalCollision[object] = object.CanCollide
+			end
+
+			object.CanCollide = false
+		end
+	end
+end
+
+local function disableNoclip()
+	for part, oldValue in pairs(originalCollision) do
+		if part and part.Parent then
+			part.CanCollide = oldValue
+		end
+	end
+
+	originalCollision = {}
+end
+
+--------------------------------------------------
+-- FLY
+--------------------------------------------------
+
+local function startFly()
+	local character = getCharacter()
+
+	local humanoid = character:WaitForChild("Humanoid")
+	local root = character:WaitForChild("HumanoidRootPart")
+
+	if flyVelocity then
+		flyVelocity:Destroy()
+	end
+
+	if flyGyro then
+		flyGyro:Destroy()
+	end
+
+	flyVelocity = Instance.new("BodyVelocity")
+	flyVelocity.Name = "ModMenuFlyVelocity"
+	flyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+	flyVelocity.P = 10000
+	flyVelocity.Velocity = Vector3.zero
+	flyVelocity.Parent = root
+
+	flyGyro = Instance.new("BodyGyro")
+	flyGyro.Name = "ModMenuFlyGyro"
+	flyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+	flyGyro.P = 10000
+	flyGyro.D = 500
+	flyGyro.CFrame = root.CFrame
+	flyGyro.Parent = root
+
+	humanoid.PlatformStand = true
+end
+
+local function stopFly()
+	if flyVelocity then
+		flyVelocity:Destroy()
+		flyVelocity = nil
+	end
+
+	if flyGyro then
+		flyGyro:Destroy()
+		flyGyro = nil
+	end
+
+	local character = player.Character
+
+	if character then
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+		if humanoid then
+			humanoid.PlatformStand = false
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end
+	end
+end
+
+--------------------------------------------------
+-- GOD MODE
+--------------------------------------------------
+
+local function disableGodMode()
+	if godHealthConnection then
+		godHealthConnection:Disconnect()
+		godHealthConnection = nil
+	end
+end
+
+local function enableGodMode()
+	local character = player.Character
+
+	if not character then
+		return
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+	if not humanoid then
+		return
+	end
+
+	humanoid.Health = humanoid.MaxHealth
+
+	disableGodMode()
+
+	godHealthConnection = humanoid.HealthChanged:Connect(function()
+		if godModeEnabled and humanoid.Health < humanoid.MaxHealth then
+			humanoid.Health = humanoid.MaxHealth
+		end
+	end)
+end
+
+--------------------------------------------------
+-- UNLOAD
+--------------------------------------------------
+
+local unloaded = false
+
+local function unload()
+	if unloaded then
+		return
+	end
+
+	unloaded = true
+
+	infiniteJumpEnabled = false
+	speedEnabled = false
+	noclipEnabled = false
+	flyEnabled = false
+	godModeEnabled = false
+
+	disableNoclip()
+	stopFly()
+	disableGodMode()
+
+	for key in pairs(mobileFly) do
+		mobileFly[key] = false
+	end
+
+	if gui then
+		gui:Destroy()
+	end
+end
+
+--------------------------------------------------
+-- MAIN FRAME
+--------------------------------------------------
+
+local frame = Instance.new("Frame")
+frame.Name = "Main"
+frame.Parent = gui
+
+if IS_MOBILE then
+	frame.Size = UDim2.new(0, 275, 0, 405)
+	frame.Position = UDim2.new(0.5, -137, 0.5, -202)
+else
+	frame.Size = UDim2.new(0, 350, 0, 455)
+	frame.Position = UDim2.new(0.5, -175, 0.5, -227)
+end
+
+frame.BackgroundColor3 = Color3.fromRGB(22, 23, 28)
+frame.BorderSizePixel = 0
+frame.Active = true
+
+local frameCorner = Instance.new("UICorner")
+frameCorner.CornerRadius = UDim.new(0, 14)
+frameCorner.Parent = frame
+
+--------------------------------------------------
+-- HEADER
+--------------------------------------------------
+
+local title = Instance.new("TextLabel")
+title.Parent = frame
+title.BackgroundTransparency = 1
+
+-- ВАЖНО:
+-- На ПК: Mod Menu\PC
+-- На телефоне: Mod Menu\Mobile
+title.Text = IS_MOBILE
+	and "Mod Menu\\Mobile"
+	or "Mod Menu\\PC"
+
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Active = true
+
+if IS_MOBILE then
+	title.Size = UDim2.new(1, -95, 0, 32)
+	title.Position = UDim2.new(0, 14, 0, 7)
+	title.TextSize = 20
+else
+	title.Size = UDim2.new(1, -100, 0, 35)
+	title.Position = UDim2.new(0, 16, 0, 8)
+	title.TextSize = 22
+end
+
+--------------------------------------------------
+-- VERSION
+--------------------------------------------------
+
+local versionLabel = Instance.new("TextLabel")
+versionLabel.Parent = frame
+versionLabel.BackgroundTransparency = 1
+versionLabel.Text = VERSION
+versionLabel.TextColor3 = Color3.fromRGB(145, 147, 155)
+versionLabel.Font = Enum.Font.Gotham
+versionLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+if IS_MOBILE then
+	versionLabel.Size = UDim2.new(0, 90, 0, 18)
+	versionLabel.Position = UDim2.new(0, 15, 0, 37)
+	versionLabel.TextSize = 11
+else
+	versionLabel.Size = UDim2.new(0, 90, 0, 20)
+	versionLabel.Position = UDim2.new(0, 16, 0, 40)
+	versionLabel.TextSize = 12
+end
+
+--------------------------------------------------
+-- CLOSE
+--------------------------------------------------
+
+local close = Instance.new("TextButton")
+close.Parent = frame
+close.Text = "X"
+close.TextColor3 = Color3.fromRGB(255, 255, 255)
+close.BackgroundColor3 = Color3.fromRGB(185, 50, 50)
+close.Font = Enum.Font.GothamBold
+
+if IS_MOBILE then
+	close.Size = UDim2.new(0, 34, 0, 34)
+	close.Position = UDim2.new(1, -42, 0, 7)
+	close.TextSize = 16
+else
+	close.Size = UDim2.new(0, 36, 0, 36)
+	close.Position = UDim2.new(1, -45, 0, 7)
+	close.TextSize = 17
+end
+
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 9)
+closeCorner.Parent = close
+
+--------------------------------------------------
+-- MOBILE MINIMIZE
+--------------------------------------------------
+
+local minimize = nil
+
+if IS_MOBILE then
+	minimize = Instance.new("TextButton")
+	minimize.Parent = frame
+	minimize.Size = UDim2.new(0, 34, 0, 34)
+	minimize.Position = UDim2.new(1, -81, 0, 7)
+	minimize.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+	minimize.Text = "—"
+	minimize.TextColor3 = Color3.fromRGB(255, 255, 255)
+	minimize.TextSize = 20
+	minimize.Font = Enum.Font.GothamBold
+
+	local minimizeCorner = Instance.new("UICorner")
+	minimizeCorner.CornerRadius = UDim.new(0, 9)
+	minimizeCorner.Parent = minimize
+end
+
+--------------------------------------------------
+-- MOBILE REOPEN
+--------------------------------------------------
+
+local reopenButton = nil
+
+if IS_MOBILE then
+	reopenButton = Instance.new("TextButton")
+	reopenButton.Parent = gui
+	reopenButton.Size = UDim2.new(0, 60, 0, 60)
+	reopenButton.Position = UDim2.new(1, -75, 1, -85)
+	reopenButton.BackgroundColor3 = Color3.fromRGB(35, 120, 210)
+	reopenButton.Text = "MOD"
+	reopenButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	reopenButton.TextSize = 15
+	reopenButton.Font = Enum.Font.GothamBold
+	reopenButton.Visible = false
+
+	local reopenCorner = Instance.new("UICorner")
+	reopenCorner.CornerRadius = UDim.new(1, 0)
+	reopenCorner.Parent = reopenButton
+end
+
+--------------------------------------------------
+-- BUTTON CREATOR
+--------------------------------------------------
+
+local function createButton(text, y)
+	local button = Instance.new("TextButton")
+	button.Parent = frame
+
+	if IS_MOBILE then
+		button.Size = UDim2.new(1, -24, 0, 42)
+		button.Position = UDim2.new(0, 12, 0, y)
+		button.TextSize = 14
+	else
+		button.Size = UDim2.new(1, -30, 0, 44)
+		button.Position = UDim2.new(0, 15, 0, y)
+		button.TextSize = 16
+	end
+
+	button.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+	button.Text = text
+	button.TextColor3 = Color3.fromRGB(255, 255, 255)
+	button.Font = Enum.Font.GothamBold
+	button.AutoButtonColor = true
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 9)
+	corner.Parent = button
+
+	return button
+end
+
+--------------------------------------------------
+-- BUTTONS
+--------------------------------------------------
+
+local jumpButton
+local speedButton
+local noclipButton
+local flyButton
+local godButton
+local settingsButton
+local resetButton
+
+if IS_MOBILE then
+	jumpButton = createButton("Infinite Jump: OFF", 65)
+	speedButton = createButton("Speed: OFF", 112)
+	noclipButton = createButton("Noclip: OFF", 159)
+	flyButton = createButton("Fly: OFF", 206)
+	godButton = createButton("God Mode: OFF", 253)
+	settingsButton = createButton("Settings", 300)
+	resetButton = createButton("Reset", 347)
+else
+	jumpButton = createButton("Infinite Jump: OFF", 72)
+	speedButton = createButton("Speed: OFF", 122)
+	noclipButton = createButton("Noclip: OFF", 172)
+	flyButton = createButton("Fly: OFF", 222)
+	godButton = createButton("God Mode: OFF", 272)
+	settingsButton = createButton("Settings", 322)
+	resetButton = createButton("Reset", 372)
+end
+
+--------------------------------------------------
+-- INFINITE JUMP
+--------------------------------------------------
+
+jumpButton.Activated:Connect(function()
+	infiniteJumpEnabled = not infiniteJumpEnabled
+
+	setButtonState(
+		jumpButton,
+		infiniteJumpEnabled,
+		"Infinite Jump: ON",
+		"Infinite Jump: OFF"
+	)
+end)
+
+UserInputService.JumpRequest:Connect(function()
+	if not infiniteJumpEnabled then
+		return
+	end
+
+	local character = player.Character
+
+	if not character then
+		return
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+	if humanoid then
+		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+	end
+end)
+
+--------------------------------------------------
+-- SPEED
+--------------------------------------------------
+
+speedButton.Activated:Connect(function()
+	speedEnabled = not speedEnabled
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+	if humanoid then
+		if speedEnabled then
+			humanoid.WalkSpeed = WALK_SPEED
+		else
+			humanoid.WalkSpeed = 16
+		end
+	end
+
+	setButtonState(
+		speedButton,
+		speedEnabled,
+		"Speed: ON",
+		"Speed: OFF"
+	)
+end)
+
+--------------------------------------------------
+-- NOCLIP BUTTON
+--------------------------------------------------
+
+noclipButton.Activated:Connect(function()
+	noclipEnabled = not noclipEnabled
+
+	if noclipEnabled then
+		enableNoclip()
+	else
+		disableNoclip()
+	end
+
+	setButtonState(
+		noclipButton,
+		noclipEnabled,
+		"Noclip: ON",
+		"Noclip: OFF"
+	)
+end)
+
+--------------------------------------------------
+-- FLY BUTTON
+--------------------------------------------------
+
+flyButton.Activated:Connect(function()
+	flyEnabled = not flyEnabled
+
+	if flyEnabled then
+		startFly()
+	else
+		stopFly()
+
+		for key in pairs(mobileFly) do
+			mobileFly[key] = false
+		end
+	end
+
+	setButtonState(
+		flyButton,
+		flyEnabled,
+		"Fly: ON",
+		"Fly: OFF"
+	)
+end)
+
+--------------------------------------------------
+-- GOD MODE BUTTON
+--------------------------------------------------
+
+godButton.Activated:Connect(function()
+	godModeEnabled = not godModeEnabled
+
+	if godModeEnabled then
+		enableGodMode()
+	else
+		disableGodMode()
+	end
+
+	setButtonState(
+		godButton,
+		godModeEnabled,
+		"God Mode: ON",
+		"God Mode: OFF"
+	)
+end)
+
+--------------------------------------------------
+-- SETTINGS FRAME
+--------------------------------------------------
+
+local settingsFrame = Instance.new("Frame")
+settingsFrame.Name = "Settings"
+settingsFrame.Parent = gui
+settingsFrame.Visible = false
+settingsFrame.Size = frame.Size
+settingsFrame.Position = frame.Position
+settingsFrame.BackgroundColor3 = Color3.fromRGB(22, 23, 28)
+settingsFrame.BorderSizePixel = 0
+settingsFrame.Active = true
+
+local settingsCorner = Instance.new("UICorner")
+settingsCorner.CornerRadius = UDim.new(0, 14)
+settingsCorner.Parent = settingsFrame
+
+--------------------------------------------------
+-- SETTINGS TITLE
+--------------------------------------------------
+
+local settingsTitle = Instance.new("TextLabel")
+settingsTitle.Parent = settingsFrame
+settingsTitle.Size = UDim2.new(1, -100, 0, 35)
+settingsTitle.Position = UDim2.new(0, 15, 0, 8)
+settingsTitle.BackgroundTransparency = 1
+settingsTitle.Text = "Settings"
+settingsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+settingsTitle.TextSize = IS_MOBILE and 19 or 21
+settingsTitle.Font = Enum.Font.GothamBold
+settingsTitle.TextXAlignment = Enum.TextXAlignment.Left
+settingsTitle.Active = true
+
+local settingsVersion = Instance.new("TextLabel")
+settingsVersion.Parent = settingsFrame
+settingsVersion.Size = UDim2.new(0, 90, 0, 18)
+settingsVersion.Position = UDim2.new(0, 15, 0, 39)
+settingsVersion.BackgroundTransparency = 1
+settingsVersion.Text = VERSION
+settingsVersion.TextColor3 = Color3.fromRGB(145, 147, 155)
+settingsVersion.TextSize = 11
+settingsVersion.Font = Enum.Font.Gotham
+settingsVersion.TextXAlignment = Enum.TextXAlignment.Left
+
+--------------------------------------------------
+-- BACK
+--------------------------------------------------
+
+local backButton = Instance.new("TextButton")
+backButton.Parent = settingsFrame
+backButton.Size = UDim2.new(0, 62, 0, 34)
+backButton.Position = UDim2.new(1, -72, 0, 7)
+backButton.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+backButton.Text = "Back"
+backButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+backButton.TextSize = 13
+backButton.Font = Enum.Font.GothamBold
+
+local backCorner = Instance.new("UICorner")
+backCorner.CornerRadius = UDim.new(0, 9)
+backCorner.Parent = backButton
+
+--------------------------------------------------
+-- SLIDER
+--------------------------------------------------
+
+local function createSlider(
+	parent,
+	titleText,
+	y,
+	minValue,
+	maxValue,
+	defaultValue,
+	callback
+)
+	local label = Instance.new("TextLabel")
+	label.Parent = parent
+	label.Size = UDim2.new(1, -30, 0, 25)
+	label.Position = UDim2.new(0, 15, 0, y)
+	label.BackgroundTransparency = 1
+	label.Text = titleText
+	label.TextColor3 = Color3.fromRGB(255, 255, 255)
+	label.TextSize = 14
+	label.Font = Enum.Font.GothamBold
+	label.TextXAlignment = Enum.TextXAlignment.Left
+
+	local valueLabel = Instance.new("TextLabel")
+	valueLabel.Parent = parent
+	valueLabel.Size = UDim2.new(0, 55, 0, 25)
+	valueLabel.Position = UDim2.new(1, -70, 0, y)
+	valueLabel.BackgroundTransparency = 1
+	valueLabel.Text = tostring(defaultValue)
+	valueLabel.TextColor3 = Color3.fromRGB(175, 177, 185)
+	valueLabel.TextSize = 13
+	valueLabel.Font = Enum.Font.Gotham
+	valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+
+	local bar = Instance.new("Frame")
+	bar.Parent = parent
+	bar.Size = UDim2.new(1, -30, 0, 10)
+	bar.Position = UDim2.new(0, 15, 0, y + 31)
+	bar.BackgroundColor3 = Color3.fromRGB(55, 56, 65)
+	bar.BorderSizePixel = 0
+
+	local barCorner = Instance.new("UICorner")
+	barCorner.CornerRadius = UDim.new(1, 0)
+	barCorner.Parent = bar
+
+	local fill = Instance.new("Frame")
+	fill.Parent = bar
+	fill.BackgroundColor3 = Color3.fromRGB(75, 160, 235)
+	fill.BorderSizePixel = 0
+
+	local fillCorner = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(1, 0)
+	fillCorner.Parent = fill
+
+	local knob = Instance.new("TextButton")
+	knob.Parent = bar
+	knob.Size = UDim2.new(0, 20, 0, 20)
+	knob.AnchorPoint = Vector2.new(0.5, 0.5)
+	knob.Position = UDim2.new(0, 0, 0.5, 0)
+	knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	knob.Text = ""
+
+	local knobCorner = Instance.new("UICorner")
+	knobCorner.CornerRadius = UDim.new(1, 0)
+	knobCorner.Parent = knob
+
+	local draggingSlider = false
+
+	local function updateSlider(inputX)
+		local width = bar.AbsoluteSize.X
+
+		if width <= 0 then
+			return
+		end
+
+		local percentage = math.clamp(
+			(inputX - bar.AbsolutePosition.X) / width,
+			0,
+			1
+		)
+
+		local value = math.floor(
+			minValue + (maxValue - minValue) * percentage + 0.5
+		)
+
+		local normalized =
+			(value - minValue) /
+			(maxValue - minValue)
+
+		fill.Size = UDim2.new(normalized, 0, 1, 0)
+		knob.Position = UDim2.new(normalized, 0, 0.5, 0)
+		valueLabel.Text = tostring(value)
+
+		callback(value)
+	end
+
+	local defaultNormalized =
+		(defaultValue - minValue) /
+		(maxValue - minValue)
+
+	fill.Size = UDim2.new(defaultNormalized, 0, 1, 0)
+	knob.Position = UDim2.new(defaultNormalized, 0, 0.5, 0)
+
+	bar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+
+			draggingSlider = true
+			updateSlider(input.Position.X)
+		end
+	end)
+
+	knob.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+
+			draggingSlider = true
+			updateSlider(input.Position.X)
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if not draggingSlider then
+			return
+		end
+
+		if input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch then
+
+			updateSlider(input.Position.X)
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+
+			draggingSlider = false
+		end
+	end)
+end
+
+--------------------------------------------------
+-- SLIDERS
+--------------------------------------------------
+
+createSlider(
+	settingsFrame,
+	"WalkSpeed",
+	90,
+	MIN_WALK_SPEED,
+	MAX_WALK_SPEED,
+	WALK_SPEED,
+	function(value)
+		WALK_SPEED = value
+
+		if speedEnabled then
+			local character = player.Character
+			local humanoid = character
+				and character:FindFirstChildOfClass("Humanoid")
+
+			if humanoid then
+				humanoid.WalkSpeed = WALK_SPEED
+			end
+		end
+	end
+)
+
+createSlider(
+	settingsFrame,
+	"Fly Speed",
+	170,
+	MIN_FLY_SPEED,
+	MAX_FLY_SPEED,
+	FLY_SPEED,
+	function(value)
+		FLY_SPEED = value
+	end
+)
+
+--------------------------------------------------
+-- SETTINGS OPEN / BACK
+--------------------------------------------------
+
+settingsButton.Activated:Connect(function()
+	frame.Visible = false
+	settingsFrame.Visible = true
+end)
+
+backButton.Activated:Connect(function()
+	settingsFrame.Visible = false
+	frame.Visible = true
+end)
+
+--------------------------------------------------
+-- MOBILE FLY CONTROLS
+--------------------------------------------------
+
+local flyControls = nil
+
+if IS_MOBILE then
+	flyControls = Instance.new("Frame")
+	flyControls.Name = "FlyControls"
+	flyControls.Parent = gui
+	flyControls.Size = UDim2.new(0, 190, 0, 190)
+	flyControls.Position = UDim2.new(1, -205, 1, -205)
+	flyControls.BackgroundTransparency = 1
+	flyControls.Visible = false
+end
+
+local function createMobileFlyButton(text, position)
+	local button = Instance.new("TextButton")
+
+	button.Parent = flyControls
+	button.Size = UDim2.new(0, 55, 0, 55)
+	button.Position = position
+	button.BackgroundColor3 = Color3.fromRGB(35, 36, 45)
+	button.BackgroundTransparency = 0.05
+	button.Text = text
+	button.TextColor3 = Color3.fromRGB(255, 255, 255)
+	button.TextSize = 20
+	button.Font = Enum.Font.GothamBold
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 14)
+	corner.Parent = button
+
+	return button
+end
+
+if IS_MOBILE then
+
+	local forward = createMobileFlyButton(
+		"▲",
+		UDim2.new(0, 67, 0, 0)
+	)
+
+	local left = createMobileFlyButton(
+		"◀",
+		UDim2.new(0, 0, 0, 58)
+	)
+
+	local backward = createMobileFlyButton(
+		"▼",
+		UDim2.new(0, 67, 0, 58)
+	)
+
+	local right = createMobileFlyButton(
+		"▶",
+		UDim2.new(0, 134, 0, 58)
+	)
+
+	local up = createMobileFlyButton(
+		"↑",
+		UDim2.new(0, 134, 0, 0)
+	)
+
+	local down = createMobileFlyButton(
+		"↓",
+		UDim2.new(0, 67, 0, 116)
+	)
+
+	local function bindFlyButton(button, key)
+		button.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch
+				or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+				mobileFly[key] = true
+			end
+		end)
+
+		button.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Touch
+				or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+				mobileFly[key] = false
+			end
+		end)
+	end
+
+	bindFlyButton(forward, "Forward")
+	bindFlyButton(backward, "Backward")
+	bindFlyButton(left, "Left")
+	bindFlyButton(right, "Right")
+	bindFlyButton(up, "Up")
+	bindFlyButton(down, "Down")
+end
+
+--------------------------------------------------
+-- MOBILE MINIMIZE
+--------------------------------------------------
+
+if IS_MOBILE then
+
+	minimize.Activated:Connect(function()
+		frame.Visible = false
+		settingsFrame.Visible = false
+
+		if reopenButton then
+			reopenButton.Visible = true
+		end
+
+		if flyControls then
+			flyControls.Visible = false
+		end
+	end)
+
+	reopenButton.Activated:Connect(function()
+		frame.Visible = true
+
+		if reopenButton then
+			reopenButton.Visible = false
+		end
+	end)
+end
+
+--------------------------------------------------
+-- MOBILE FLY VISIBILITY
+--------------------------------------------------
+
+local function updateMobileFlyControls()
+	if not IS_MOBILE or not flyControls then
+		return
+	end
+
+	flyControls.Visible =
+		flyEnabled
+		and gui.Enabled
+		and frame.Visible
+		and not settingsFrame.Visible
+end
+
+--------------------------------------------------
+-- RESET
+--------------------------------------------------
+
+resetButton.Activated:Connect(function()
+
+	infiniteJumpEnabled = false
+	speedEnabled = false
+	noclipEnabled = false
+	flyEnabled = false
+	godModeEnabled = false
+
+	disableNoclip()
+	stopFly()
+	disableGodMode()
+
+	for key in pairs(mobileFly) do
+		mobileFly[key] = false
+	end
+
+	local character = player.Character
+	local humanoid = character
+		and character:FindFirstChildOfClass("Humanoid")
+
+	if humanoid then
+		humanoid.WalkSpeed = 16
+		humanoid.PlatformStand = false
+	end
+
+	setButtonState(
+		jumpButton,
+		false,
+		"Infinite Jump: ON",
+		"Infinite Jump: OFF"
+	)
+
+	setButtonState(
+		speedButton,
+		false,
+		"Speed: ON",
+		"Speed: OFF"
+	)
+
+	setButtonState(
+		noclipButton,
+		false,
+		"Noclip: ON",
+		"Noclip: OFF"
+	)
+
+	setButtonState(
+		flyButton,
+		false,
+		"Fly: ON",
+		"Fly: OFF"
+	)
+
+	setButtonState(
+		godButton,
+		false,
+		"God Mode: ON",
+		"God Mode: OFF"
+	)
+
+	updateMobileFlyControls()
+end)
+
+--------------------------------------------------
+-- X = FULL UNLOAD
+--------------------------------------------------
+
+close.Activated:Connect(function()
+	unload()
+end)
+
+--------------------------------------------------
+-- PC RIGHT SHIFT
+--------------------------------------------------
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+
+	if IS_MOBILE then
+		return
+	end
+
+	if gameProcessed then
+		return
+	end
+
+	if input.KeyCode == Enum.KeyCode.RightShift then
+		gui.Enabled = not gui.Enabled
+
+		if not gui.Enabled then
+			updateMobileFlyControls()
+		end
+	end
+end)
+
+--------------------------------------------------
+-- DRAG SYSTEM
+-- PC + MOBILE
+--------------------------------------------------
+
+local dragging = false
+local dragInput = nil
+local dragStart = nil
+local dragStartPosition = nil
+
+local function beginDrag(input, object)
+	dragging = true
+	dragInput = input
+	dragStart = input.Position
+	dragStartPosition = object.Position
+end
+
+local function finishDrag()
+	dragging = false
+	dragInput = nil
+end
+
+local function moveDraggedWindow(input)
+	if not dragging then
+		return
+	end
+
+	if input ~= dragInput then
+		return
+	end
+
+	local delta = input.Position - dragStart
+
+	local newPosition = UDim2.new(
+		dragStartPosition.X.Scale,
+		dragStartPosition.X.Offset + delta.X,
+		dragStartPosition.Y.Scale,
+		dragStartPosition.Y.Offset + delta.Y
+	)
+
+	frame.Position = newPosition
+	settingsFrame.Position = newPosition
+end
+
+--------------------------------------------------
+-- MAIN TITLE DRAG
+--------------------------------------------------
+
+title.InputBegan:Connect(function(input)
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		beginDrag(input, frame)
+	end
+end)
+
+title.InputChanged:Connect(function(input)
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		dragInput = input
+	end
+end)
+
+title.InputEnded:Connect(function(input)
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		finishDrag()
+	end
+end)
+
+--------------------------------------------------
+-- SETTINGS TITLE DRAG
+--------------------------------------------------
+
+settingsTitle.InputBegan:Connect(function(input)
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		beginDrag(input, settingsFrame)
+	end
+end)
+
+settingsTitle.InputChanged:Connect(function(input)
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		dragInput = input
+	end
+end)
+
+settingsTitle.InputEnded:Connect(function(input)
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		finishDrag()
+	end
+end)
+
+--------------------------------------------------
+-- DRAG UPDATE
+--------------------------------------------------
+
+UserInputService.InputChanged:Connect(function(input)
+
+	if not dragging then
+		return
+	end
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		moveDraggedWindow(input)
+	end
+end)
+
+--------------------------------------------------
+-- FLY + NOCLIP LOOP
+--------------------------------------------------
+
+RunService.RenderStepped:Connect(function()
+
+	if unloaded then
+		return
+	end
+
+	local character = player.Character
+
+	if not character then
+		return
+	end
+
+	local root = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local camera = workspace.CurrentCamera
+
+	if not root or not humanoid or not camera then
+		return
+	end
+
+	--------------------------------------------------
+	-- NOCLIP
+	--------------------------------------------------
+
+	if noclipEnabled then
+
+		for _, object in ipairs(character:GetDescendants()) do
+
+			if object:IsA("BasePart") then
+
+				if originalCollision[object] == nil then
+					originalCollision[object] = object.CanCollide
+				end
+
+				object.CanCollide = false
+			end
+		end
+	end
+
+	--------------------------------------------------
+	-- FLY
+	--------------------------------------------------
+
+	if flyEnabled then
+
+		if not flyVelocity or not flyVelocity.Parent then
+			startFly()
+			return
+		end
+
+		if not flyGyro or not flyGyro.Parent then
+			startFly()
+			return
+		end
+
+		local movement = Vector3.zero
+
+		if IS_MOBILE then
+
+			local look = camera.CFrame.LookVector
+			local right = camera.CFrame.RightVector
+
+			if mobileFly.Forward then
+				movement += look
+			end
+
+			if mobileFly.Backward then
+				movement -= look
+			end
+
+			if mobileFly.Left then
+				movement -= right
+			end
+
+			if mobileFly.Right then
+				movement += right
+			end
+
+			if mobileFly.Up then
+				movement += Vector3.new(0, 1, 0)
+			end
+
+			if mobileFly.Down then
+				movement -= Vector3.new(0, 1, 0)
+			end
+
+		else
+
+			local look = camera.CFrame.LookVector
+			local right = camera.CFrame.RightVector
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+				movement += look
+			end
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.S) then
+				movement -= look
+			end
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.A) then
+				movement -= right
+			end
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.D) then
+				movement += right
+			end
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+				movement += Vector3.new(0, 1, 0)
+			end
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+				movement -= Vector3.new(0, 1, 0)
+			end
+		end
+
+		if movement.Magnitude > 0 then
+			movement = movement.Unit * FLY_SPEED
+		else
+			movement = Vector3.zero
+		end
+
+		flyVelocity.Velocity = movement
+
+		flyGyro.CFrame = CFrame.lookAt(
+			root.Position,
+			root.Position + camera.CFrame.LookVector
+		)
+	end
+
+	updateMobileFlyControls()
+end)
+
+--------------------------------------------------
+-- RESPAWN
+--------------------------------------------------
+
+player.CharacterAdded:Connect(function(character)
+
+	local humanoid = character:WaitForChild("Humanoid")
+
+	task.wait(0.3)
+
+	if speedEnabled then
+		humanoid.WalkSpeed = WALK_SPEED
+	end
+
+	if noclipEnabled then
+		enableNoclip()
+	end
+
+	if godModeEnabled then
+		enableGodMode()
+	end
+
+	if flyEnabled then
+		startFly()
+	end
+end)
