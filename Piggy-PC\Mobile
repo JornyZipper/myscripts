@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -18,20 +19,33 @@ local DEVICE_NAME = IS_MOBILE and "Mobile" or "PC"
 -- VERSION
 --------------------------------------------------
 
-local VERSION = "V0.1.0"
+local VERSION = "V0.2.0"
 
 --------------------------------------------------
--- SETTINGS
+-- DEFAULT SETTINGS
+--------------------------------------------------
+
+local DEFAULT_WALK_SPEED = 16
+local DEFAULT_FLY_SPEED = 60
+local DEFAULT_FOV = 70
+local DEFAULT_GRAVITY = workspace.Gravity
+
+--------------------------------------------------
+-- CURRENT SETTINGS
 --------------------------------------------------
 
 local WALK_SPEED = 50
 local FLY_SPEED = 60
+local CURRENT_FOV = DEFAULT_FOV
 
 local MIN_WALK_SPEED = 16
 local MAX_WALK_SPEED = 150
 
 local MIN_FLY_SPEED = 20
 local MAX_FLY_SPEED = 150
+
+local MIN_FOV = 40
+local MAX_FOV = 120
 
 --------------------------------------------------
 -- STATES
@@ -41,18 +55,32 @@ local infiniteJumpEnabled = false
 local speedEnabled = false
 local noclipEnabled = false
 local flyEnabled = false
-local godModeEnabled = false
+local fullBrightEnabled = false
+local lowGravityEnabled = false
 
 --------------------------------------------------
--- OBJECTS
+-- FLY
 --------------------------------------------------
 
 local flyVelocity = nil
 local flyGyro = nil
 
-local godHealthConnection = nil
+--------------------------------------------------
+-- NOCLIP
+--------------------------------------------------
 
 local originalCollision = {}
+
+--------------------------------------------------
+-- FULLBRIGHT
+--------------------------------------------------
+
+local originalLighting = {
+	Brightness = Lighting.Brightness,
+	ClockTime = Lighting.ClockTime,
+	FogEnd = Lighting.FogEnd,
+	GlobalShadows = Lighting.GlobalShadows
+}
 
 --------------------------------------------------
 -- MOBILE FLY INPUT
@@ -78,95 +106,10 @@ gui.IgnoreGuiInset = true
 gui.Parent = playerGui
 
 --------------------------------------------------
--- HELPERS
+-- UNLOAD
 --------------------------------------------------
 
-local function getCharacter()
-	return player.Character or player.CharacterAdded:Wait()
-end
-
-local function getHumanoid()
-	local character = getCharacter()
-	return character:WaitForChild("Humanoid")
-end
-
-local function setButtonState(button, enabled, onText, offText)
-	if enabled then
-		button.Text = onText
-		button.BackgroundColor3 = Color3.fromRGB(40, 150, 80)
-	else
-		button.Text = offText
-		button.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-	end
-end
-
---------------------------------------------------
--- NOCLIP
---------------------------------------------------
-
-local function enableNoclip()
-	local character = player.Character
-
-	if not character then
-		return
-	end
-
-	for _, object in ipairs(character:GetDescendants()) do
-		if object:IsA("BasePart") then
-			if originalCollision[object] == nil then
-				originalCollision[object] = object.CanCollide
-			end
-
-			object.CanCollide = false
-		end
-	end
-end
-
-local function disableNoclip()
-	for part, oldValue in pairs(originalCollision) do
-		if part and part.Parent then
-			part.CanCollide = oldValue
-		end
-	end
-
-	originalCollision = {}
-end
-
---------------------------------------------------
--- FLY
---------------------------------------------------
-
-local function startFly()
-	local character = getCharacter()
-
-	local humanoid = character:WaitForChild("Humanoid")
-	local root = character:WaitForChild("HumanoidRootPart")
-
-	if flyVelocity then
-		flyVelocity:Destroy()
-	end
-
-	if flyGyro then
-		flyGyro:Destroy()
-	end
-
-	flyVelocity = Instance.new("BodyVelocity")
-	flyVelocity.Name = "ModMenuFlyVelocity"
-	flyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-	flyVelocity.P = 10000
-	flyVelocity.Velocity = Vector3.zero
-	flyVelocity.Parent = root
-
-	flyGyro = Instance.new("BodyGyro")
-	flyGyro.Name = "ModMenuFlyGyro"
-	flyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-	flyGyro.P = 10000
-	flyGyro.D = 500
-	flyGyro.CFrame = root.CFrame
-	flyGyro.Parent = root
-
-	humanoid.PlatformStand = true
-end
+local unloaded = false
 
 local function stopFly()
 	if flyVelocity then
@@ -191,48 +134,29 @@ local function stopFly()
 	end
 end
 
---------------------------------------------------
--- GOD MODE
---------------------------------------------------
-
-local function disableGodMode()
-	if godHealthConnection then
-		godHealthConnection:Disconnect()
-		godHealthConnection = nil
-	end
-end
-
-local function enableGodMode()
-	local character = player.Character
-
-	if not character then
-		return
-	end
-
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-
-	if not humanoid then
-		return
-	end
-
-	humanoid.Health = humanoid.MaxHealth
-
-	disableGodMode()
-
-	godHealthConnection = humanoid.HealthChanged:Connect(function()
-		if godModeEnabled and humanoid.Health < humanoid.MaxHealth then
-			humanoid.Health = humanoid.MaxHealth
+local function disableNoclip()
+	for part, oldValue in pairs(originalCollision) do
+		if part and part.Parent then
+			part.CanCollide = oldValue
 		end
-	end)
+	end
+
+	originalCollision = {}
 end
 
---------------------------------------------------
--- UNLOAD
---------------------------------------------------
+local function disableFullBright()
+	Lighting.Brightness = originalLighting.Brightness
+	Lighting.ClockTime = originalLighting.ClockTime
+	Lighting.FogEnd = originalLighting.FogEnd
+	Lighting.GlobalShadows = originalLighting.GlobalShadows
+end
 
-local unloaded = false
+local function disableLowGravity()
+	workspace.Gravity = DEFAULT_GRAVITY
+end
 
 local function unload()
+
 	if unloaded then
 		return
 	end
@@ -243,14 +167,33 @@ local function unload()
 	speedEnabled = false
 	noclipEnabled = false
 	flyEnabled = false
-	godModeEnabled = false
+	fullBrightEnabled = false
+	lowGravityEnabled = false
 
 	disableNoclip()
 	stopFly()
-	disableGodMode()
+	disableFullBright()
+	disableLowGravity()
 
 	for key in pairs(mobileFly) do
 		mobileFly[key] = false
+	end
+
+	local camera = workspace.CurrentCamera
+
+	if camera then
+		camera.FieldOfView = DEFAULT_FOV
+	end
+
+	local character = player.Character
+
+	if character then
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+		if humanoid then
+			humanoid.WalkSpeed = DEFAULT_WALK_SPEED
+			humanoid.PlatformStand = false
+		end
 	end
 
 	if gui then
@@ -265,18 +208,17 @@ end
 local frame = Instance.new("Frame")
 frame.Name = "Main"
 frame.Parent = gui
-
-if IS_MOBILE then
-	frame.Size = UDim2.new(0, 275, 0, 405)
-	frame.Position = UDim2.new(0.5, -137, 0.5, -202)
-else
-	frame.Size = UDim2.new(0, 350, 0, 455)
-	frame.Position = UDim2.new(0.5, -175, 0.5, -227)
-end
-
 frame.BackgroundColor3 = Color3.fromRGB(22, 23, 28)
 frame.BorderSizePixel = 0
 frame.Active = true
+
+if IS_MOBILE then
+	frame.Size = UDim2.new(0, 285, 0, 445)
+	frame.Position = UDim2.new(0.5, -142, 0.5, -222)
+else
+	frame.Size = UDim2.new(0, 360, 0, 505)
+	frame.Position = UDim2.new(0.5, -180, 0.5, -252)
+end
 
 local frameCorner = Instance.new("UICorner")
 frameCorner.CornerRadius = UDim.new(0, 14)
@@ -289,10 +231,6 @@ frameCorner.Parent = frame
 local title = Instance.new("TextLabel")
 title.Parent = frame
 title.BackgroundTransparency = 1
-
--- ВАЖНО:
--- На ПК: Mod Menu\PC
--- На телефоне: Mod Menu\Mobile
 title.Text = IS_MOBILE
 	and "Mod Menu\\Mobile"
 	or "Mod Menu\\PC"
@@ -303,11 +241,11 @@ title.TextXAlignment = Enum.TextXAlignment.Left
 title.Active = true
 
 if IS_MOBILE then
-	title.Size = UDim2.new(1, -95, 0, 32)
+	title.Size = UDim2.new(1, -95, 0, 34)
 	title.Position = UDim2.new(0, 14, 0, 7)
-	title.TextSize = 20
+	title.TextSize = 19
 else
-	title.Size = UDim2.new(1, -100, 0, 35)
+	title.Size = UDim2.new(1, -105, 0, 35)
 	title.Position = UDim2.new(0, 16, 0, 8)
 	title.TextSize = 22
 end
@@ -364,8 +302,10 @@ closeCorner.Parent = close
 --------------------------------------------------
 
 local minimize = nil
+local reopenButton = nil
 
 if IS_MOBILE then
+
 	minimize = Instance.new("TextButton")
 	minimize.Parent = frame
 	minimize.Size = UDim2.new(0, 34, 0, 34)
@@ -379,15 +319,7 @@ if IS_MOBILE then
 	local minimizeCorner = Instance.new("UICorner")
 	minimizeCorner.CornerRadius = UDim.new(0, 9)
 	minimizeCorner.Parent = minimize
-end
 
---------------------------------------------------
--- MOBILE REOPEN
---------------------------------------------------
-
-local reopenButton = nil
-
-if IS_MOBILE then
 	reopenButton = Instance.new("TextButton")
 	reopenButton.Parent = gui
 	reopenButton.Size = UDim2.new(0, 60, 0, 60)
@@ -409,6 +341,7 @@ end
 --------------------------------------------------
 
 local function createButton(text, y)
+
 	local button = Instance.new("TextButton")
 	button.Parent = frame
 
@@ -443,26 +376,33 @@ local jumpButton
 local speedButton
 local noclipButton
 local flyButton
-local godButton
+local fullBrightButton
+local gravityButton
 local settingsButton
 local resetButton
 
 if IS_MOBILE then
+
 	jumpButton = createButton("Infinite Jump: OFF", 65)
 	speedButton = createButton("Speed: OFF", 112)
 	noclipButton = createButton("Noclip: OFF", 159)
 	flyButton = createButton("Fly: OFF", 206)
-	godButton = createButton("God Mode: OFF", 253)
-	settingsButton = createButton("Settings", 300)
-	resetButton = createButton("Reset", 347)
+	fullBrightButton = createButton("FullBright: OFF", 253)
+	gravityButton = createButton("Low Gravity: OFF", 300)
+	settingsButton = createButton("Settings", 347)
+	resetButton = createButton("Reset", 394)
+
 else
+
 	jumpButton = createButton("Infinite Jump: OFF", 72)
 	speedButton = createButton("Speed: OFF", 122)
 	noclipButton = createButton("Noclip: OFF", 172)
 	flyButton = createButton("Fly: OFF", 222)
-	godButton = createButton("God Mode: OFF", 272)
-	settingsButton = createButton("Settings", 322)
-	resetButton = createButton("Reset", 372)
+	fullBrightButton = createButton("FullBright: OFF", 272)
+	gravityButton = createButton("Low Gravity: OFF", 322)
+	settingsButton = createButton("Settings", 372)
+	resetButton = createButton("Reset", 422)
+
 end
 
 --------------------------------------------------
@@ -470,6 +410,7 @@ end
 --------------------------------------------------
 
 jumpButton.Activated:Connect(function()
+
 	infiniteJumpEnabled = not infiniteJumpEnabled
 
 	setButtonState(
@@ -481,6 +422,11 @@ jumpButton.Activated:Connect(function()
 end)
 
 UserInputService.JumpRequest:Connect(function()
+
+	if unloaded then
+		return
+	end
+
 	if not infiniteJumpEnabled then
 		return
 	end
@@ -503,17 +449,18 @@ end)
 --------------------------------------------------
 
 speedButton.Activated:Connect(function()
+
 	speedEnabled = not speedEnabled
 
 	local character = player.Character
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local humanoid = character
+		and character:FindFirstChildOfClass("Humanoid")
 
 	if humanoid then
-		if speedEnabled then
-			humanoid.WalkSpeed = WALK_SPEED
-		else
-			humanoid.WalkSpeed = 16
-		end
+		humanoid.WalkSpeed =
+			speedEnabled
+			and WALK_SPEED
+			or DEFAULT_WALK_SPEED
 	end
 
 	setButtonState(
@@ -525,10 +472,11 @@ speedButton.Activated:Connect(function()
 end)
 
 --------------------------------------------------
--- NOCLIP BUTTON
+-- NOCLIP
 --------------------------------------------------
 
 noclipButton.Activated:Connect(function()
+
 	noclipEnabled = not noclipEnabled
 
 	if noclipEnabled then
@@ -546,10 +494,11 @@ noclipButton.Activated:Connect(function()
 end)
 
 --------------------------------------------------
--- FLY BUTTON
+-- FLY
 --------------------------------------------------
 
 flyButton.Activated:Connect(function()
+
 	flyEnabled = not flyEnabled
 
 	if flyEnabled then
@@ -571,23 +520,51 @@ flyButton.Activated:Connect(function()
 end)
 
 --------------------------------------------------
--- GOD MODE BUTTON
+-- FULLBRIGHT
 --------------------------------------------------
 
-godButton.Activated:Connect(function()
-	godModeEnabled = not godModeEnabled
+fullBrightButton.Activated:Connect(function()
 
-	if godModeEnabled then
-		enableGodMode()
+	fullBrightEnabled = not fullBrightEnabled
+
+	if fullBrightEnabled then
+
+		Lighting.Brightness = 3
+		Lighting.ClockTime = 12
+		Lighting.FogEnd = 100000
+		Lighting.GlobalShadows = false
+
 	else
-		disableGodMode()
+		disableFullBright()
 	end
 
 	setButtonState(
-		godButton,
-		godModeEnabled,
-		"God Mode: ON",
-		"God Mode: OFF"
+		fullBrightButton,
+		fullBrightEnabled,
+		"FullBright: ON",
+		"FullBright: OFF"
+	)
+end)
+
+--------------------------------------------------
+-- LOW GRAVITY
+--------------------------------------------------
+
+gravityButton.Activated:Connect(function()
+
+	lowGravityEnabled = not lowGravityEnabled
+
+	if lowGravityEnabled then
+		workspace.Gravity = 70
+	else
+		disableLowGravity()
+	end
+
+	setButtonState(
+		gravityButton,
+		lowGravityEnabled,
+		"Low Gravity: ON",
+		"Low Gravity: OFF"
 	)
 end)
 
@@ -615,26 +592,34 @@ settingsCorner.Parent = settingsFrame
 
 local settingsTitle = Instance.new("TextLabel")
 settingsTitle.Parent = settingsFrame
-settingsTitle.Size = UDim2.new(1, -100, 0, 35)
-settingsTitle.Position = UDim2.new(0, 15, 0, 8)
 settingsTitle.BackgroundTransparency = 1
 settingsTitle.Text = "Settings"
 settingsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-settingsTitle.TextSize = IS_MOBILE and 19 or 21
 settingsTitle.Font = Enum.Font.GothamBold
 settingsTitle.TextXAlignment = Enum.TextXAlignment.Left
 settingsTitle.Active = true
 
+if IS_MOBILE then
+	settingsTitle.Size = UDim2.new(1, -100, 0, 35)
+	settingsTitle.Position = UDim2.new(0, 15, 0, 7)
+	settingsTitle.TextSize = 20
+else
+	settingsTitle.Size = UDim2.new(1, -100, 0, 35)
+	settingsTitle.Position = UDim2.new(0, 16, 0, 8)
+	settingsTitle.TextSize = 22
+end
+
 local settingsVersion = Instance.new("TextLabel")
 settingsVersion.Parent = settingsFrame
-settingsVersion.Size = UDim2.new(0, 90, 0, 18)
-settingsVersion.Position = UDim2.new(0, 15, 0, 39)
 settingsVersion.BackgroundTransparency = 1
 settingsVersion.Text = VERSION
 settingsVersion.TextColor3 = Color3.fromRGB(145, 147, 155)
-settingsVersion.TextSize = 11
 settingsVersion.Font = Enum.Font.Gotham
 settingsVersion.TextXAlignment = Enum.TextXAlignment.Left
+
+settingsVersion.Size = UDim2.new(0, 90, 0, 18)
+settingsVersion.Position = UDim2.new(0, 15, 0, 39)
+settingsVersion.TextSize = 11
 
 --------------------------------------------------
 -- BACK
@@ -655,7 +640,7 @@ backCorner.CornerRadius = UDim.new(0, 9)
 backCorner.Parent = backButton
 
 --------------------------------------------------
--- SLIDER
+-- SLIDER CREATOR
 --------------------------------------------------
 
 local function createSlider(
@@ -667,6 +652,7 @@ local function createSlider(
 	defaultValue,
 	callback
 )
+
 	local label = Instance.new("TextLabel")
 	label.Parent = parent
 	label.Size = UDim2.new(1, -30, 0, 25)
@@ -713,7 +699,6 @@ local function createSlider(
 	knob.Parent = bar
 	knob.Size = UDim2.new(0, 20, 0, 20)
 	knob.AnchorPoint = Vector2.new(0.5, 0.5)
-	knob.Position = UDim2.new(0, 0, 0.5, 0)
 	knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 	knob.Text = ""
 
@@ -724,6 +709,7 @@ local function createSlider(
 	local draggingSlider = false
 
 	local function updateSlider(inputX)
+
 		local width = bar.AbsoluteSize.X
 
 		if width <= 0 then
@@ -737,28 +723,54 @@ local function createSlider(
 		)
 
 		local value = math.floor(
-			minValue + (maxValue - minValue) * percentage + 0.5
+			minValue
+			+ (maxValue - minValue) * percentage
+			+ 0.5
 		)
 
 		local normalized =
-			(value - minValue) /
-			(maxValue - minValue)
+			(value - minValue)
+			/ (maxValue - minValue)
 
-		fill.Size = UDim2.new(normalized, 0, 1, 0)
-		knob.Position = UDim2.new(normalized, 0, 0.5, 0)
+		fill.Size = UDim2.new(
+			normalized,
+			0,
+			1,
+			0
+		)
+
+		knob.Position = UDim2.new(
+			normalized,
+			0,
+			0.5,
+			0
+		)
+
 		valueLabel.Text = tostring(value)
 
 		callback(value)
 	end
 
 	local defaultNormalized =
-		(defaultValue - minValue) /
-		(maxValue - minValue)
+		(defaultValue - minValue)
+		/ (maxValue - minValue)
 
-	fill.Size = UDim2.new(defaultNormalized, 0, 1, 0)
-	knob.Position = UDim2.new(defaultNormalized, 0, 0.5, 0)
+	fill.Size = UDim2.new(
+		defaultNormalized,
+		0,
+		1,
+		0
+	)
+
+	knob.Position = UDim2.new(
+		defaultNormalized,
+		0,
+		0.5,
+		0
+	)
 
 	bar.InputBegan:Connect(function(input)
+
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
 
@@ -768,15 +780,16 @@ local function createSlider(
 	end)
 
 	knob.InputBegan:Connect(function(input)
+
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
 
 			draggingSlider = true
-			updateSlider(input.Position.X)
 		end
 	end)
 
 	UserInputService.InputChanged:Connect(function(input)
+
 		if not draggingSlider then
 			return
 		end
@@ -789,6 +802,7 @@ local function createSlider(
 	end)
 
 	UserInputService.InputEnded:Connect(function(input)
+
 		if input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch then
 
@@ -798,20 +812,22 @@ local function createSlider(
 end
 
 --------------------------------------------------
--- SLIDERS
+-- SETTINGS SLIDERS
 --------------------------------------------------
 
 createSlider(
 	settingsFrame,
 	"WalkSpeed",
-	90,
+	85,
 	MIN_WALK_SPEED,
 	MAX_WALK_SPEED,
 	WALK_SPEED,
 	function(value)
+
 		WALK_SPEED = value
 
 		if speedEnabled then
+
 			local character = player.Character
 			local humanoid = character
 				and character:FindFirstChildOfClass("Humanoid")
@@ -826,25 +842,51 @@ createSlider(
 createSlider(
 	settingsFrame,
 	"Fly Speed",
-	170,
+	165,
 	MIN_FLY_SPEED,
 	MAX_FLY_SPEED,
 	FLY_SPEED,
 	function(value)
+
 		FLY_SPEED = value
 	end
 )
 
+createSlider(
+	settingsFrame,
+	"FOV",
+	245,
+	MIN_FOV,
+	MAX_FOV,
+	CURRENT_FOV,
+	function(value)
+
+		CURRENT_FOV = value
+
+		local camera = workspace.CurrentCamera
+
+		if camera then
+			camera.FieldOfView = CURRENT_FOV
+		end
+	end
+)
+
 --------------------------------------------------
--- SETTINGS OPEN / BACK
+-- SETTINGS OPEN
 --------------------------------------------------
 
 settingsButton.Activated:Connect(function()
+
 	frame.Visible = false
 	settingsFrame.Visible = true
 end)
 
+--------------------------------------------------
+-- SETTINGS BACK
+--------------------------------------------------
+
 backButton.Activated:Connect(function()
+
 	settingsFrame.Visible = false
 	frame.Visible = true
 end)
@@ -856,6 +898,7 @@ end)
 local flyControls = nil
 
 if IS_MOBILE then
+
 	flyControls = Instance.new("Frame")
 	flyControls.Name = "FlyControls"
 	flyControls.Parent = gui
@@ -863,62 +906,61 @@ if IS_MOBILE then
 	flyControls.Position = UDim2.new(1, -205, 1, -205)
 	flyControls.BackgroundTransparency = 1
 	flyControls.Visible = false
-end
 
-local function createMobileFlyButton(text, position)
-	local button = Instance.new("TextButton")
+	local function createFlyButton(text, position)
 
-	button.Parent = flyControls
-	button.Size = UDim2.new(0, 55, 0, 55)
-	button.Position = position
-	button.BackgroundColor3 = Color3.fromRGB(35, 36, 45)
-	button.BackgroundTransparency = 0.05
-	button.Text = text
-	button.TextColor3 = Color3.fromRGB(255, 255, 255)
-	button.TextSize = 20
-	button.Font = Enum.Font.GothamBold
+		local button = Instance.new("TextButton")
+		button.Parent = flyControls
+		button.Size = UDim2.new(0, 55, 0, 55)
+		button.Position = position
+		button.BackgroundColor3 = Color3.fromRGB(35, 36, 45)
+		button.BackgroundTransparency = 0.05
+		button.Text = text
+		button.TextColor3 = Color3.fromRGB(255, 255, 255)
+		button.TextSize = 20
+		button.Font = Enum.Font.GothamBold
 
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 14)
-	corner.Parent = button
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 14)
+		corner.Parent = button
 
-	return button
-end
+		return button
+	end
 
-if IS_MOBILE then
-
-	local forward = createMobileFlyButton(
+	local forward = createFlyButton(
 		"▲",
 		UDim2.new(0, 67, 0, 0)
 	)
 
-	local left = createMobileFlyButton(
+	local left = createFlyButton(
 		"◀",
 		UDim2.new(0, 0, 0, 58)
 	)
 
-	local backward = createMobileFlyButton(
+	local backward = createFlyButton(
 		"▼",
 		UDim2.new(0, 67, 0, 58)
 	)
 
-	local right = createMobileFlyButton(
+	local right = createFlyButton(
 		"▶",
 		UDim2.new(0, 134, 0, 58)
 	)
 
-	local up = createMobileFlyButton(
+	local up = createFlyButton(
 		"↑",
 		UDim2.new(0, 134, 0, 0)
 	)
 
-	local down = createMobileFlyButton(
+	local down = createFlyButton(
 		"↓",
 		UDim2.new(0, 67, 0, 116)
 	)
 
 	local function bindFlyButton(button, key)
+
 		button.InputBegan:Connect(function(input)
+
 			if input.UserInputType == Enum.UserInputType.Touch
 				or input.UserInputType == Enum.UserInputType.MouseButton1 then
 
@@ -927,6 +969,7 @@ if IS_MOBILE then
 		end)
 
 		button.InputEnded:Connect(function(input)
+
 			if input.UserInputType == Enum.UserInputType.Touch
 				or input.UserInputType == Enum.UserInputType.MouseButton1 then
 
@@ -944,38 +987,11 @@ if IS_MOBILE then
 end
 
 --------------------------------------------------
--- MOBILE MINIMIZE
---------------------------------------------------
-
-if IS_MOBILE then
-
-	minimize.Activated:Connect(function()
-		frame.Visible = false
-		settingsFrame.Visible = false
-
-		if reopenButton then
-			reopenButton.Visible = true
-		end
-
-		if flyControls then
-			flyControls.Visible = false
-		end
-	end)
-
-	reopenButton.Activated:Connect(function()
-		frame.Visible = true
-
-		if reopenButton then
-			reopenButton.Visible = false
-		end
-	end)
-end
-
---------------------------------------------------
 -- MOBILE FLY VISIBILITY
 --------------------------------------------------
 
 local function updateMobileFlyControls()
+
 	if not IS_MOBILE or not flyControls then
 		return
 	end
@@ -988,6 +1004,33 @@ local function updateMobileFlyControls()
 end
 
 --------------------------------------------------
+-- MOBILE MINIMIZE
+--------------------------------------------------
+
+if IS_MOBILE then
+
+	minimize.Activated:Connect(function()
+
+		frame.Visible = false
+		settingsFrame.Visible = false
+
+		reopenButton.Visible = true
+
+		if flyControls then
+			flyControls.Visible = false
+		end
+	end)
+
+	reopenButton.Activated:Connect(function()
+
+		frame.Visible = true
+		reopenButton.Visible = false
+
+		updateMobileFlyControls()
+	end)
+end
+
+--------------------------------------------------
 -- RESET
 --------------------------------------------------
 
@@ -997,23 +1040,35 @@ resetButton.Activated:Connect(function()
 	speedEnabled = false
 	noclipEnabled = false
 	flyEnabled = false
-	godModeEnabled = false
+	fullBrightEnabled = false
+	lowGravityEnabled = false
 
 	disableNoclip()
 	stopFly()
-	disableGodMode()
+	disableFullBright()
+	disableLowGravity()
 
 	for key in pairs(mobileFly) do
 		mobileFly[key] = false
 	end
+
+	WALK_SPEED = 50
+	FLY_SPEED = 60
+	CURRENT_FOV = DEFAULT_FOV
 
 	local character = player.Character
 	local humanoid = character
 		and character:FindFirstChildOfClass("Humanoid")
 
 	if humanoid then
-		humanoid.WalkSpeed = 16
+		humanoid.WalkSpeed = DEFAULT_WALK_SPEED
 		humanoid.PlatformStand = false
+	end
+
+	local camera = workspace.CurrentCamera
+
+	if camera then
+		camera.FieldOfView = DEFAULT_FOV
 	end
 
 	setButtonState(
@@ -1045,10 +1100,17 @@ resetButton.Activated:Connect(function()
 	)
 
 	setButtonState(
-		godButton,
+		fullBrightButton,
 		false,
-		"God Mode: ON",
-		"God Mode: OFF"
+		"FullBright: ON",
+		"FullBright: OFF"
+	)
+
+	setButtonState(
+		gravityButton,
+		false,
+		"Low Gravity: ON",
+		"Low Gravity: OFF"
 	)
 
 	updateMobileFlyControls()
@@ -1077,42 +1139,46 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 
 	if input.KeyCode == Enum.KeyCode.RightShift then
-		gui.Enabled = not gui.Enabled
 
-		if not gui.Enabled then
-			updateMobileFlyControls()
-		end
+		gui.Enabled = not gui.Enabled
 	end
 end)
 
 --------------------------------------------------
 -- DRAG SYSTEM
--- PC + MOBILE
 --------------------------------------------------
 
 local dragging = false
 local dragInput = nil
 local dragStart = nil
 local dragStartPosition = nil
+local dragTarget = nil
 
-local function beginDrag(input, object)
+local function beginDrag(input, target)
+
 	dragging = true
 	dragInput = input
 	dragStart = input.Position
-	dragStartPosition = object.Position
+	dragStartPosition = target.Position
+	dragTarget = target
 end
 
-local function finishDrag()
+local function endDrag()
+
 	dragging = false
 	dragInput = nil
+	dragStart = nil
+	dragStartPosition = nil
+	dragTarget = nil
 end
 
-local function moveDraggedWindow(input)
+local function updateDrag(input)
+
 	if not dragging then
 		return
 	end
 
-	if input ~= dragInput then
+	if not dragTarget then
 		return
 	end
 
@@ -1125,12 +1191,17 @@ local function moveDraggedWindow(input)
 		dragStartPosition.Y.Offset + delta.Y
 	)
 
-	frame.Position = newPosition
-	settingsFrame.Position = newPosition
+	dragTarget.Position = newPosition
+
+	if dragTarget == frame then
+		settingsFrame.Position = newPosition
+	elseif dragTarget == settingsFrame then
+		frame.Position = newPosition
+	end
 end
 
 --------------------------------------------------
--- MAIN TITLE DRAG
+-- MAIN HEADER DRAG
 --------------------------------------------------
 
 title.InputBegan:Connect(function(input)
@@ -1142,26 +1213,17 @@ title.InputBegan:Connect(function(input)
 	end
 end)
 
-title.InputChanged:Connect(function(input)
-
-	if input.UserInputType == Enum.UserInputType.MouseMovement
-		or input.UserInputType == Enum.UserInputType.Touch then
-
-		dragInput = input
-	end
-end)
-
 title.InputEnded:Connect(function(input)
 
 	if input.UserInputType == Enum.UserInputType.MouseButton1
 		or input.UserInputType == Enum.UserInputType.Touch then
 
-		finishDrag()
+		endDrag()
 	end
 end)
 
 --------------------------------------------------
--- SETTINGS TITLE DRAG
+-- SETTINGS HEADER DRAG
 --------------------------------------------------
 
 settingsTitle.InputBegan:Connect(function(input)
@@ -1173,21 +1235,12 @@ settingsTitle.InputBegan:Connect(function(input)
 	end
 end)
 
-settingsTitle.InputChanged:Connect(function(input)
-
-	if input.UserInputType == Enum.UserInputType.MouseMovement
-		or input.UserInputType == Enum.UserInputType.Touch then
-
-		dragInput = input
-	end
-end)
-
 settingsTitle.InputEnded:Connect(function(input)
 
 	if input.UserInputType == Enum.UserInputType.MouseButton1
 		or input.UserInputType == Enum.UserInputType.Touch then
 
-		finishDrag()
+		endDrag()
 	end
 end)
 
@@ -1204,12 +1257,12 @@ UserInputService.InputChanged:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseMovement
 		or input.UserInputType == Enum.UserInputType.Touch then
 
-		moveDraggedWindow(input)
+		updateDrag(input)
 	end
 end)
 
 --------------------------------------------------
--- FLY + NOCLIP LOOP
+-- FLY LOOP + NOCLIP + VISUALS
 --------------------------------------------------
 
 RunService.RenderStepped:Connect(function()
@@ -1233,6 +1286,16 @@ RunService.RenderStepped:Connect(function()
 	end
 
 	--------------------------------------------------
+	-- SPEED
+	--------------------------------------------------
+
+	if speedEnabled then
+		if humanoid.WalkSpeed ~= WALK_SPEED then
+			humanoid.WalkSpeed = WALK_SPEED
+		end
+	end
+
+	--------------------------------------------------
 	-- NOCLIP
 	--------------------------------------------------
 
@@ -1252,6 +1315,32 @@ RunService.RenderStepped:Connect(function()
 	end
 
 	--------------------------------------------------
+	-- FULLBRIGHT
+	--------------------------------------------------
+
+	if fullBrightEnabled then
+
+		Lighting.Brightness = 3
+		Lighting.ClockTime = 12
+		Lighting.FogEnd = 100000
+		Lighting.GlobalShadows = false
+	end
+
+	--------------------------------------------------
+	-- LOW GRAVITY
+	--------------------------------------------------
+
+	if lowGravityEnabled then
+		workspace.Gravity = 70
+	end
+
+	--------------------------------------------------
+	-- FOV
+	--------------------------------------------------
+
+	camera.FieldOfView = CURRENT_FOV
+
+	--------------------------------------------------
 	-- FLY
 	--------------------------------------------------
 
@@ -1269,10 +1358,10 @@ RunService.RenderStepped:Connect(function()
 
 		local movement = Vector3.zero
 
-		if IS_MOBILE then
+		local look = camera.CFrame.LookVector
+		local right = camera.CFrame.RightVector
 
-			local look = camera.CFrame.LookVector
-			local right = camera.CFrame.RightVector
+		if IS_MOBILE then
 
 			if mobileFly.Forward then
 				movement += look
@@ -1299,9 +1388,6 @@ RunService.RenderStepped:Connect(function()
 			end
 
 		else
-
-			local look = camera.CFrame.LookVector
-			local right = camera.CFrame.RightVector
 
 			if UserInputService:IsKeyDown(Enum.KeyCode.W) then
 				movement += look
@@ -1363,8 +1449,15 @@ player.CharacterAdded:Connect(function(character)
 		enableNoclip()
 	end
 
-	if godModeEnabled then
-		enableGodMode()
+	if fullBrightEnabled then
+		Lighting.Brightness = 3
+		Lighting.ClockTime = 12
+		Lighting.FogEnd = 100000
+		Lighting.GlobalShadows = false
+	end
+
+	if lowGravityEnabled then
+		workspace.Gravity = 70
 	end
 
 	if flyEnabled then
