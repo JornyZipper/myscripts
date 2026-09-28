@@ -1,0 +1,2048 @@
+--// Mod Menu From Zero
+--// Put this LocalScript in: StarterPlayer > StarterPlayerScripts
+--// Designed for your own Roblox Studio game.
+
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local IsMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
+
+local CONFIG = {
+    DefaultWalkSpeed = 16,
+    DefaultJumpPower = 50,
+    DefaultFlySpeed = 60,
+    MinWalkSpeed = 16,
+    MaxWalkSpeed = 150,
+    MinJumpPower = 50,
+    MaxJumpPower = 150,
+    MinFlySpeed = 20,
+    MaxFlySpeed = 1000,
+    MinFOV = 70,
+    MaxFOV = 120,
+    DefaultFOV = 70,
+    UIKey = Enum.KeyCode.RightShift,
+}
+
+local state = {
+    speed = false,
+    jump = false,
+    noclip = false,
+    fly = false,
+    infiniteJump = false,
+    fullBright = false,
+    lowGravity = false,
+    spin = false,
+    bunnyHop = false,
+    strafe = false,
+    esp = false,
+    roleESP = false,
+    innocentESP = false,
+    espLines = false,
+    minimized = false,
+    uiVisible = true,
+    unloaded = false,
+}
+
+local values = {
+    walkSpeed = CONFIG.DefaultWalkSpeed,
+    jumpPower = CONFIG.DefaultJumpPower,
+    flySpeed = CONFIG.DefaultFlySpeed,
+    fov = CONFIG.DefaultFOV,
+}
+
+local connections = {}
+local characterConnections = {}
+local originalCollisions = {}
+local espObjects = {}
+local flyObjects = {
+    active = false,
+    up = false,
+    down = false,
+    flyVelocity = nil,
+    flyGyro = nil,
+}
+local savedLighting = nil
+local savedGravity = Workspace.Gravity
+local savedFOV = CONFIG.DefaultFOV
+local savedWalkSpeed = CONFIG.DefaultWalkSpeed
+local savedJumpPower = CONFIG.DefaultJumpPower
+
+local setWalkSpeedSlider
+local setJumpPowerSlider
+local setFlySpeedSlider
+local setFOVSlider
+
+local enableFullBright
+local disableFullBright
+
+local roles = {}
+local Murder = ""
+local Sheriff = ""
+local Hero = ""
+
+local function addConnection(connection, bucket)
+    bucket = bucket or connections
+    table.insert(bucket, connection)
+    return connection
+end
+
+local function disconnectBucket(bucket)
+    for i = #bucket, 1, -1 do
+        local connection = bucket[i]
+        if connection and connection.Disconnect then
+            pcall(function()
+                connection:Disconnect()
+            end)
+        end
+        bucket[i] = nil
+    end
+end
+
+local function getCharacter()
+    return LocalPlayer.Character
+end
+
+local function getHumanoid()
+    local character = getCharacter()
+    if not character then
+        return nil
+    end
+    return character:FindFirstChildOfClass("Humanoid")
+end
+
+local function getRoot()
+    local character = getCharacter()
+    if not character then
+        return nil
+    end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function isAliveCharacter(player)
+    local character = player.Character
+    if not character then
+        return false
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    return humanoid ~= nil and humanoid.Health > 0
+end
+
+local function setButtonVisual(button, enabled)
+    if enabled then
+        button.TextColor3 = Color3.fromRGB(220, 255, 235)
+        button.BackgroundColor3 = Color3.fromRGB(38, 115, 72)
+    else
+        button.TextColor3 = Color3.fromRGB(220, 220, 225)
+        button.BackgroundColor3 = Color3.fromRGB(37, 37, 43)
+    end
+end
+
+local function create(className, properties, parent)
+    local object = Instance.new(className)
+    for property, value in pairs(properties) do
+        object[property] = value
+    end
+    object.Parent = parent
+    return object
+end
+
+--// GUI
+local ScreenGui = create("ScreenGui", {
+    Name = "ModMenuFromZero",
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    DisplayOrder = 999,
+}, PlayerGui)
+
+local Scale = create("UIScale", {
+    Scale = 1,
+}, ScreenGui)
+
+local Main = create("Frame", {
+    Name = "Main",
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.fromOffset(470, 570),
+    BackgroundColor3 = Color3.fromRGB(22, 22, 27),
+    BorderSizePixel = 0,
+}, ScreenGui)
+
+create("UICorner", {
+    CornerRadius = UDim.new(0, 12),
+}, Main)
+
+create("UIStroke", {
+    Color = Color3.fromRGB(70, 70, 80),
+    Thickness = 1,
+    Transparency = 0.2,
+}, Main)
+
+local TopBar = create("Frame", {
+    Name = "TopBar",
+    Size = UDim2.new(1, 0, 0, 52),
+    BackgroundColor3 = Color3.fromRGB(28, 28, 34),
+    BorderSizePixel = 0,
+}, Main)
+
+create("UICorner", {
+    CornerRadius = UDim.new(0, 12),
+}, TopBar)
+
+local Title = create("TextLabel", {
+    Name = "Title",
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(16, 7),
+    Size = UDim2.new(1, -120, 0, 24),
+    Font = Enum.Font.GothamBold,
+    Text = "Mod Menu | PC",
+    TextColor3 = Color3.fromRGB(240, 240, 245),
+    TextSize = 18,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, TopBar)
+
+local Status = create("TextLabel", {
+    Name = "Status",
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(17, 30),
+    Size = UDim2.new(1, -120, 0, 16),
+    Font = Enum.Font.Gotham,
+    Text = "RightShift = hide/show",
+    TextColor3 = Color3.fromRGB(145, 145, 155),
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, TopBar)
+
+local Minimize = create("TextButton", {
+    Name = "Minimize",
+    Position = UDim2.new(1, -76, 0, 9),
+    Size = UDim2.fromOffset(30, 30),
+    BackgroundColor3 = Color3.fromRGB(42, 42, 49),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    Text = "—",
+    TextColor3 = Color3.fromRGB(230, 230, 235),
+    TextSize = 17,
+    AutoButtonColor = false,
+}, TopBar)
+
+create("UICorner", {
+    CornerRadius = UDim.new(0, 7),
+}, Minimize)
+
+local Close = create("TextButton", {
+    Name = "Close",
+    Position = UDim2.new(1, -40, 0, 9),
+    Size = UDim2.fromOffset(30, 30),
+    BackgroundColor3 = Color3.fromRGB(95, 44, 48),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    Text = "X",
+    TextColor3 = Color3.fromRGB(255, 235, 235),
+    TextSize = 14,
+    AutoButtonColor = false,
+}, TopBar)
+
+create("UICorner", {
+    CornerRadius = UDim.new(0, 7),
+}, Close)
+
+local Content = create("ScrollingFrame", {
+    Name = "Content",
+    Position = UDim2.fromOffset(10, 62),
+    Size = UDim2.new(1, -20, 1, -72),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 4,
+    ScrollBarImageTransparency = 0.35,
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+}, Main)
+
+local Layout = create("UIListLayout", {
+    Padding = UDim.new(0, 7),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+}, Content)
+
+local Padding = create("UIPadding", {
+    PaddingLeft = UDim.new(0, 5),
+    PaddingRight = UDim.new(0, 5),
+    PaddingTop = UDim.new(0, 2),
+    PaddingBottom = UDim.new(0, 6),
+}, Content)
+
+local reopen = create("TextButton", {
+    Name = "Reopen",
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.fromOffset(74, 42),
+    BackgroundColor3 = Color3.fromRGB(38, 115, 72),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    Text = "MOD",
+    TextColor3 = Color3.fromRGB(240, 255, 245),
+    TextSize = 14,
+    Visible = false,
+    Active = true,
+    AutoButtonColor = false,
+}, ScreenGui)
+
+create("UICorner", {
+    CornerRadius = UDim.new(0, 10),
+}, reopen)
+
+local MobileFlyControls = create("Frame", {
+    Name = "MobileFlyControls",
+    AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -20, 1, -25),
+    Size = UDim2.fromOffset(62, 132),
+    BackgroundTransparency = 1,
+    Visible = false,
+}, ScreenGui)
+
+local FlyUpButton = create("TextButton", {
+    Name = "FlyUp",
+    Position = UDim2.fromOffset(0, 0),
+    Size = UDim2.fromOffset(62, 58),
+    BackgroundColor3 = Color3.fromRGB(38, 115, 72),
+    BackgroundTransparency = 0.08,
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    Text = "▲",
+    TextColor3 = Color3.fromRGB(240, 255, 245),
+    TextSize = 22,
+    AutoButtonColor = false,
+}, MobileFlyControls)
+
+create("UICorner", {CornerRadius = UDim.new(0, 12)}, FlyUpButton)
+
+local FlyDownButton = create("TextButton", {
+    Name = "FlyDown",
+    Position = UDim2.fromOffset(0, 68),
+    Size = UDim2.fromOffset(62, 58),
+    BackgroundColor3 = Color3.fromRGB(75, 75, 85),
+    BackgroundTransparency = 0.08,
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    Text = "▼",
+    TextColor3 = Color3.fromRGB(240, 240, 245),
+    TextSize = 22,
+    AutoButtonColor = false,
+}, MobileFlyControls)
+
+create("UICorner", {CornerRadius = UDim.new(0, 12)}, FlyDownButton)
+
+local dragHandle = create("Frame", {
+    Name = "DragHandle",
+    Position = UDim2.fromOffset(0, 0),
+    Size = UDim2.new(1, -116, 0, 52),
+    BackgroundTransparency = 1,
+    Active = true,
+}, TopBar)
+
+local function addSection(text, order)
+    return create("TextLabel", {
+        Size = UDim2.new(1, -4, 0, 25),
+        BackgroundTransparency = 1,
+        Font = Enum.Font.GothamBold,
+        Text = text,
+        TextColor3 = Color3.fromRGB(165, 165, 175),
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = order,
+    }, Content)
+end
+
+local function addToggle(name, order, callback)
+    local button = create("TextButton", {
+        Name = name,
+        Size = UDim2.new(1, -4, 0, 38),
+        BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+        BorderSizePixel = 0,
+        Font = Enum.Font.GothamSemibold,
+        Text = name .. "  [OFF]",
+        TextColor3 = Color3.fromRGB(220, 220, 225),
+        TextSize = 13,
+        AutoButtonColor = false,
+        LayoutOrder = order,
+    }, Content)
+
+    create("UICorner", {
+        CornerRadius = UDim.new(0, 8),
+    }, button)
+
+    local enabled = false
+    local function setEnabled(value)
+        enabled = value
+        button.Text = name .. (enabled and "  [ON]" or "  [OFF]")
+        setButtonVisual(button, enabled)
+        callback(enabled)
+    end
+
+    addConnection(button.MouseButton1Click:Connect(function()
+        setEnabled(not enabled)
+    end))
+
+    return button, setEnabled
+end
+
+local function addSlider(name, minValue, maxValue, defaultValue, order, callback)
+    local holder = create("Frame", {
+        Name = name .. "Slider",
+        Size = UDim2.new(1, -4, 0, 57),
+        BackgroundColor3 = Color3.fromRGB(31, 31, 37),
+        BorderSizePixel = 0,
+        LayoutOrder = order,
+    }, Content)
+
+    create("UICorner", {
+        CornerRadius = UDim.new(0, 8),
+    }, holder)
+
+    local label = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(10, 6),
+        Size = UDim2.new(1, -80, 0, 18),
+        Font = Enum.Font.GothamSemibold,
+        Text = name,
+        TextColor3 = Color3.fromRGB(225, 225, 230),
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, holder)
+
+    local valueLabel = create("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(1, -65, 0, 6),
+        Size = UDim2.fromOffset(55, 18),
+        Font = Enum.Font.GothamBold,
+        Text = tostring(defaultValue),
+        TextColor3 = Color3.fromRGB(170, 240, 200),
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Right,
+    }, holder)
+
+    local bar = create("Frame", {
+        Position = UDim2.fromOffset(10, 35),
+        Size = UDim2.new(1, -20, 0, 8),
+        BackgroundColor3 = Color3.fromRGB(55, 55, 62),
+        BorderSizePixel = 0,
+        Active = true,
+    }, holder)
+
+    create("UICorner", {
+        CornerRadius = UDim.new(1, 0),
+    }, bar)
+
+    local fill = create("Frame", {
+        Size = UDim2.fromScale((defaultValue - minValue) / (maxValue - minValue), 1),
+        BackgroundColor3 = Color3.fromRGB(72, 170, 105),
+        BorderSizePixel = 0,
+    }, bar)
+
+    create("UICorner", {
+        CornerRadius = UDim.new(1, 0),
+    }, fill)
+
+    local dragging = false
+    local function setValue(value)
+        value = math.clamp(math.floor(value + 0.5), minValue, maxValue)
+        local alpha = (value - minValue) / (maxValue - minValue)
+        fill.Size = UDim2.fromScale(alpha, 1)
+        valueLabel.Text = tostring(value)
+        callback(value)
+    end
+
+    local function valueFromX(x)
+        local left = bar.AbsolutePosition.X
+        local width = bar.AbsoluteSize.X
+        if width <= 0 then
+            return defaultValue
+        end
+        local alpha = math.clamp((x - left) / width, 0, 1)
+        return minValue + (maxValue - minValue) * alpha
+    end
+
+    addConnection(bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            setValue(valueFromX(input.Position.X))
+        end
+    end))
+
+    addConnection(UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            setValue(valueFromX(input.Position.X))
+        end
+    end))
+
+    addConnection(UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end))
+
+    return holder, setValue
+end
+
+addSection("MOVEMENT", 1)
+
+local speedButton
+local setSpeedToggle
+speedButton, setSpeedToggle = addToggle("Speed", 2, function(enabled)
+    state.speed = enabled
+    local humanoid = getHumanoid()
+    if humanoid then
+        if enabled then
+            humanoid.WalkSpeed = values.walkSpeed
+        else
+            humanoid.WalkSpeed = CONFIG.DefaultWalkSpeed
+        end
+    end
+end)
+
+local jumpButton
+local setJumpToggle
+jumpButton, setJumpToggle = addToggle("JumpPower", 3, function(enabled)
+    state.jump = enabled
+    local humanoid = getHumanoid()
+    if humanoid then
+        if enabled then
+            humanoid.UseJumpPower = true
+            humanoid.JumpPower = values.jumpPower
+        else
+            humanoid.UseJumpPower = true
+            humanoid.JumpPower = CONFIG.DefaultJumpPower
+        end
+    end
+end)
+
+local noclipButton
+local setNoclipToggle
+noclipButton, setNoclipToggle = addToggle("Noclip", 4, function(enabled)
+    state.noclip = enabled
+end)
+
+local flyButton
+local setFlyToggle
+flyButton, setFlyToggle = addToggle("Fly", 5, function(enabled)
+    state.fly = enabled
+    MobileFlyControls.Visible = IsMobile and enabled
+end)
+
+local infiniteButton
+local setInfiniteToggle
+infiniteButton, setInfiniteToggle = addToggle("Infinite Jump", 6, function(enabled)
+    state.infiniteJump = enabled
+end)
+
+local bunnyButton
+local setBunnyToggle
+bunnyButton, setBunnyToggle = addToggle("Bunny Hop", 7, function(enabled)
+    state.bunnyHop = enabled
+end)
+
+local strafeButton
+local setStrafeToggle
+strafeButton, setStrafeToggle = addToggle("Strafe", 8, function(enabled)
+    state.strafe = enabled
+end)
+
+local _, setWalkSpeedSliderValue = addSlider("WalkSpeed", CONFIG.MinWalkSpeed, CONFIG.MaxWalkSpeed, values.walkSpeed, 9, function(value)
+    values.walkSpeed = value
+    local humanoid = getHumanoid()
+    if humanoid and state.speed then
+        humanoid.WalkSpeed = value
+    end
+end)
+setWalkSpeedSlider = setWalkSpeedSliderValue
+
+local _, setJumpPowerSliderValue = addSlider("JumpPower", CONFIG.MinJumpPower, CONFIG.MaxJumpPower, values.jumpPower, 10, function(value)
+    values.jumpPower = value
+    local humanoid = getHumanoid()
+    if humanoid and state.jump then
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = value
+    end
+end)
+setJumpPowerSlider = setJumpPowerSliderValue
+
+local _, setFlySpeedSliderValue = addSlider("FlySpeed", CONFIG.MinFlySpeed, CONFIG.MaxFlySpeed, values.flySpeed, 11, function(value)
+    values.flySpeed = value
+end)
+setFlySpeedSlider = setFlySpeedSliderValue
+
+addSection("VISUALS", 20)
+
+local fullBrightButton
+local setFullBrightToggle
+fullBrightButton, setFullBrightToggle = addToggle("FullBright", 21, function(enabled)
+    state.fullBright = enabled
+    if enabled then
+        enableFullBright()
+    else
+        disableFullBright()
+    end
+end)
+
+local gravityButton
+local setGravityToggle
+gravityButton, setGravityToggle = addToggle("Low Gravity", 22, function(enabled)
+    state.lowGravity = enabled
+    Workspace.Gravity = enabled and 60 or savedGravity
+end)
+
+local spinButton
+local setSpinToggle
+spinButton, setSpinToggle = addToggle("Spin", 23, function(enabled)
+    state.spin = enabled
+end)
+
+local espButton
+local setESPToggle
+espButton, setESPToggle = addToggle("ESP Players", 24, function(enabled)
+    state.esp = enabled
+end)
+
+local roleESPButton
+local setRoleESPToggle
+roleESPButton, setRoleESPToggle = addToggle("Role ESP", 25, function(enabled)
+    state.roleESP = enabled
+end)
+
+local innocentESPButton
+local setInnocentESPToggle
+innocentESPButton, setInnocentESPToggle = addToggle("Innocent ESP", 26, function(enabled)
+    state.innocentESP = enabled
+end)
+
+local espLinesButton
+local setESPLinesToggle
+espLinesButton, setESPLinesToggle = addToggle("ESP Lines", 27, function(enabled)
+    state.espLines = enabled
+end)
+
+local _, setFOVSliderValue = addSlider("FOV", CONFIG.MinFOV, CONFIG.MaxFOV, values.fov, 28, function(value)
+    values.fov = value
+    local camera = Workspace.CurrentCamera
+    if camera then
+        camera.FieldOfView = value
+    end
+end)
+setFOVSlider = setFOVSliderValue
+
+local function findRevolverInWorkspace()
+    local preferred = {
+        "revolver",
+        "sheriff",
+        "pistol",
+        "gun",
+    }
+
+    for _, object in ipairs(Workspace:GetDescendants()) do
+        if object:IsA("Tool") or object:IsA("BasePart") or object:IsA("Model") then
+            local name = string.lower(object.Name)
+            for _, keyword in ipairs(preferred) do
+                if string.find(name, keyword, 1, true) then
+                    if object:IsA("Tool") then
+                        local handle = object:FindFirstChild("Handle")
+                        if handle and handle:IsA("BasePart") then
+                            return handle
+                        end
+                    elseif object:IsA("Model") then
+                        local handle = object:FindFirstChild("Handle", true)
+                        if handle and handle:IsA("BasePart") then
+                            return handle
+                        end
+                        local primary = object.PrimaryPart
+                        if primary then
+                            return primary
+                        end
+                    elseif object:IsA("BasePart") then
+                        return object
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local teleportBusy = false
+local function teleportToRevolver()
+    if state.unloaded or teleportBusy then
+        return
+    end
+
+    teleportBusy = true
+
+    local character = getCharacter()
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local target = findRevolverInWorkspace()
+
+    if not root or not humanoid then
+        Status.Text = "Teleport: character not ready"
+        teleportBusy = false
+        return
+    end
+
+    if not target then
+        Status.Text = "Teleport: revolver not found"
+        teleportBusy = false
+        return
+    end
+
+    local targetPosition = target.Position + Vector3.new(0, 3.5, 0)
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {character, target.Parent}
+
+    local floorHit = Workspace:Raycast(
+        targetPosition + Vector3.new(0, 8, 0),
+        Vector3.new(0, -20, 0),
+        rayParams
+    )
+
+    if floorHit then
+        targetPosition = floorHit.Position + Vector3.new(0, 3.5, 0)
+    end
+
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+    root.Anchored = true
+    root.CFrame = CFrame.new(targetPosition)
+    task.wait(0.15)
+
+    if root and root.Parent then
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        root.Anchored = false
+
+        if humanoid and humanoid.Parent then
+            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end
+    end
+
+    Status.Text = "Teleported to revolver"
+    teleportBusy = false
+end
+
+addSection("UTILITY", 30)
+
+local refreshButton = create("TextButton", {
+    Name = "RefreshRoles",
+    Size = UDim2.new(1, -4, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamSemibold,
+    Text = "Refresh Roles",
+    TextColor3 = Color3.fromRGB(220, 220, 225),
+    TextSize = 13,
+    AutoButtonColor = false,
+    LayoutOrder = 31,
+}, Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, refreshButton)
+
+local teleportRevolverButton = create("TextButton", {
+    Name = "TeleportRevolver",
+    Size = UDim2.new(1, -4, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamSemibold,
+    Text = "Teleport To Revolver",
+    TextColor3 = Color3.fromRGB(220, 220, 225),
+    TextSize = 13,
+    AutoButtonColor = false,
+    LayoutOrder = 32,
+}, Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, teleportRevolverButton)
+
+local resetButton = create("TextButton", {
+    Name = "ResetAll",
+    Size = UDim2.new(1, -4, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(56, 47, 35),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamSemibold,
+    Text = "Reset Settings",
+    TextColor3 = Color3.fromRGB(245, 230, 205),
+    TextSize = 13,
+    AutoButtonColor = false,
+    LayoutOrder = 33,
+}, Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, resetButton)
+
+local unloadButton = create("TextButton", {
+    Name = "Unload",
+    Size = UDim2.new(1, -4, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(95, 44, 48),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    Text = "Unload Menu",
+    TextColor3 = Color3.fromRGB(255, 235, 235),
+    TextSize = 13,
+    AutoButtonColor = false,
+    LayoutOrder = 34,
+}, Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, unloadButton)
+
+local dragStart = nil
+local startPosition = nil
+local draggingMain = false
+
+local function beginDrag(input)
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+    draggingMain = true
+    dragStart = input.Position
+    startPosition = Main.Position
+end
+
+local function updateDrag(input)
+    if not draggingMain then
+        return
+    end
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+
+    local delta = input.Position - dragStart
+    Main.Position = UDim2.new(
+        startPosition.X.Scale,
+        startPosition.X.Offset + delta.X,
+        startPosition.Y.Scale,
+        startPosition.Y.Offset + delta.Y
+    )
+end
+
+addConnection(dragHandle.InputBegan:Connect(beginDrag))
+addConnection(UIS.InputChanged:Connect(updateDrag))
+addConnection(UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingMain = false
+    end
+end))
+
+--// Mobile floating MOD drag
+local draggingReopen = false
+local reopenDragStart = nil
+local reopenStartPosition = nil
+
+addConnection(reopen.InputBegan:Connect(function(input)
+    if not IsMobile then
+        return
+    end
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingReopen = true
+        reopenDragStart = input.Position
+        reopenStartPosition = reopen.Position
+    end
+end))
+
+addConnection(UIS.InputChanged:Connect(function(input)
+    if not draggingReopen or not IsMobile then
+        return
+    end
+    if input.UserInputType ~= Enum.UserInputType.Touch and input.UserInputType ~= Enum.UserInputType.MouseMovement then
+        return
+    end
+
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        return
+    end
+
+    local delta = input.Position - reopenDragStart
+    local viewport = camera.ViewportSize
+    local halfX = reopen.AbsoluteSize.X * 0.5
+    local halfY = reopen.AbsoluteSize.Y * 0.5
+
+    local newX = reopenStartPosition.X.Offset + delta.X
+    local newY = reopenStartPosition.Y.Offset + delta.Y
+    newX = math.clamp(newX, -viewport.X * 0.5 + halfX + 6, viewport.X * 0.5 - halfX - 6)
+    newY = math.clamp(newY, -viewport.Y * 0.5 + halfY + 6, viewport.Y * 0.5 - halfY - 6)
+
+    reopen.Position = UDim2.new(0.5, newX, 0.5, newY)
+end))
+
+addConnection(UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingReopen = false
+    end
+end))
+
+--// Mobile fly vertical controls
+addConnection(FlyUpButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        flyObjects.up = true
+    end
+end))
+
+addConnection(FlyUpButton.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        flyObjects.up = false
+    end
+end))
+
+addConnection(FlyDownButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        flyObjects.down = true
+    end
+end))
+
+addConnection(FlyDownButton.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        flyObjects.down = false
+    end
+end))
+
+--// Feature helpers
+local function setCharacterMovement()
+    local humanoid = getHumanoid()
+    if not humanoid then
+        return
+    end
+
+    humanoid.UseJumpPower = true
+    if state.speed then
+        humanoid.WalkSpeed = values.walkSpeed
+    else
+        humanoid.WalkSpeed = CONFIG.DefaultWalkSpeed
+    end
+
+    if state.jump then
+        humanoid.JumpPower = values.jumpPower
+    else
+        humanoid.JumpPower = CONFIG.DefaultJumpPower
+    end
+end
+
+local function stopFly()
+    flyObjects.active = false
+    flyObjects.up = false
+    flyObjects.down = false
+
+    if flyObjects.flyVelocity then
+        pcall(function()
+            flyObjects.flyVelocity:Destroy()
+        end)
+        flyObjects.flyVelocity = nil
+    end
+
+    if flyObjects.flyGyro then
+        pcall(function()
+            flyObjects.flyGyro:Destroy()
+        end)
+        flyObjects.flyGyro = nil
+    end
+
+    local humanoid = getHumanoid()
+    if humanoid then
+        humanoid.PlatformStand = false
+        humanoid.AutoRotate = true
+        pcall(function()
+            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end)
+    end
+
+    MobileFlyControls.Visible = false
+end
+
+local function startFly()
+    stopFly()
+
+    local character = getCharacter()
+    if not character then
+        return
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root then
+        return
+    end
+
+    local flyVelocity = Instance.new("BodyVelocity")
+    flyVelocity.Name = "ModMenuFlyVelocity"
+    flyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    flyVelocity.P = 10000
+    flyVelocity.Velocity = Vector3.zero
+    flyVelocity.Parent = root
+
+    local flyGyro = Instance.new("BodyGyro")
+    flyGyro.Name = "ModMenuFlyGyro"
+    flyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    flyGyro.P = 10000
+    flyGyro.D = 500
+    flyGyro.CFrame = root.CFrame
+    flyGyro.Parent = root
+
+    flyObjects.flyVelocity = flyVelocity
+    flyObjects.flyGyro = flyGyro
+    flyObjects.active = true
+
+    humanoid.PlatformStand = true
+    humanoid.AutoRotate = false
+
+    MobileFlyControls.Visible = IsMobile and state.fly
+end
+
+local function applyNoclip()
+    if not state.noclip then
+        return
+    end
+
+    local character = getCharacter()
+    if not character then
+        return
+    end
+
+    for _, object in ipairs(character:GetDescendants()) do
+        if object:IsA("BasePart") then
+            if originalCollisions[object] == nil then
+                originalCollisions[object] = object.CanCollide
+            end
+            object.CanCollide = false
+        end
+    end
+end
+
+local function restoreNoclip()
+    for object, canCollide in pairs(originalCollisions) do
+        if object and object.Parent then
+            object.CanCollide = canCollide
+        end
+        originalCollisions[object] = nil
+    end
+end
+
+enableFullBright = function()
+    if not savedLighting then
+        savedLighting = {
+            Ambient = Lighting.Ambient,
+            Brightness = Lighting.Brightness,
+            ClockTime = Lighting.ClockTime,
+            FogEnd = Lighting.FogEnd,
+            GlobalShadows = Lighting.GlobalShadows,
+            OutdoorAmbient = Lighting.OutdoorAmbient,
+        }
+    end
+
+    Lighting.Ambient = Color3.new(1, 1, 1)
+    Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
+    Lighting.Brightness = 3
+    Lighting.ClockTime = 14
+    Lighting.FogEnd = 100000
+    Lighting.GlobalShadows = false
+end
+
+disableFullBright = function()
+    if not savedLighting then
+        return
+    end
+
+    Lighting.Ambient = savedLighting.Ambient
+    Lighting.Brightness = savedLighting.Brightness
+    Lighting.ClockTime = savedLighting.ClockTime
+    Lighting.FogEnd = savedLighting.FogEnd
+    Lighting.GlobalShadows = savedLighting.GlobalShadows
+    Lighting.OutdoorAmbient = savedLighting.OutdoorAmbient
+    savedLighting = nil
+end
+
+local function findGetPlayerData()
+    local remote = ReplicatedStorage:FindFirstChild("GetPlayerData", true)
+    if remote and remote:IsA("RemoteFunction") then
+        return remote
+    end
+    return nil
+end
+
+local function refreshRoles()
+    local remote = findGetPlayerData()
+    if not remote then
+        Status.Text = "Role ESP: GetPlayerData not found"
+        return false
+    end
+
+    local success, result = pcall(function()
+        return remote:InvokeServer()
+    end)
+
+    if not success or type(result) ~= "table" then
+        Status.Text = "Role ESP: failed to read roles"
+        return false
+    end
+
+    roles = result
+    Murder = ""
+    Sheriff = ""
+    Hero = ""
+
+    for playerName, data in pairs(roles) do
+        if type(data) == "table" then
+            if data.Role == "Murderer" then
+                Murder = playerName
+            elseif data.Role == "Sheriff" then
+                Sheriff = playerName
+            elseif data.Role == "Hero" then
+                Hero = playerName
+            end
+        end
+    end
+
+    if LocalPlayer.Name == Murder then
+        Status.Text = "Role: Murderer"
+    elseif LocalPlayer.Name == Sheriff then
+        Status.Text = "Role: Sheriff"
+    elseif LocalPlayer.Name == Hero then
+        Status.Text = "Role: Hero"
+    else
+        Status.Text = "Role: Innocent / unknown"
+    end
+
+    return true
+end
+
+
+--// X = shoot murderer with revolver (own game)
+local shootMurdererBusy = false
+
+local function findRevolver()
+    local character = getCharacter()
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+
+    local function check(container)
+        if not container then
+            return nil
+        end
+
+        for _, item in ipairs(container:GetChildren()) do
+            if item:IsA("Tool") then
+                local name = string.lower(item.Name)
+                if string.find(name, "revolver", 1, true)
+                    or string.find(name, "sheriff", 1, true)
+                    or string.find(name, "pistol", 1, true)
+                    or name == "gun" then
+                    return item
+                end
+            end
+        end
+
+        return nil
+    end
+
+    return check(character) or check(backpack)
+end
+
+local function shootMurderer()
+    if state.unloaded or shootMurdererBusy then
+        return
+    end
+
+    shootMurdererBusy = true
+
+    local ok, err = pcall(function()
+        -- Refresh role data even when ESP is disabled.
+        if not refreshRoles() then
+            Status.Text = "Shoot: roles unavailable"
+            return
+        end
+
+        if Murder == "" then
+            Status.Text = "Shoot: murderer not found"
+            return
+        end
+
+        local murderer = Players:FindFirstChild(Murder)
+        if not murderer or not isAliveCharacter(murderer) then
+            Status.Text = "Shoot: murderer is dead/not found"
+            return
+        end
+
+        local targetCharacter = murderer.Character
+        local targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
+        local targetHead = targetCharacter and targetCharacter:FindFirstChild("Head")
+        local targetPart = targetHead or targetRoot
+        if not targetPart then
+            Status.Text = "Shoot: no target part"
+            return
+        end
+
+        local tool = findRevolver()
+        if not tool then
+            Status.Text = "Shoot: revolver not found"
+            return
+        end
+
+        local humanoid = getHumanoid()
+        if not humanoid then
+            Status.Text = "Shoot: humanoid not found"
+            return
+        end
+
+        local previousTool = nil
+        for _, item in ipairs(humanoid.Parent:GetChildren()) do
+            if item:IsA("Tool") and item ~= tool then
+                previousTool = item
+                break
+            end
+        end
+
+        if tool.Parent ~= humanoid.Parent then
+            humanoid:EquipTool(tool)
+            task.wait(0.05)
+        end
+
+        local camera = Workspace.CurrentCamera
+        if not camera then
+            return
+        end
+
+        -- Aim the camera at the murderer for weapon implementations
+        -- that calculate the shot direction from the camera.
+        local oldCameraType = camera.CameraType
+        local oldCameraCFrame = camera.CFrame
+        camera.CameraType = Enum.CameraType.Scriptable
+        camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetPart.Position)
+
+        tool:Activate()
+        task.wait(0.05)
+        pcall(function()
+            tool:Deactivate()
+        end)
+
+        camera.CFrame = oldCameraCFrame
+        camera.CameraType = oldCameraType
+
+        if previousTool and previousTool.Parent == humanoid.Parent then
+            humanoid:EquipTool(previousTool)
+        end
+
+        Status.Text = "Shoot: fired at " .. murderer.DisplayName
+    end)
+
+    if not ok then
+        Status.Text = "Shoot error: " .. tostring(err)
+    end
+
+    task.delay(0.25, function()
+        shootMurdererBusy = false
+    end)
+end
+
+local ESPColors = {
+    Player = Color3.fromRGB(80, 220, 255),
+    Murderer = Color3.fromRGB(255, 75, 90),
+    Sheriff = Color3.fromRGB(80, 145, 255),
+    Hero = Color3.fromRGB(255, 225, 80),
+    Innocent = Color3.fromRGB(80, 235, 125),
+    Dead = Color3.fromRGB(135, 140, 150),
+    Unknown = Color3.fromRGB(220, 220, 230),
+}
+
+local ESPOverlay = create("ScreenGui", {
+    Name = "ModMenuESPOverlay",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Global,
+    DisplayOrder = 1000,
+}, PlayerGui)
+
+local function getRoleName(playerName)
+    local data = roles[playerName]
+    if type(data) == "table" and type(data.Role) == "string" then
+        return data.Role
+    end
+    return "Unknown"
+end
+
+local function roleAlive(playerName)
+    local player = Players:FindFirstChild(playerName)
+    if not player or player == LocalPlayer then
+        return false
+    end
+
+    local data = roles[playerName]
+    if type(data) == "table" and (data.Killed or data.Dead) then
+        return false
+    end
+
+    return isAliveCharacter(player)
+end
+
+local function getLocalRole()
+    if LocalPlayer.Name == Murder then
+        return "Murderer"
+    elseif LocalPlayer.Name == Sheriff then
+        return "Sheriff"
+    elseif LocalPlayer.Name == Hero then
+        return "Hero"
+    end
+    return "Innocent"
+end
+
+local function getRoleColor(role, alive)
+    if not alive then
+        return ESPColors.Dead
+    end
+
+    if role == "Murderer" then
+        return ESPColors.Murderer
+    elseif role == "Sheriff" then
+        return ESPColors.Sheriff
+    elseif role == "Hero" then
+        return ESPColors.Hero
+    elseif role == "Innocent" then
+        return ESPColors.Innocent
+    elseif role == "Unknown" then
+        return ESPColors.Unknown
+    end
+
+    return ESPColors.Player
+end
+
+local function destroyESPForPlayer(player)
+    local object = espObjects[player]
+    if object then
+        if object.highlight then
+            object.highlight:Destroy()
+        end
+        if object.billboard then
+            object.billboard:Destroy()
+        end
+        if object.tracer then
+            object.tracer:Destroy()
+        end
+        espObjects[player] = nil
+    end
+
+    local character = player.Character
+    if character then
+        for _, child in ipairs(character:GetChildren()) do
+            if child.Name == "ModMenuESP" or child.Name == "ModMenuESPInfo" then
+                child:Destroy()
+            end
+        end
+    end
+end
+
+local function createESPForPlayer(player)
+    if player == LocalPlayer then
+        return nil
+    end
+
+    local character = player.Character
+    if not character then
+        return nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local head = character:FindFirstChild("Head")
+    if not humanoid or not root then
+        return nil
+    end
+
+    local object = espObjects[player]
+    if object
+        and object.character == character
+        and object.highlight
+        and object.highlight.Parent == character
+        and object.billboard
+        and object.billboard.Parent == character then
+        return object
+    end
+
+    destroyESPForPlayer(player)
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ModMenuESP"
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency = 0.92
+    highlight.OutlineTransparency = 0.05
+    highlight.Parent = character
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "ModMenuESPInfo"
+    billboard.Adornee = head or root
+    billboard.AlwaysOnTop = true
+    billboard.LightInfluence = 0
+    billboard.MaxDistance = 2500
+    billboard.Size = UDim2.fromOffset(220, 58)
+    billboard.StudsOffsetWorldSpace = Vector3.new(0, 3.5, 0)
+    billboard.ResetOnSpawn = false
+    billboard.Parent = character
+
+    local card = Instance.new("Frame")
+    card.Name = "Card"
+    card.AnchorPoint = Vector2.new(0.5, 0.5)
+    card.Position = UDim2.fromScale(0.5, 0.5)
+    card.Size = UDim2.fromScale(0.96, 0.82)
+    card.BackgroundColor3 = Color3.fromRGB(18, 19, 24)
+    card.BackgroundTransparency = 0.16
+    card.BorderSizePixel = 0
+    card.Parent = billboard
+
+    local cardCorner = Instance.new("UICorner")
+    cardCorner.CornerRadius = UDim.new(0, 10)
+    cardCorner.Parent = card
+
+    local cardStroke = Instance.new("UIStroke")
+    cardStroke.Name = "RoleStroke"
+    cardStroke.Thickness = 1.5
+    cardStroke.Transparency = 0.08
+    cardStroke.Parent = card
+
+    local accent = Instance.new("Frame")
+    accent.Name = "Accent"
+    accent.Position = UDim2.fromOffset(7, 8)
+    accent.Size = UDim2.fromOffset(4, 27)
+    accent.BorderSizePixel = 0
+    accent.Parent = card
+
+    local accentCorner = Instance.new("UICorner")
+    accentCorner.CornerRadius = UDim.new(1, 0)
+    accentCorner.Parent = accent
+
+    local nameLabel = Instance.new("TextLabel")
+    nameLabel.Name = "Name"
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.Position = UDim2.fromOffset(18, 5)
+    nameLabel.Size = UDim2.new(1, -78, 0, 19)
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.Text = player.DisplayName
+    nameLabel.TextColor3 = Color3.fromRGB(245, 245, 248)
+    nameLabel.TextSize = 13
+    nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    nameLabel.Parent = card
+
+    local roleLabel = Instance.new("TextLabel")
+    roleLabel.Name = "Role"
+    roleLabel.BackgroundTransparency = 1
+    roleLabel.Position = UDim2.fromOffset(18, 24)
+    roleLabel.Size = UDim2.new(1, -25, 0, 15)
+    roleLabel.Font = Enum.Font.GothamMedium
+    roleLabel.Text = "PLAYER"
+    roleLabel.TextColor3 = Color3.fromRGB(155, 160, 170)
+    roleLabel.TextSize = 10
+    roleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    roleLabel.Parent = card
+
+    local distanceLabel = Instance.new("TextLabel")
+    distanceLabel.Name = "Distance"
+    distanceLabel.BackgroundTransparency = 1
+    distanceLabel.AnchorPoint = Vector2.new(1, 0)
+    distanceLabel.Position = UDim2.new(1, -8, 0, 8)
+    distanceLabel.Size = UDim2.fromOffset(55, 17)
+    distanceLabel.Font = Enum.Font.GothamBold
+    distanceLabel.Text = "0m"
+    distanceLabel.TextColor3 = Color3.fromRGB(175, 180, 190)
+    distanceLabel.TextSize = 10
+    distanceLabel.TextXAlignment = Enum.TextXAlignment.Right
+    distanceLabel.Parent = card
+
+    local tracer = Instance.new("Frame")
+    tracer.Name = "ModMenuTracer"
+    tracer.AnchorPoint = Vector2.new(0.5, 0.5)
+    tracer.BackgroundColor3 = ESPColors.Player
+    tracer.BackgroundTransparency = 0.15
+    tracer.BorderSizePixel = 0
+    tracer.Visible = false
+    tracer.ZIndex = 1
+    tracer.Parent = ESPOverlay
+
+    local tracerCorner = Instance.new("UICorner")
+    tracerCorner.CornerRadius = UDim.new(1, 0)
+    tracerCorner.Parent = tracer
+
+    object = {
+        character = character,
+        highlight = highlight,
+        billboard = billboard,
+        card = card,
+        cardStroke = cardStroke,
+        accent = accent,
+        nameLabel = nameLabel,
+        roleLabel = roleLabel,
+        distanceLabel = distanceLabel,
+        tracer = tracer,
+    }
+
+    espObjects[player] = object
+    return object
+end
+
+local function setTracer(tracer, startPoint, endPoint, color, visible)
+    if not tracer then
+        return
+    end
+
+    tracer.Visible = visible
+    if not visible then
+        return
+    end
+
+    local delta = endPoint - startPoint
+    local length = delta.Magnitude
+    if length < 1 then
+        tracer.Visible = false
+        return
+    end
+
+    tracer.Position = UDim2.fromOffset((startPoint.X + endPoint.X) * 0.5, (startPoint.Y + endPoint.Y) * 0.5)
+    tracer.Size = UDim2.fromOffset(math.max(1.5, math.min(3, 240 / math.max(length, 1))), length)
+    tracer.Rotation = math.deg(math.atan2(delta.Y, delta.X)) + 90
+    tracer.BackgroundColor3 = color
+end
+
+local clearESP
+
+local function updateESP()
+    local anyESP = state.esp or state.roleESP or state.innocentESP
+    if not anyESP then
+        clearESP()
+        return
+    end
+
+    local camera = Workspace.CurrentCamera
+    local localRoot = getRoot()
+    local localRole = getLocalRole()
+    local viewport = camera and camera.ViewportSize or Vector2.new(0, 0)
+    local tracerStart = Vector2.new(viewport.X * 0.5, viewport.Y - 28)
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local role = getRoleName(player.Name)
+            local alive = roleAlive(player.Name)
+            local isInnocent = role == "Innocent"
+            local show = true
+
+            if state.innocentESP and not state.esp and not state.roleESP then
+                show = (localRole == "Murderer" or localRole == "Sheriff") and isInnocent and alive
+            end
+
+            local object = show and createESPForPlayer(player) or nil
+            if object then
+                local character = player.Character
+                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                local targetRole = role
+                local color = state.roleESP and getRoleColor(role, alive) or ESPColors.Player
+
+                if state.innocentESP and not state.esp and not state.roleESP then
+                    targetRole = "Innocent"
+                    color = ESPColors.Innocent
+                end
+
+                if not alive then
+                    color = ESPColors.Dead
+                end
+
+                object.highlight.FillColor = color
+                object.highlight.OutlineColor = color
+                object.highlight.FillTransparency = alive and 0.94 or 0.97
+                object.highlight.OutlineTransparency = alive and 0.03 or 0.45
+
+                object.cardStroke.Color = color
+                object.accent.BackgroundColor3 = color
+                object.nameLabel.Text = player.DisplayName ~= player.Name
+                    and (player.DisplayName .. "  •  @" .. player.Name)
+                    or ("@" .. player.Name)
+
+                local roleText = targetRole
+                if targetRole == "Murderer" then
+                    roleText = "MURDERER"
+                elseif targetRole == "Sheriff" then
+                    roleText = "SHERIFF"
+                elseif targetRole == "Hero" then
+                    roleText = "HERO"
+                elseif targetRole == "Innocent" then
+                    roleText = "INNOCENT"
+                elseif targetRole == "Unknown" then
+                    roleText = "PLAYER"
+                end
+
+                if state.roleESP or state.innocentESP then
+                    object.roleLabel.Text = roleText
+                else
+                    object.roleLabel.Text = "PLAYER"
+                end
+
+                object.roleLabel.TextColor3 = color
+
+                if camera and root and localRoot then
+                    local distance = (root.Position - localRoot.Position).Magnitude
+                    object.distanceLabel.Text = string.format("%dm", math.floor(distance + 0.5))
+
+                    local screenPoint, onScreen = camera:WorldToViewportPoint(root.Position + Vector3.new(0, 1.6, 0))
+                    setTracer(
+                        object.tracer,
+                        tracerStart,
+                        Vector2.new(screenPoint.X, screenPoint.Y),
+                        color,
+                        state.espLines and alive and onScreen and distance <= 1200
+                    )
+                else
+                    object.distanceLabel.Text = "--"
+                    object.tracer.Visible = false
+                end
+            else
+                destroyESPForPlayer(player)
+            end
+        end
+    end
+end
+
+clearESP = function()
+    local playersToClear = {}
+    for player in pairs(espObjects) do
+        table.insert(playersToClear, player)
+    end
+
+    for _, player in ipairs(playersToClear) do
+        destroyESPForPlayer(player)
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        local character = player.Character
+        if character then
+            local oldHighlight = character:FindFirstChild("ModMenuESP")
+            if oldHighlight then
+                oldHighlight:Destroy()
+            end
+            local oldInfo = character:FindFirstChild("ModMenuESPInfo")
+            if oldInfo then
+                oldInfo:Destroy()
+            end
+        end
+    end
+
+    for _, child in ipairs(ESPOverlay:GetChildren()) do
+        child:Destroy()
+    end
+end
+
+--// Main runtime loop
+addConnection(RunService.RenderStepped:Connect(function()
+    if state.unloaded then
+        return
+    end
+
+    local humanoid = getHumanoid()
+    local root = getRoot()
+
+    if humanoid then
+        if state.speed then
+            humanoid.WalkSpeed = values.walkSpeed
+        end
+        if state.jump then
+            humanoid.UseJumpPower = true
+            humanoid.JumpPower = values.jumpPower
+        end
+
+        if state.bunnyHop and humanoid.MoveDirection.Magnitude > 0.05 then
+            humanoid.Jump = true
+        end
+    end
+
+    if state.noclip then
+        applyNoclip()
+    end
+
+    if state.lowGravity then
+        Workspace.Gravity = 60
+    end
+
+    if root and state.spin and not state.fly then
+        root.AssemblyAngularVelocity = Vector3.new(0, 12, 0)
+    elseif root and not state.spin and not state.fly then
+        root.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    if root and state.strafe and not state.fly then
+        local move = humanoid and humanoid.MoveDirection or Vector3.zero
+        if move.Magnitude > 0.05 then
+            local velocity = root.AssemblyLinearVelocity
+            root.AssemblyLinearVelocity = Vector3.new(move.X * values.walkSpeed, velocity.Y, move.Z * values.walkSpeed)
+        end
+    end
+
+    if state.fly then
+        if not flyObjects.active
+            or not flyObjects.flyVelocity
+            or not flyObjects.flyVelocity.Parent
+            or not flyObjects.flyGyro
+            or not flyObjects.flyGyro.Parent then
+            startFly()
+        end
+
+        local currentHumanoid = getHumanoid()
+        local currentRoot = getRoot()
+        local camera = Workspace.CurrentCamera
+        local flyVelocity = flyObjects.flyVelocity
+        local flyGyro = flyObjects.flyGyro
+
+        if currentHumanoid and currentRoot and camera and flyVelocity and flyGyro and flyObjects.active then
+            currentHumanoid.PlatformStand = true
+            currentHumanoid.AutoRotate = false
+
+            local movement = Vector3.zero
+            local look = camera.CFrame.LookVector
+            local right = camera.CFrame.RightVector
+
+            if IsMobile then
+                local moveDirection = currentHumanoid.MoveDirection
+                local flatLook = Vector3.new(look.X, 0, look.Z)
+                local flatRight = Vector3.new(right.X, 0, right.Z)
+
+                if flatLook.Magnitude > 0.001 then
+                    flatLook = flatLook.Unit
+                else
+                    flatLook = Vector3.zero
+                end
+
+                if flatRight.Magnitude > 0.001 then
+                    flatRight = flatRight.Unit
+                else
+                    flatRight = Vector3.zero
+                end
+
+                if moveDirection.Magnitude > 0.001 then
+                    movement += flatLook * moveDirection:Dot(flatLook)
+                    movement += flatRight * moveDirection:Dot(flatRight)
+                end
+            else
+                if UIS:IsKeyDown(Enum.KeyCode.W) then
+                    movement += look
+                end
+                if UIS:IsKeyDown(Enum.KeyCode.S) then
+                    movement -= look
+                end
+                if UIS:IsKeyDown(Enum.KeyCode.A) then
+                    movement -= right
+                end
+                if UIS:IsKeyDown(Enum.KeyCode.D) then
+                    movement += right
+                end
+            end
+
+            if UIS:IsKeyDown(Enum.KeyCode.Space) or UIS:IsKeyDown(Enum.KeyCode.E) or flyObjects.up then
+                movement += Vector3.new(0, 1, 0)
+            end
+
+            if UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.Q) or flyObjects.down then
+                movement -= Vector3.new(0, 1, 0)
+            end
+
+            if movement.Magnitude > 0.001 then
+                movement = movement.Unit * values.flySpeed
+            else
+                movement = Vector3.zero
+            end
+
+            flyVelocity.Velocity = movement
+
+            if look.Magnitude > 0.001 then
+                flyGyro.CFrame = CFrame.lookAt(currentRoot.Position, currentRoot.Position + look)
+            end
+        end
+    elseif flyObjects.active then
+        stopFly()
+    end
+
+end))
+
+addConnection(RunService.Heartbeat:Connect(function()
+    if state.unloaded then
+        return
+    end
+end))
+
+--// Infinite jump
+addConnection(UIS.JumpRequest:Connect(function()
+    if not state.infiniteJump then
+        return
+    end
+
+    local humanoid = getHumanoid()
+    if humanoid then
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end))
+
+--// Respawn handler
+local function onCharacterAdded(character)
+    disconnectBucket(characterConnections)
+
+    local humanoid = character:WaitForChild("Humanoid", 10)
+    local root = character:WaitForChild("HumanoidRootPart", 10)
+
+    if not humanoid or not root or state.unloaded then
+        return
+    end
+
+    setCharacterMovement()
+
+    if state.fly then
+        startFly()
+    end
+
+    if state.noclip then
+        task.wait(0.1)
+        applyNoclip()
+    end
+end
+
+addConnection(LocalPlayer.CharacterAdded:Connect(onCharacterAdded))
+if LocalPlayer.Character then
+    task.spawn(function()
+        onCharacterAdded(LocalPlayer.Character)
+    end)
+end
+
+--// Role refresh and ESP update
+local roleTimer = 0
+addConnection(RunService.Heartbeat:Connect(function(deltaTime)
+    if state.unloaded then
+        return
+    end
+
+    roleTimer = roleTimer + deltaTime
+    if roleTimer < 0.35 then
+        return
+    end
+    roleTimer = 0
+
+    if state.roleESP or state.innocentESP then
+        refreshRoles()
+    end
+
+    if state.esp or state.roleESP or state.innocentESP then
+        updateESP()
+    end
+end))
+
+addConnection(Players.PlayerRemoving:Connect(function(player)
+    destroyESPForPlayer(player)
+end))
+
+addConnection(Players.PlayerAdded:Connect(function(player)
+    if state.esp or state.roleESP or state.innocentESP then
+        task.delay(0.5, function()
+            if not state.unloaded then
+                updateESP()
+            end
+        end)
+    end
+end))
+
+--// Smooth custom ESP renderer
+local espTimer = 0
+addConnection(RunService.RenderStepped:Connect(function(deltaTime)
+    if state.unloaded then
+        return
+    end
+
+    if state.esp or state.roleESP or state.innocentESP then
+        espTimer = espTimer + deltaTime
+        if espTimer >= 0.05 then
+            espTimer = 0
+            updateESP()
+        end
+    else
+        espTimer = 0
+    end
+end))
+
+--// X bind: Shoot Murderer
+addConnection(UIS.InputBegan:Connect(function(input, processed)
+    if processed or state.unloaded or IsMobile then
+        return
+    end
+
+    if input.KeyCode == Enum.KeyCode.X then
+        shootMurderer()
+    end
+end))
+
+--// UI actions
+local function setMainVisible(visible)
+    state.uiVisible = visible
+    Main.Visible = visible
+    reopen.Visible = IsMobile and not visible
+    if IsMobile then
+        MobileFlyControls.Visible = state.fly
+    else
+        MobileFlyControls.Visible = false
+    end
+end
+
+addConnection(UIS.InputBegan:Connect(function(input, processed)
+    if processed or state.unloaded then
+        return
+    end
+
+    if input.KeyCode == CONFIG.UIKey then
+        setMainVisible(not state.uiVisible)
+    end
+end))
+
+addConnection(reopen.MouseButton1Click:Connect(function()
+    setMainVisible(true)
+end))
+
+addConnection(Minimize.MouseButton1Click:Connect(function()
+    setMainVisible(false)
+end))
+
+local function unload()
+    if state.unloaded then
+        return
+    end
+    state.unloaded = true
+
+    setSpeedToggle(false)
+    setJumpToggle(false)
+    setNoclipToggle(false)
+    setFlyToggle(false)
+    setInfiniteToggle(false)
+    setFullBrightToggle(false)
+    setGravityToggle(false)
+    setSpinToggle(false)
+    setBunnyToggle(false)
+    setStrafeToggle(false)
+    setESPToggle(false)
+    setRoleESPToggle(false)
+    setInnocentESPToggle(false)
+    setESPLinesToggle(false)
+
+    stopFly()
+    restoreNoclip()
+    clearESP()
+    disableFullBright()
+    Workspace.Gravity = savedGravity
+
+    local humanoid = getHumanoid()
+    if humanoid then
+        humanoid.WalkSpeed = CONFIG.DefaultWalkSpeed
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = CONFIG.DefaultJumpPower
+    end
+
+    local camera = Workspace.CurrentCamera
+    if camera then
+        camera.FieldOfView = CONFIG.DefaultFOV
+    end
+
+    disconnectBucket(characterConnections)
+    disconnectBucket(connections)
+
+    if ESPOverlay then
+        pcall(function()
+            ESPOverlay:Destroy()
+        end)
+    end
+
+    if ScreenGui then
+        pcall(function()
+            ScreenGui:Destroy()
+        end)
+    end
+end
+
+addConnection(teleportRevolverButton.MouseButton1Click:Connect(function()
+    teleportToRevolver()
+end))
+
+addConnection(refreshButton.MouseButton1Click:Connect(function()
+    if refreshRoles() then
+        Status.Text = "Roles refreshed"
+        task.delay(1.5, function()
+            if not state.unloaded then
+                if LocalPlayer.Name == Murder then
+                    Status.Text = "Role: Murderer"
+                elseif LocalPlayer.Name == Sheriff then
+                    Status.Text = "Role: Sheriff"
+                else
+                    Status.Text = "Roles refreshed"
+                end
+            end
+        end)
+    end
+end))
+
+addConnection(resetButton.MouseButton1Click:Connect(function()
+    setSpeedToggle(false)
+    setJumpToggle(false)
+    setNoclipToggle(false)
+    setFlyToggle(false)
+    setInfiniteToggle(false)
+    setFullBrightToggle(false)
+    setGravityToggle(false)
+    setSpinToggle(false)
+    setBunnyToggle(false)
+    setStrafeToggle(false)
+    setESPToggle(false)
+    setRoleESPToggle(false)
+    setInnocentESPToggle(false)
+    setESPLinesToggle(false)
+
+    values.walkSpeed = CONFIG.DefaultWalkSpeed
+    values.jumpPower = CONFIG.DefaultJumpPower
+    values.flySpeed = CONFIG.DefaultFlySpeed
+    values.fov = CONFIG.DefaultFOV
+
+    if setWalkSpeedSlider then setWalkSpeedSlider(CONFIG.DefaultWalkSpeed) end
+    if setJumpPowerSlider then setJumpPowerSlider(CONFIG.DefaultJumpPower) end
+    if setFlySpeedSlider then setFlySpeedSlider(CONFIG.DefaultFlySpeed) end
+    if setFOVSlider then setFOVSlider(CONFIG.DefaultFOV) end
+
+    local humanoid = getHumanoid()
+    if humanoid then
+        humanoid.WalkSpeed = CONFIG.DefaultWalkSpeed
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = CONFIG.DefaultJumpPower
+    end
+
+    local camera = Workspace.CurrentCamera
+    if camera then
+        camera.FieldOfView = CONFIG.DefaultFOV
+    end
+
+    clearESP()
+    Status.Text = "Settings reset"
+end))
+
+addConnection(Close.MouseButton1Click:Connect(unload))
+addConnection(unloadButton.MouseButton1Click:Connect(unload))
+
+--// Device-specific UI
+if IsMobile then
+    Title.Text = "Mod Menu | Mobile"
+    Status.Text = "Tap MOD to reopen • drag MOD to move"
+    Scale.Scale = 0.9
+    reopen.Visible = false
+else
+    Title.Text = "Mod Menu | PC"
+    Status.Text = "RightShift = hide/show"
+    reopen.Visible = false
+    MobileFlyControls.Visible = false
+end
+
+--// Keep defaults applied after script starts.
+savedGravity = Workspace.Gravity
+savedFOV = CONFIG.DefaultFOV
+setCharacterMovement()
+refreshRoles()
+
+print("[ModMenu] Loaded successfully. RightShift = show/hide.")
