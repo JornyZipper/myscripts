@@ -1,5 +1,5 @@
 --// ScriptMM2
---// Put this LocalScript in: StarterPlayer > StarterPlayerScripts
+--// Putа this LocalScript in: StarterPlayer > StarterPlayerScripts
 --// Designed for your own Roblox Studio game.
 
 local VERSION = "V0.5.0"
@@ -82,6 +82,8 @@ local setFOVSlider
 
 local enableFullBright
 local disableFullBright
+local restoreNoclip
+local applyNoclip
 
 local roles = {}
 local Murder = ""
@@ -528,6 +530,12 @@ local noclipButton
 local setNoclipToggle
 noclipButton, setNoclipToggle = addToggle("Noclip", 4, function(enabled)
     state.noclip = enabled
+
+    if enabled then
+        applyNoclip()
+    else
+        restoreNoclip()
+    end
 end)
 
 local flyButton
@@ -997,7 +1005,7 @@ local function startFly()
     MobileFlyControls.Visible = IsMobile and state.fly
 end
 
-local function applyNoclip()
+applyNoclip = function()
     if not state.noclip then
         return
     end
@@ -1017,7 +1025,7 @@ local function applyNoclip()
     end
 end
 
-local function restoreNoclip()
+restoreNoclip = function()
     for object, canCollide in pairs(originalCollisions) do
         if object and object.Parent then
             object.CanCollide = canCollide
@@ -1659,6 +1667,11 @@ addConnection(RunService.RenderStepped:Connect(function()
 
     if state.noclip then
         applyNoclip()
+    else
+        -- Safety: make sure a disabled Noclip can never leave collision disabled.
+        if next(originalCollisions) ~= nil then
+            restoreNoclip()
+        end
     end
 
     if state.lowGravity then
