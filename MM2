@@ -1,5 +1,5 @@
 --// ScriptMM2
---// Putа this LocalScript in: StarterPlayer > StarterPlayerScripts
+--// Put this LocalScript in: StarterPlayer > StarterPlayerScripts
 --// Designed for your own Roblox Studio game.
 
 local VERSION = "V0.5.0"
@@ -46,6 +46,7 @@ local state = {
     roleESP = false,
     innocentESP = false,
     espLines = false,
+    espNames = true,
     minimized = false,
     uiVisible = true,
     unloaded = false,
@@ -637,7 +638,19 @@ espLinesButton, setESPLinesToggle = addToggle("ESP Lines", 27, function(enabled)
     state.espLines = enabled
 end)
 
-local _, setFOVSliderValue = addSlider("FOV", CONFIG.MinFOV, CONFIG.MaxFOV, values.fov, 28, function(value)
+local espNamesButton
+local setESPNamesToggle
+espNamesButton, setESPNamesToggle = addToggle("ESP Names", 28, function(enabled)
+    state.espNames = enabled
+    for _, object in pairs(espObjects) do
+        if object.nameLabel and object.roleLabel then
+            object.nameLabel.Visible = enabled
+            object.roleLabel.Position = enabled and UDim2.fromOffset(18, 24) or UDim2.fromOffset(18, 8)
+        end
+    end
+end)
+
+local _, setFOVSliderValue = addSlider("FOV", CONFIG.MinFOV, CONFIG.MaxFOV, values.fov, 29, function(value)
     values.fov = value
     local camera = Workspace.CurrentCamera
     if camera then
@@ -1568,6 +1581,8 @@ local function updateESP()
                 object.nameLabel.Text = player.DisplayName ~= player.Name
                     and (player.DisplayName .. "  •  @" .. player.Name)
                     or ("@" .. player.Name)
+                object.nameLabel.Visible = state.espNames
+                object.roleLabel.Position = state.espNames and UDim2.fromOffset(18, 24) or UDim2.fromOffset(18, 8)
 
                 local roleText = targetRole
                 if targetRole == "Murderer" then
@@ -1940,6 +1955,7 @@ local function unload()
     setRoleESPToggle(false)
     setInnocentESPToggle(false)
     setESPLinesToggle(false)
+    setESPNamesToggle(false)
 
     stopFly()
     restoreNoclip()
@@ -2011,6 +2027,7 @@ addConnection(resetButton.MouseButton1Click:Connect(function()
     setRoleESPToggle(false)
     setInnocentESPToggle(false)
     setESPLinesToggle(false)
+    setESPNamesToggle(true)
 
     values.walkSpeed = CONFIG.DefaultWalkSpeed
     values.jumpPower = CONFIG.DefaultJumpPower
