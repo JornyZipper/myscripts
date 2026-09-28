@@ -1,623 +1,1278 @@
--- Player ESP v3.3: player outlines at any streamed-in distance.
--- Replace the entire previous LocalScript in StarterPlayerScriptsF.
--- Drag the title or ESP button. Minus minimizes; X / "Удалить ESP" unloads.
--- Mobile starts in Lite mode: 20 Hz, 24 markers, 6 outlines, 6 labels.
--- Distant/unloaded server characters cannot be recovered by a LocalScript.
--- ScreenGui priority affects 2D markers, not Roblox's system UI or 3D Highlight.
+--[=[
+MOD MENU v1.1.0 — PC / MOBILE — ДЛЯ ТВОЕГО ПЛЕЙСА В ROBLOX STUDIO
 
-local Players = game:GetService("Players")
+УСТАНОВКА
+1. Открой свой плейс в Roblox Studio и останови Play/Test.
+2. Открой Command Bar (панель команд; можно найти через поиск действий Studio).
+3. Скопируй ВЕСЬ этот файл в Command Bar и нажми Enter.
+4. В ServerScriptService появится OwnGameModMenuServer с тремя дочерними скриптами.
+5. Запусти Play. Для ESP/AIM нужны другие игроки: используй тест с 2+ клиентами.
+6. Сохрани/опубликуй плейс, чтобы установка осталась в игре.
+Уже установленная версия этого меню обновится, Config с доступом сохранится.
+
+ДОСТУП
+В личном плейсе владелец получает меню автоматически. В Studio все тестовые
+игроки имеют меню. Для группового плейса или дополнительных администраторов:
+ServerScriptService > OwnGameModMenuServer > Config > AdminUserIds
+Добавь: [ТВОЙ_ЧИСЛОВОЙ_USER_ID] = true,
+Например: [123456789] = true,
+UserId — число из адреса профиля Roblox, не ник и не ID группы.
+Config.AllowAllStudioTestPlayers = false отключает доступ для всех тестовых игроков.
+
+УПРАВЛЕНИЕ
+Правый Shift / кнопка Script — открыть или свернуть меню (M больше не используется).
+Зажми шапку окна мышью или пальцем и перетащи. Окно не выходит за края экрана.
+Работает с несколькими касаниями: управляет только палец, начавший перетаскивание.
+В заголовке и на кнопке видно Script\PC или Script\mobile.
+Режим выбирается по PreferredInput и доступным устройствам ввода Roblox.
+На гибридном устройстве режим может меняться при переходе с касаний на клавиатуру.
+ПКМ (удерживать) / L2 — захват цели после включения AIM Head или Target Strafe.
+На телефоне: включи нужный режим, сверни меню и нажми AIM; повторно — отпустить.
+AIM наводит камеру в голову ближайшей к центру цели внутри круга FOV.
+Сначала цель нужно поместить в круг. Проверка стен включена по умолчанию.
+Target Strafe кружит вокруг выбранного игрока. Скорость берёт из WalkSpeed.
+Strafe начинает движение, когда до цели не больше 120 studs.
+Крутилка работает сама после включения, удерживать AIM для неё не нужно.
+End / ВЫКЛЮЧИТЬ ВСЁ — отключить эффекты и вернуть исходные значения.
+Сворачивание меню само по себе не выключает ESP, Speed, Spin или Hitbox.
+
+ЧТО ЕСТЬ
+ESP: обводка, имя, дистанция в studs; метки только для целей в поле зрения камеры.
+ПК: до 30 меток с обновлением 5 раз/с; телефон: до 16 меток примерно 3,3 раза/с.
+Если средняя частота на телефоне ниже 28 FPS — до 8 меток, 2 обновления/с.
+При восстановлении выше 40 FPS возвращается обычный мобильный режим.
+AIM Head: круг FOV, настройка скорости наведения, проверка видимости.
+Team Check: действует на ESP, AIM, Hitbox и Strafe; нейтральные игроки — цели.
+Head Hitbox: локальное увеличение Head от 1x до 4x, видимое только тебе.
+Speedhack: скорость ходьбы от 8 до 100 studs/s.
+Spin: вращение персонажа от 60 до 1440 градусов/с.
+Target Strafe: радиус 5–30 studs, переключение направления; пауза у стен/краёв.
+Меню с прокруткой, крупными кнопками, поддержкой мыши и касаний.
+Настройки сохраняются при респавне в текущем сеансе; после нового входа — по умолчанию.
+Нет внешних библиотек, HTTP-запросов, loadstring или сторонних ассетов.
+
+ОСОБЕННОСТИ HITBOX
+Размер головы меняет ТОЛЬКО твой LocalScript. На сервере и у других игроков
+размер Head остаётся обычным; каждый пользователь меню видит своё увеличение.
+Локальное увеличение НЕ расширяет серверную зону попадания. Если оружие проверяет
+попадания на сервере, эта проверка по-прежнему использует обычную голову.
+Отключение, смерть, выход игрока, смена команды/дальности и удаление меню
+восстанавливают локальные Size, CanCollide, CanQuery и Massless.
+Новые значения, полученные от игровых систем, не затираются старым снимком.
+
+ОПТИМИЗАЦИЯ
+AIM наводится каждый кадр, но ищет цели и проверяет видимость по таймеру.
+Проверки видимости ограничены по числу кандидатов и кэшируются.
+Проверки препятствий Strafe выполняются по таймеру, а не каждый кадр.
+При выключенных AIM / Strafe / Spin соответствующие обработчики кадров отключаются.
+Персонажи кэшируются; GUI-свойства записываются только при изменении.
+Объекты ESP создаются по необходимости; перетаскивание делает максимум 1 запись за кадр.
+На телефоне увеличены кнопки, размеры окна подстраиваются при повороте экрана.
+Фактический FPS зависит от плейса и устройства; здесь FPS на телефоне не измерялся.
+
+ПРОЧЕЕ
+Свои системы попаданий, отдельные хитбоксы оружия, камеры или контроллеры
+движения могут потребовать адаптации.
+AIM управляет камерой и не нажимает спуск, не предсказывает баллистику.
+Поддерживаются персонажи игроков с Humanoid, Head и HumanoidRootPart (R6/R15).
+Для NPC логика целей не добавлена.
+При выключении Speed восстанавливается скорость, бывшая до его включения;
+во время Speed сервер поддерживает выбранную скорость каждые 0,2 секунды.
+
+ПРОВЕРКА В STUDIO
+Запусти 2+ клиентов, поставь игроков на разные Teams или оставь Neutral=true.
+Включи ESP, затем AIM Head; сверни меню и удерживай ПКМ / нажми AIM.
+Включи Head Hitbox на одном клиенте: второй клиент и сервер должны видеть обычный размер.
+Проверь восстановление локальной головы кнопкой End.
+Проверь Right Shift, перетаскивание мышью/пальцем, поворот телефона и подпись режима.
+Включи Speed, Spin, Strafe; проверь респавн и выключение всех функций.
+Для проверки Team Check переведи второго игрока в свою команду.
+Для проверки доступа в опубликованном плейсе зайди не-администратором.
+Синтаксис, локальная и серверная логика проверены локально; в Roblox Studio автор файла
+данную сборку не запускал, поэтому финальную игровую проверку нужно сделать в плейсе.
+
+ОБНОВЛЕНИЕ / УДАЛЕНИЕ
+Для обновления останови Play и снова вставь файл в Command Bar.
+Установщик заменяет только собственный OwnGameModMenuServer и сохраняет его Config.
+Для удаления останови Play и удали OwnGameModMenuServer из ServerScriptService.
+Runtime и GUI создаются только во время игры и не требуют ручной установки.
+
+API REFERENCES
+https://create.roblox.com/docs/reference/engine/classes/Highlight
+https://create.roblox.com/docs/reference/engine/classes/Humanoid/Move
+https://create.roblox.com/docs/reference/engine/classes/BasePart
+https://create.roblox.com/docs/workspace/raycasting
+https://create.roblox.com/docs/scripting/security/client-server-boundary
+https://create.roblox.com/docs/reference/engine/classes/UserInputService
+https://create.roblox.com/docs/reference/engine/classes/ContextActionService
+]=]
+
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
-local localPlayer = Players.LocalPlayer
-assert(localPlayer, "This script must run on the client")
-local playerGui = localPlayer:WaitForChild("PlayerGui")
-local mobile = UserInputService.TouchEnabled
-local settings = {
-    Enabled = true, Outlines = true, Tracers = true, FarDots = true,
-    Labels = not mobile, ThroughWalls = true, LiteMode = mobile,
-    FarDistance = 150, Color = Color3.fromRGB(75, 240, 150),
+assert(RunService:IsStudio() and not RunService:IsRunning(),
+    "Останови Play и вставь установщик в Command Bar Roblox Studio.")
+local ServerScriptService = game:GetService("ServerScriptService")
+local NAME = "OwnGameModMenuServer"
+local previous = ServerScriptService:FindFirstChild(NAME)
+assert(not previous or (previous:IsA("Script") and previous:GetAttribute("ModMenuVersion")),
+    "Объект OwnGameModMenuServer не принадлежит этому установщику. Переименуй его вручную.")
+
+local CONFIG_SOURCE = [====[
+-- Private server configuration. Do not move this module to ReplicatedStorage.
+return {
+    -- Personal-place owner is allowed automatically. For a group-owned game,
+    -- add YOUR numeric Roblox UserId here (not the group ID or username).
+    AdminUserIds = {
+        -- [123456789] = true,
+    },
+    AllowPersonalPlaceOwner = true,
+    AllowAllStudioTestPlayers = true,
+    RuntimeName = "OwnGameModMenuRuntime",
+    GuiName = "OwnGameModMenu",
 }
-local GUI_NAME = "PlayerESPMenu"
-local ESP_DISPLAY_ORDER = 2147483646
-local MENU_DISPLAY_ORDER = 2147483647
-local LEGACY_RENDER = "PlayerESP_Render_" .. localPlayer.UserId
-local HIGHLIGHT_NAME = "PlayerESPHighlights_" .. localPlayer.UserId
-local OWNER_ATTRIBUTE = "PlayerESPControllerToken"
-local runToken = tostring(os.clock()) .. ":" .. tostring({})
-local unloaded, sessionNumber = false, 0
-playerGui:SetAttribute(OWNER_ATTRIBUTE, runToken)
+]====]
 
--- Rebuild only our interface if a vehicle script removes the player's HUD.
--- The owner token prevents an old/deferred restart replacing a newer launch.
-local function startSession(savedUI)
-    if unloaded or playerGui:GetAttribute(OWNER_ATTRIBUTE) ~= runToken then return end
-    sessionNumber = sessionNumber + 1
-    local RENDER_NAME = LEGACY_RENDER .. "_v33_" .. runToken .. "_" .. sessionNumber
-    local oldMenu = playerGui:FindFirstChild(GUI_NAME)
-    if oldMenu then
-        local stop = oldMenu:FindFirstChild("Shutdown")
-        if stop and stop:IsA("BindableEvent") then stop:Fire() end
-        oldMenu:Destroy()
-    end
-    RunService:UnbindFromRenderStep(LEGACY_RENDER)
-    local oldOverlay = playerGui:FindFirstChild("PlayerESPOverlay")
-    if oldOverlay then oldOverlay:Destroy() end
-    local oldHighlights = Workspace:FindFirstChild(HIGHLIGHT_NAME)
-    if oldHighlights then oldHighlights:Destroy() end
+local SHARED_SOURCE = [====[
+-- Shared setting schema and targeting rules. No external modules or assets.
+local Shared = {}
+Shared.Version = "1.1.0"
+Shared.Schema = {
+    ESP = {default = false, kind = "boolean"},
+    Names = {default = true, kind = "boolean"},
+    TeamCheck = {default = true, kind = "boolean"},
+    Aim = {default = false, kind = "boolean"},
+    WallCheck = {default = true, kind = "boolean"},
+    AimFOV = {default = 130, kind = "number", min = 40, max = 350, step = 10},
+    AimSmooth = {default = 12, kind = "number", min = 2, max = 30, step = 2},
+    Hitbox = {default = false, kind = "boolean"},
+    HeadScale = {default = 2, kind = "number", min = 1, max = 4, step = 0.25},
+    Speed = {default = false, kind = "boolean"},
+    WalkSpeed = {default = 32, kind = "number", min = 8, max = 100, step = 4},
+    Spin = {default = false, kind = "boolean"},
+    SpinRate = {default = 360, kind = "number", min = 60, max = 1440, step = 60},
+    Strafe = {default = false, kind = "boolean"},
+    StrafeRadius = {default = 10, kind = "number", min = 5, max = 30, step = 1},
+    StrafeClockwise = {default = true, kind = "boolean"},
+    MaxDistance = {default = 1000, kind = "number", min = 100, max = 3000, step = 100},
+}
 
-    local stopped, dirty = false, true
-    local connections, tracked, active, highlightPool = {}, {}, {}, {}
-    local cleanup
-    local function connect(signal, callback)
-        local connection = signal:Connect(callback)
-        table.insert(connections, connection)
-        return connection
+function Shared.Defaults()
+    local result = {}
+    for key, rule in pairs(Shared.Schema) do
+        result[key] = rule.default
     end
-    local function make(className, properties, parent)
-        local object = Instance.new(className)
-        for key, value in pairs(properties) do object[key] = value end
-        object.Parent = parent
-        return object
-    end
-    local function set(object, property, value)
-        if object[property] ~= value then object[property] = value end
-    end
-    local function round(object, radius)
-        make("UICorner", { CornerRadius = UDim.new(0, radius) }, object)
-    end
-    local menuGui = make("ScreenGui", {
-        Name = GUI_NAME, ResetOnSpawn = false, DisplayOrder = MENU_DISPLAY_ORDER,
-        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-        ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets,
-        SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
-    }, playerGui)
-    local overlayGui = make("ScreenGui", {
-        Name = "PlayerESPOverlay", ResetOnSpawn = false, DisplayOrder = ESP_DISPLAY_ORDER,
-        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-        SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
-    }, playerGui)
-    -- WorldToViewportPoint uses the DEVICE safe area, not the full phone display.
-    -- Set this explicitly, AFTER construction; don't mix it with ScreenInsets.None.
-    -- Disable fullscreen extension so full-size marker frames aren't stretched.
-    overlayGui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets
-    local highlightFolder = make("Folder", { Name = HIGHLIGHT_NAME }, Workspace)
-    local shutdown = make("BindableEvent", { Name = "Shutdown" }, menuGui)
-    local menuRoot = make("Frame", {
-        Name = "MenuRoot", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
-    }, menuGui)
-    local textColor = Color3.fromRGB(235, 240, 248)
-    local mutedColor = Color3.fromRGB(157, 169, 189)
-    local rowColor = Color3.fromRGB(32, 39, 52)
-    local function label(parent, text, position, size, fontSize)
-        return make("TextLabel", {
-            BackgroundTransparency = 1, Position = position, Size = size,
-            Text = text, TextColor3 = textColor, Font = Enum.Font.Gotham,
-            TextSize = fontSize or 13, TextXAlignment = Enum.TextXAlignment.Left,
-        }, parent)
-    end
-    local function button(parent, text, position, size)
-        local result = make("TextButton", {
-            BackgroundColor3 = rowColor, BorderSizePixel = 0,
-            Position = position, Size = size, Text = text, TextColor3 = textColor,
-            Font = Enum.Font.GothamMedium, TextSize = 13, AutoButtonColor = true,
-        }, parent)
-        round(result, 8)
-        return result
-    end
-    local openButton = button(menuRoot, "ESP", UDim2.fromOffset(12, 12), UDim2.fromOffset(76, 38))
-    openButton.Name = "OpenMenu"
-    local panel = make("Frame", {
-        Name = "Panel", Position = UDim2.fromOffset(12, 58),
-        Size = UDim2.fromOffset(300, 540), BackgroundColor3 = Color3.fromRGB(19, 24, 34),
-        BorderSizePixel = 0, Active = true, Visible = not mobile,
-    }, menuRoot)
-    round(panel, 12)
-    make("UIStroke", { Color = Color3.fromRGB(55, 67, 88), Thickness = 1 }, panel)
-    local panelScale = make("UIScale", { Scale = 1 }, panel)
-    local dragHandle = button(panel, "PLAYER ESP  ·  v3.3", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
-    dragHandle.Name = "DragHandle"
-    dragHandle.BackgroundTransparency = 1
-    dragHandle.TextXAlignment = Enum.TextXAlignment.Left
-    dragHandle.Font = Enum.Font.GothamBold
-    dragHandle.Modal = not mobile
-    local minimize = button(panel, "—", UDim2.fromOffset(212, 6), UDim2.fromOffset(36, 36))
-    minimize.Name = "MinimizeMenu"
-    local closeButton = button(panel, "×", UDim2.fromOffset(254, 6), UDim2.fromOffset(36, 36))
-    closeButton.Name = "UnloadMenu"
-    closeButton.TextColor3 = Color3.fromRGB(255, 135, 145)
-    local subtitle = label(panel, "Тяни за заголовок · — свернуть · × удалить", UDim2.fromOffset(12, 43), UDim2.fromOffset(278, 16), 10)
-    subtitle.TextColor3 = mutedColor
-    local scroll = make("ScrollingFrame", {
-        Name = "SettingsScroll", Position = UDim2.fromOffset(8, 64),
-        Size = UDim2.new(1, -16, 1, -134), BackgroundTransparency = 1,
-        BorderSizePixel = 0, CanvasSize = UDim2.fromOffset(0, 470),
-        ScrollBarThickness = 3, ScrollBarImageColor3 = mutedColor,
-        ScrollingDirection = Enum.ScrollingDirection.Y,
-        ClipsDescendants = true, Active = true,
-    }, panel)
-    local status = label(panel, "", UDim2.new(0, 12, 1, -65), UDim2.fromOffset(278, 18), 10)
-    status.TextColor3 = mutedColor
-    local deleteButton = button(panel, "Удалить ESP", UDim2.new(0, 12, 1, -43), UDim2.new(1, -24, 0, 34))
-    deleteButton.Name = "DeleteESP"
-    deleteButton.TextColor3 = Color3.fromRGB(255, 145, 155)
-    local function setMenuOpen(isOpen)
-        panel.Visible = isOpen
-        dragHandle.Modal = isOpen and not mobile
-    end
-    connect(minimize.Activated, function() setMenuOpen(false) end)
-    connect(closeButton.Activated, function() cleanup() end)
-    connect(deleteButton.Activated, function() cleanup() end)
+    return result
+end
 
-    -- One shared drag listener: a second finger on the joystick cannot hijack it.
-    local drag, suppressUntil = nil, {}
-    local function clampPosition(target, x, y)
-        local available, size = menuRoot.AbsoluteSize, target.AbsoluteSize
-        return Vector2.new(
-            math.clamp(x, 0, math.max(0, available.X - size.X)),
-            math.clamp(y, 0, math.max(0, available.Y - size.Y))
-        )
-    end
-    local function place(target, position)
-        target.Position = UDim2.fromOffset(position.X, position.Y)
-    end
-    local function draggable(handle, target)
-        connect(handle.InputBegan, function(input)
-            local kind = input.UserInputType
-            if drag or (kind ~= Enum.UserInputType.Touch and kind ~= Enum.UserInputType.MouseButton1) then return end
-            drag = {
-                input = input, touch = kind == Enum.UserInputType.Touch,
-                handle = handle, target = target, moved = false,
-                start = Vector2.new(input.Position.X, input.Position.Y),
-                origin = Vector2.new(target.Position.X.Offset, target.Position.Y.Offset),
-            }
-        end)
-    end
-    draggable(dragHandle, panel)
-    draggable(openButton, openButton)
-    connect(UserInputService.InputChanged, function(input)
-        if not drag then return end
-        if drag.touch and input ~= drag.input then return end
-        if not drag.touch and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-        local delta = Vector2.new(input.Position.X, input.Position.Y) - drag.start
-        if delta.Magnitude > 5 then drag.moved = true end
-        if drag.moved then
-            suppressUntil[drag.handle] = os.clock() + 0.25
-            local p = drag.origin + delta
-            place(drag.target, clampPosition(drag.target, p.X, p.Y))
-        end
-    end)
-    connect(UserInputService.InputEnded, function(input)
-        if not drag then return end
-        if (drag.touch and input == drag.input)
-            or (not drag.touch and input.UserInputType == Enum.UserInputType.MouseButton1) then
-            if drag.moved then suppressUntil[drag.handle] = os.clock() + 0.25 end
-            drag = nil
-        end
-    end)
-    connect(openButton.Activated, function()
-        if os.clock() >= (suppressUntil[openButton] or 0) then setMenuOpen(not panel.Visible) end
-    end)
-    connect(UserInputService.InputBegan, function(input, processed)
-        if not processed and not UserInputService:GetFocusedTextBox()
-            and input.KeyCode == Enum.KeyCode.RightShift then setMenuOpen(not panel.Visible) end
-    end)
-    local function fitPanel()
-        local size = menuRoot.AbsoluteSize
-        if size.X <= 0 or size.Y <= 0 then return end
-        local scale = math.max(0.4, math.min(1, (size.X - 16) / 300))
-        panelScale.Scale = scale
-        -- Scroll the content on short screens instead of shrinking the touch targets.
-        panel.Size = UDim2.fromOffset(300, math.max(170, math.min(540, (size.Y - 16) / scale)))
-        place(panel, clampPosition(panel, panel.Position.X.Offset, panel.Position.Y.Offset))
-        place(openButton, clampPosition(openButton, openButton.Position.X.Offset, openButton.Position.Y.Offset))
-        dirty = true
-    end
-    connect(menuRoot:GetPropertyChangedSignal("AbsoluteSize"), fitPanel)
-    fitPanel()
+function Shared.Validate(key, value)
+    if type(key) ~= "string" then return nil end
+    local rule = Shared.Schema[key]
+    if not rule or type(value) ~= rule.kind then return nil end
+    if rule.kind == "boolean" then return value end
+    -- NaN and infinities must be rejected before rounding/clamping.
+    if value ~= value or value == math.huge or value == -math.huge then return nil end
+    value = math.max(rule.min, math.min(rule.max, value))
+    value = rule.min + math.floor((value - rule.min) / rule.step + 0.5) * rule.step
+    return math.max(rule.min, math.min(rule.max, value))
+end
 
-    local toggleButtons, colorStrokes = {}, {}
-    local function refreshStyles()
-        for key, item in pairs(toggleButtons) do
-            set(item, "Text", settings[key] and "ВКЛ" or "ВЫКЛ")
-            set(item, "TextColor3", settings[key] and Color3.fromRGB(12, 24, 20) or mutedColor)
-            set(item, "BackgroundColor3", settings[key] and settings.Color or Color3.fromRGB(46, 54, 69))
-        end
-        set(dragHandle, "TextColor3", settings.Color)
-        set(openButton, "TextColor3", settings.Enabled and settings.Color or mutedColor)
-        for _, swatch in ipairs(colorStrokes) do
-            set(swatch.stroke, "Transparency", swatch.color == settings.Color and 0 or 1)
-        end
-        for _, entry in pairs(tracked) do
-            set(entry.line, "BackgroundColor3", settings.Color)
-            set(entry.dot, "BackgroundColor3", settings.Color)
-            entry.clear = nil
-        end
-        dirty = true
-    end
-    local function addToggle(key, text, index)
-        local row = button(scroll, "", UDim2.fromOffset(4, (index - 1) * 42), UDim2.fromOffset(270, 38))
-        row.Name = key .. "Toggle"
-        label(row, text, UDim2.fromOffset(10, 0), UDim2.fromOffset(194, 38), 12)
-        local badge = label(row, "", UDim2.fromOffset(204, 5), UDim2.fromOffset(58, 28), 11)
-        badge.BackgroundTransparency = 0
-        badge.TextXAlignment = Enum.TextXAlignment.Center
-        round(badge, 6)
-        toggleButtons[key] = badge
-        connect(row.Activated, function()
-            settings[key] = not settings[key]
-            refreshStyles()
-        end)
-    end
-    addToggle("Enabled", "Весь ESP", 1)
-    addToggle("Outlines", "Обводка игроков", 2)
-    addToggle("Tracers", "Лучи к игрокам", 3)
-    addToggle("FarDots", "Точки вдали", 4)
-    addToggle("Labels", "Имена и расстояния", 5)
-    addToggle("ThroughWalls", "Сквозь стены", 6)
-    addToggle("LiteMode", "Лёгкий режим", 7)
-    label(scroll, "Точки начиная с:", UDim2.fromOffset(8, 299), UDim2.fromOffset(250, 22), 12)
-    local distanceValue = label(scroll, "", UDim2.fromOffset(54, 328), UDim2.fromOffset(170, 36), 13)
-    distanceValue.TextXAlignment = Enum.TextXAlignment.Center
-    local minus = button(scroll, "−", UDim2.fromOffset(8, 328), UDim2.fromOffset(38, 36))
-    minus.Name = "DistanceMinus"
-    local plus = button(scroll, "+", UDim2.fromOffset(232, 328), UDim2.fromOffset(38, 36))
-    plus.Name = "DistancePlus"
-    local function changeDistance(delta)
-        settings.FarDistance = math.clamp(settings.FarDistance + delta, 25, 2000)
-        distanceValue.Text = tostring(settings.FarDistance) .. " studs"
-        dirty = true
-    end
-    connect(minus.Activated, function() changeDistance(-25) end)
-    connect(plus.Activated, function() changeDistance(25) end)
-    changeDistance(0)
-    label(scroll, "Цвет", UDim2.fromOffset(8, 383), UDim2.fromOffset(60, 34), 12)
-    local colors = {
-        Color3.fromRGB(75, 240, 150), Color3.fromRGB(85, 180, 255),
-        Color3.fromRGB(255, 100, 120), Color3.fromRGB(255, 213, 90), Color3.fromRGB(245, 245, 255),
+function Shared.SameTeam(a, b)
+    -- Two neutral players are opponents, even though both Team properties may be nil.
+    return a ~= nil and b ~= nil and not a.Neutral and not b.Neutral
+        and a.Team ~= nil and a.Team == b.Team
+end
+
+function Shared.IsTarget(viewer, other, settings)
+    return other ~= viewer and (not settings.TeamCheck or not Shared.SameTeam(viewer, other))
+end
+
+function Shared.DeviceProfile(touch, keyboard, preferred)
+    -- PreferredInput handles touch laptops and phones with external keyboards.
+    local mobile = preferred == "Touch"
+        or (preferred ~= "KeyboardAndMouse" and touch and not keyboard)
+    return {
+        mobile = mobile, label = mobile and "Script\\mobile" or "Script\\PC",
+        espLimit = mobile and 16 or 30, espInterval = mobile and 0.3 or 0.2,
+        aimInterval = mobile and 0.14 or 0.08, aimChecks = mobile and 4 or 8,
+        probeInterval = mobile and 0.08 or 0.04,
     }
-    for index, color in ipairs(colors) do
-        local swatch = button(scroll, "", UDim2.fromOffset(74 + (index - 1) * 40, 383), UDim2.fromOffset(34, 34))
-        swatch.Name = "Color" .. index
-        swatch.BackgroundColor3 = color
-        local stroke = make("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Thickness = 2, Transparency = 1 }, swatch)
-        table.insert(colorStrokes, { color = color, stroke = stroke })
-        connect(swatch.Activated, function() settings.Color = color; refreshStyles() end)
-    end
-    local hint = label(scroll, "Лёгкий режим: 24 метки, 6 обводок.\nРасстояние считается от текущей камеры.", UDim2.fromOffset(8, 432), UDim2.fromOffset(264, 32), 10)
-    hint.TextColor3 = mutedColor
+end
 
-    local function hide(entry)
-        set(entry.gui, "Visible", false)
+function Shared.PerformanceBudget(profile, reduced)
+    if profile.mobile and reduced then
+        return {espLimit = 8, espInterval = 0.5, aimInterval = 0.2,
+            aimChecks = 3, probeInterval = 0.1}
     end
-    local function releaseHighlight(entry)
-        for _, slot in ipairs(highlightPool) do
-            if slot.entry == entry then
-                slot.entry = nil
-                set(slot.object, "Enabled", false)
-                slot.object.Adornee = nil
-            end
-        end
-        entry.highlight = nil
-    end
-    local function trackPlayer(player)
-        if player == localPlayer or tracked[player] or player.Parent ~= Players then return end
-        local group = make("Frame", {
-            Name = "Player_" .. player.UserId, Size = UDim2.fromScale(1, 1),
-            BackgroundTransparency = 1, Visible = false,
-        }, overlayGui)
-        local line = make("Frame", {
-            Name = "Tracer", AnchorPoint = Vector2.new(0.5, 0.5),
-            BackgroundColor3 = settings.Color, BackgroundTransparency = 0.4,
-            BorderSizePixel = 0, Visible = false, ZIndex = 1,
-        }, group)
-        local dot = make("Frame", {
-            Name = "FarDot", AnchorPoint = Vector2.new(0.5, 0.5),
-            Size = UDim2.fromOffset(mobile and 6 or 8, mobile and 6 or 8),
-            BackgroundColor3 = settings.Color, BorderSizePixel = 0, Visible = false, ZIndex = 3,
-        }, group)
-        round(dot, 8)
-        make("UIStroke", { Color = Color3.fromRGB(12, 17, 24), Thickness = 1 }, dot)
-        local tag = label(group, "", UDim2.fromOffset(0, 0), UDim2.fromOffset(154, 30), mobile and 10 or 11)
-        tag.Name = "PlayerLabel"
-        tag.TextStrokeTransparency = 0.55
-        tag.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-        tag.TextTruncate = Enum.TextTruncate.AtEnd
-        tag.Visible = false
-        tag.ZIndex = 4
-        tracked[player] = { player = player, gui = group, line = line, dot = dot, label = tag, nextLabel = 0, nextRay = 0 }
-        dirty = true
-    end
-    local function removePlayer(player)
-        local entry = tracked[player]
-        if not entry then return end
-        releaseHighlight(entry)
-        entry.removed = true
-        entry.gui:Destroy()
-        tracked[player] = nil
-        dirty = true
-    end
-    connect(Players.PlayerAdded, trackPlayer)
-    connect(Players.PlayerRemoving, removePlayer)
-    for _, player in ipairs(Players:GetPlayers()) do trackPlayer(player) end
-    refreshStyles()
+    return profile
+end
 
-    local function syncHighlights(wanted, limit)
-        local wantedSet = {}
-        for _, entry in ipairs(wanted) do wantedSet[entry] = true end
-        for _, slot in ipairs(highlightPool) do
-            if slot.entry and not wantedSet[slot.entry] then releaseHighlight(slot.entry) end
-        end
-        while #highlightPool > limit do
-            local slot = table.remove(highlightPool)
-            if slot.entry then slot.entry.highlight = nil end
-            slot.object:Destroy()
-        end
-        for _, entry in ipairs(wanted) do
-            if not entry.highlight then
-                local free
-                for _, slot in ipairs(highlightPool) do
-                    if not slot.entry then free = slot; break end
-                end
-                if not free and #highlightPool < limit then
-                    free = { object = make("Highlight", {
-                        Name = "OutlineSlot" .. (#highlightPool + 1), Enabled = false,
-                        FillTransparency = 1, OutlineTransparency = 0,
-                    }, highlightFolder) }
-                    table.insert(highlightPool, free)
-                end
-                if free then
-                    free.entry = entry
-                    entry.highlight = free.object
-                    free.object.Adornee = entry.character
-                end
-            end
-            if entry.highlight then
-                set(entry.highlight, "OutlineColor", settings.Color)
-                set(entry.highlight, "DepthMode", settings.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded)
-                set(entry.highlight, "Enabled", true)
-            end
-        end
+function Shared.ClampPanel(x, y, width, height, viewX, viewY, insetX, insetY)
+    local minX, minY = insetX + 6, insetY + 6
+    return math.max(minX, math.min(math.max(minX, viewX - width - 6), x)),
+        math.max(minY, math.min(math.max(minY, viewY - height - 6), y))
+end
+
+local rigs = setmetatable({}, {__mode = "k"})
+function Shared.Alive(player)
+    local character = player and player.Character
+    if not character or not character.Parent then return nil end
+    local rig = rigs[player]
+    if not rig or rig.character ~= character or rig.humanoid.Parent ~= character
+        or rig.root.Parent ~= character or rig.head.Parent ~= character then
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        local root = character:FindFirstChild("HumanoidRootPart")
+        local head = character:FindFirstChild("Head")
+        if not humanoid or not root or not root:IsA("BasePart") or not head
+            or not head:IsA("BasePart") then return nil end
+        rig = {character = character, humanoid = humanoid, root = root, head = head}
+        rigs[player] = rig
     end
-    local function alive(entry)
-        return not entry.removed and entry.player.Character == entry.character
-            and entry.root and entry.root:IsDescendantOf(Workspace)
-            and entry.humanoid and entry.humanoid.Parent and entry.humanoid.Health > 0
+    local humanoid, root, head = rig.humanoid, rig.root, rig.head
+    if not humanoid or humanoid.Health <= 0 or not root or not root:IsA("BasePart")
+        or not head or not head:IsA("BasePart") then return nil end
+    return character, humanoid, root, head
+end
+
+return Shared
+]====]
+
+local SERVER_SOURCE = [====[
+-- MOD MENU 1.1.0 | Put this Script in ServerScriptService.
+-- Children: Config (ModuleScript), Shared (ModuleScript), Client (LocalScript).
+-- Settings are validated here. Head geometry is modified ONLY on each viewer's client.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Config = require(script:WaitForChild("Config"))
+local Shared = require(script:WaitForChild("Shared"))
+local clientTemplate = script:WaitForChild("Client")
+
+-- Refuse a duplicate installation instead of destroying another running instance.
+if ReplicatedStorage:FindFirstChild(Config.RuntimeName) then
+    warn("[MOD MENU] Duplicate runtime. Keep only one OwnGameModMenuServer Script.")
+    return
+end
+
+local runtime = Instance.new("Folder")
+runtime.Name = Config.RuntimeName
+runtime:SetAttribute("Version", Shared.Version)
+local sharedCopy = script.Shared:Clone()
+sharedCopy.Name = "Shared"
+sharedCopy.Parent = runtime
+local request = Instance.new("RemoteEvent")
+request.Name = "Request"
+request.Parent = runtime
+local update = Instance.new("RemoteEvent")
+update.Name = "Update"
+update.Parent = runtime
+runtime.Parent = ReplicatedStorage
+
+local states, connections = {}, {}
+local stopped = false
+
+local function allowed(player)
+    return (Config.AllowAllStudioTestPlayers and RunService:IsStudio())
+        or Config.AdminUserIds[player.UserId] == true
+        or (Config.AllowPersonalPlaceOwner and game.CreatorType == Enum.CreatorType.User
+            and player.UserId == game.CreatorId)
+end
+
+local function sendState(player)
+    local state = states[player]
+    if state and player.Parent == Players then
+        update:FireClient(player, state.settings)
     end
-    local loadedCount, totalCount = 0, 0
-    local function refreshTargets(camera, origin)
-        local candidates, wanted = {}, {}
-        loadedCount, totalCount = 0, 0
-        for player, entry in pairs(tracked) do
-            totalCount = totalCount + 1
-            local character = player.Character
-            if entry.character ~= character then
-                releaseHighlight(entry)
-                entry.character = character
-                entry.clear, entry.nextLabel, entry.nextRay = nil, 0, 0
-                local old = character and character:FindFirstChild("ClientPlayerOutline")
-                if old and old:IsA("Highlight") then old:Destroy() end
-            end
-            entry.root = character and character:FindFirstChild("HumanoidRootPart")
-            if entry.root and not entry.root:IsA("BasePart") then entry.root = nil end
-            entry.head = character and character:FindFirstChild("Head")
-            entry.humanoid = character and character:FindFirstChildOfClass("Humanoid")
-            if alive(entry) then
-                loadedCount = loadedCount + 1
-                entry.distance = (entry.root.Position - origin).Magnitude
-                local target = entry.head and entry.head:IsA("BasePart") and entry.head.Position or entry.root.Position
-                local point, onScreen = camera:WorldToViewportPoint(target)
-                if settings.Enabled and onScreen and point.Z > 0 then table.insert(candidates, entry) end
-            end
-        end
-        table.sort(candidates, function(a, b)
-            if a.distance == b.distance then return a.player.UserId < b.player.UserId end
-            return a.distance < b.distance
-        end)
-        local selected = {}
-        active = {}
-        local markerLimit = settings.LiteMode and 24 or 64
-        local outlineLimit = settings.LiteMode and 6 or 16
-        for i = 1, math.min(#candidates, markerLimit) do
-            local entry = candidates[i]
-            active[#active + 1] = entry
-            selected[entry] = true
-            -- FarDistance controls dots only. Outlines have no distance cutoff;
-            -- keep the number budget so distant outlines don't overload phones.
-            if settings.Outlines and #wanted < outlineLimit then
-                wanted[#wanted + 1] = entry
-            end
-        end
-        for _, entry in pairs(tracked) do if not selected[entry] then hide(entry) end end
-        syncHighlights(wanted, outlineLimit)
-        if panel.Visible then
-            set(status, "Text", (settings.LiteMode and "LITE" or "FULL") .. " · меток " .. #active .. " · игроков " .. loadedCount .. "/" .. totalCount)
-        end
+end
+
+local function restoreMovement(state)
+    local effect = state.movement
+    if not effect then return end
+    if effect.humanoid.Parent then
+        if effect.speedBefore ~= nil then effect.humanoid.WalkSpeed = effect.speedBefore end
+        if effect.rotateBefore ~= nil then effect.humanoid.AutoRotate = effect.rotateBefore end
     end
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-    rayParams.IgnoreWater = true
-    local lastCamera, lastSubject, lastCameraType, lastScanPosition
-    local filterCamera, filterCharacter
-    local now, frameElapsed, nextScan = 0, 0, 0
-    local previousEnabled = true
-    local function hideAll()
-        for _, entry in pairs(tracked) do hide(entry) end
-        syncHighlights({}, settings.LiteMode and 6 or 16)
+    state.movement = nil
+end
+
+local function applyMovement(player, state)
+    local _, humanoid, root = Shared.Alive(player)
+    local effect = state.movement
+    if effect and effect.humanoid ~= humanoid then
+        restoreMovement(state)
+        effect = nil
     end
-    local function render(deltaTime)
-        if stopped then return end
-        now, frameElapsed = now + deltaTime, frameElapsed + deltaTime
-        if not settings.Enabled then
-            if previousEnabled or dirty then hideAll(); dirty = false end
-            previousEnabled = false
+    if not humanoid then return end
+    if not effect then
+        effect = {humanoid = humanoid}
+        state.movement = effect
+    end
+    if state.settings.Speed then
+        if effect.speedBefore == nil then effect.speedBefore = humanoid.WalkSpeed end
+        if humanoid.WalkSpeed ~= state.settings.WalkSpeed then
+            humanoid.WalkSpeed = state.settings.WalkSpeed
+        end
+    elseif effect.speedBefore ~= nil then
+        humanoid.WalkSpeed = effect.speedBefore
+        effect.speedBefore = nil
+    end
+    local canSpin = state.settings.Spin and not humanoid.Sit
+        and not humanoid.PlatformStand and not root.Anchored
+    if canSpin then
+        if effect.rotateBefore == nil then effect.rotateBefore = humanoid.AutoRotate end
+        humanoid.AutoRotate = false
+    elseif effect.rotateBefore ~= nil then
+        humanoid.AutoRotate = effect.rotateBefore
+        effect.rotateBefore = nil
+    end
+end
+
+local function grant(player)
+    if stopped or states[player] or not allowed(player) then return end
+    local state = {settings = Shared.Defaults(), tokens = 24, lastRequest = os.clock()}
+    states[player] = state
+    task.spawn(function()
+        local playerGui = player:WaitForChild("PlayerGui", 20)
+        if not playerGui or stopped or states[player] ~= state or player.Parent ~= Players then return end
+        local existing = playerGui:FindFirstChild(Config.GuiName)
+        if existing then
+            warn("[MOD MENU] A GUI with the configured name already exists for " .. player.Name)
             return
         end
-        if not previousEnabled then dirty = true; previousEnabled = true end
-        local camera = Workspace.CurrentCamera
-        local subject = camera and camera.CameraSubject
-        local cameraType = camera and camera.CameraType
-        if camera ~= lastCamera or subject ~= lastSubject or cameraType ~= lastCameraType then
-            lastCamera = camera
-            lastSubject, lastCameraType = subject, cameraType
-            lastScanPosition = nil
-            dirty = true
-            for _, entry in pairs(tracked) do entry.clear = nil; entry.nextLabel = 0 end
-            if not camera then hideAll() end
+        local gui = Instance.new("ScreenGui")
+        gui.Name = Config.GuiName
+        gui.ResetOnSpawn = false
+        gui.IgnoreGuiInset = true
+        gui.ScreenInsets = Enum.ScreenInsets.None
+        gui.DisplayOrder = 70
+        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        gui:SetAttribute("RuntimeName", Config.RuntimeName)
+        local client = clientTemplate:Clone()
+        client.Enabled = true
+        client.Parent = gui
+        state.gui = gui
+        gui.Parent = playerGui
+    end)
+end
+
+local function revoke(player)
+    local state = states[player]
+    if not state then return end
+    restoreMovement(state)
+    if state.gui then state.gui:Destroy() end
+    states[player] = nil
+end
+
+table.insert(connections, request.OnServerEvent:Connect(function(player, action, key, value)
+    local state = states[player]
+    if not state or not allowed(player) then return end
+    local now = os.clock()
+    state.tokens = math.min(24, state.tokens + (now - state.lastRequest) * 12)
+    state.lastRequest = now
+    if state.tokens < 1 then return end
+    state.tokens = state.tokens - 1
+    if action == "Sync" then
+        sendState(player)
+    elseif action == "Set" then
+        local clean = Shared.Validate(key, value)
+        if clean == nil then return end
+        state.settings[key] = clean
+        applyMovement(player, state)
+        sendState(player)
+    elseif action == "Stop" then
+        for name, rule in pairs(Shared.Schema) do
+            if rule.kind == "boolean" and name ~= "TeamCheck" and name ~= "Names"
+                and name ~= "WallCheck" and name ~= "StrafeClockwise" then
+                state.settings[name] = false
+            end
         end
-        if not camera then return end
-        local interval = settings.LiteMode and 1 / 20 or 1 / 30
-        if not dirty and frameElapsed + 0.000001 < interval then return end
-        frameElapsed = frameElapsed % interval
-        local character = localPlayer.Character
-        -- A remotely controlled drone can be kilometres from the avatar.
-        -- Rank players, switch near/far visuals and show distances from the VIEW.
-        local origin = camera.CFrame.Position
-        if lastScanPosition and (origin - lastScanPosition).Magnitude > 80 then dirty = true end
-        if dirty or now >= nextScan then
-            refreshTargets(camera, origin)
-            lastScanPosition = origin
-            nextScan = now + (settings.LiteMode and 0.35 or 0.2)
-            dirty = false
+        restoreMovement(state)
+        sendState(player)
+    end
+end))
+
+table.insert(connections, Players.PlayerAdded:Connect(grant))
+table.insert(connections, Players.PlayerRemoving:Connect(function(player)
+    revoke(player)
+end))
+for _, player in ipairs(Players:GetPlayers()) do grant(player) end
+
+local elapsed = 0
+table.insert(connections, RunService.Heartbeat:Connect(function(dt)
+    elapsed = elapsed + dt
+    if elapsed < 0.2 then return end
+    elapsed = 0
+    for player, state in pairs(states) do
+        if player.Parent ~= Players or not allowed(player) then
+            revoke(player)
+        else
+            applyMovement(player, state)
         end
-        if camera ~= filterCamera or character ~= filterCharacter then
-            filterCamera, filterCharacter = camera, character
-            local exclude = { camera, highlightFolder }
-            if character then exclude[#exclude + 1] = character end
-            rayParams.FilterDescendantsInstances = exclude
-        end
-        local viewport = camera.ViewportSize
-        local lineStart = Vector2.new(viewport.X * 0.5, viewport.Y - (mobile and 64 or 24))
-        local occupied, labelCount = {}, 0
-        local labelLimit = settings.LiteMode and 6 or 14
-        for _, entry in ipairs(active) do
-            if not alive(entry) then
-                if not entry.removed then hide(entry); releaseHighlight(entry) end
-                dirty = true
-            else
-                local targetPosition = entry.head and entry.head.Parent == entry.character and entry.head.Position or entry.root.Position
-                local point, onScreen = camera:WorldToViewportPoint(targetPosition)
-                local visible = onScreen and point.Z > 0
-                if visible and not settings.ThroughWalls then
-                    if now >= entry.nextRay or entry.clear == nil then
-                        local hit = Workspace:Raycast(camera.CFrame.Position, targetPosition - camera.CFrame.Position, rayParams)
-                        entry.clear = not hit or hit.Instance:IsDescendantOf(entry.character)
-                        entry.nextRay = now + (settings.LiteMode and 0.25 or 0.15)
-                    end
-                    visible = entry.clear == true
-                end
-                local distance = (entry.root.Position - origin).Magnitude
-                -- In Lite mode, dots also cover nearby players outside the outline budget.
-                local showDot = settings.FarDots and (distance >= settings.FarDistance or (settings.Outlines and not entry.highlight))
-                local showLabel = false
-                if visible and settings.Labels and labelCount < labelLimit
-                    and (not settings.LiteMode or distance <= 750) then
-                    -- Put our small label below/to the side of the built-in name tag.
-                    local width, height = math.min(154, viewport.X), 30
-                    local x = math.clamp(point.X + 12, 0, math.max(0, viewport.X - width))
-                    local y = math.clamp(point.Y + 12, 0, math.max(0, viewport.Y - height))
-                    local overlaps = false
-                    for _, box in ipairs(occupied) do
-                        if x < box.x + width + 4 and x + width + 4 > box.x
-                            and y < box.y + height + 4 and y + height + 4 > box.y then overlaps = true; break end
-                    end
-                    if not overlaps then
-                        occupied[#occupied + 1] = { x = x, y = y }
-                        labelCount = labelCount + 1
-                        showLabel = true
-                        set(entry.label, "Position", UDim2.fromOffset(x, y))
-                        if now >= entry.nextLabel then
-                            set(entry.label, "Text", entry.player.DisplayName .. "\n" .. math.floor(distance + 0.5) .. " studs")
-                            entry.nextLabel = now + (settings.LiteMode and 0.5 or 0.25)
+    end
+end))
+
+local function cleanup()
+    if stopped then return end
+    stopped = true
+    for _, connection in ipairs(connections) do connection:Disconnect() end
+    for player in pairs(states) do revoke(player) end
+    runtime:Destroy()
+end
+script.Destroying:Connect(cleanup)
+game:BindToClose(cleanup)
+print("[MOD MENU] v" .. Shared.Version .. " ready. RightShift = menu, RMB/L2 = aim, End = stop.")
+]====]
+
+local CLIENT_SOURCE = [====[
+-- Client template. The server clones this into an authorized player's ScreenGui.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local CAS = game:GetService("ContextActionService")
+local player = Players.LocalPlayer
+local gui = script.Parent
+local runtime = ReplicatedStorage:WaitForChild(gui:GetAttribute("RuntimeName"), 20)
+if not runtime then gui:Destroy() return end
+local Shared = require(runtime:WaitForChild("Shared"))
+local request = runtime:WaitForChild("Request")
+local update = runtime:WaitForChild("Update")
+local settings = Shared.Defaults()
+local hitboxes = require(script:WaitForChild("LocalHitboxes")).new()
+local profile = Shared.DeviceProfile(UIS.TouchEnabled, UIS.KeyboardEnabled, UIS.PreferredInput.Name)
+local budget = Shared.PerformanceBudget(profile, false)
+local reduced = false
+local ready, dead = false, false
+local connections, refreshers, rows, records = {}, {}, {}, {}
+local heldMouse, heldPad, latchedAim = false, false, false
+local target, orbitTarget = nil, nil
+local activeTab = "AIM"
+local lastStrafeHumanoid = nil
+local rootName = "OwnGameModMenu_" .. tostring(player.UserId)
+local targetTimer, espTimer = 0, 0
+local updateBindings
+local stopDrag
+local sightCache = {}
+local wantedHeads, visualCandidates, aimCandidates = {}, {}, {}
+local C = {
+    bg = Color3.fromRGB(18, 21, 29), card = Color3.fromRGB(29, 34, 45),
+    active = Color3.fromRGB(124, 111, 247), text = Color3.fromRGB(238, 241, 248),
+    muted = Color3.fromRGB(158, 168, 187), border = Color3.fromRGB(48, 55, 70),
+    enemy = Color3.fromRGB(255, 100, 120), friend = Color3.fromRGB(86, 217, 167),
+    gold = Color3.fromRGB(255, 204, 104),
+}
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(connections, connection)
+    return connection
+end
+
+local function make(className, properties, parent)
+    local object = Instance.new(className)
+    for key, value in pairs(properties) do object[key] = value end
+    object.Parent = parent
+    return object
+end
+
+local function setProperty(object, key, value)
+    if object[key] ~= value then object[key] = value end
+end
+
+local function round(object, radius)
+    make("UICorner", {CornerRadius = UDim.new(0, radius or 10)}, object)
+end
+
+local function label(parent, text, position, size, textSize, color)
+    return make("TextLabel", {
+        BackgroundTransparency = 1, Position = position, Size = size,
+        Text = text, TextSize = textSize or 14, TextColor3 = color or C.text,
+        Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+    }, parent)
+end
+
+local function button(parent, text, position, size, color)
+    local result = make("TextButton", {
+        Position = position, Size = size, Text = text, TextSize = 13,
+        Font = Enum.Font.GothamBold, TextColor3 = C.text,
+        BackgroundColor3 = color or C.card, BorderSizePixel = 0,
+        AutoButtonColor = true,
+    }, parent)
+    round(result, 9)
+    return result
+end
+
+local open = button(gui, profile.label, UDim2.fromOffset(14, 52), UDim2.fromOffset(135, 42), C.active)
+local panel = make("Frame", {
+    Name = "Panel", Position = UDim2.fromOffset(14, 102),
+    Size = UDim2.fromOffset(370, 570), BackgroundColor3 = C.bg,
+    BorderSizePixel = 0, Active = true,
+}, gui)
+round(panel, 16)
+make("UIStroke", {Color = C.border, Thickness = 1}, panel)
+local header = make("Frame", {
+    Size = UDim2.new(1, -50, 0, 63), BackgroundTransparency = 1, Active = true,
+}, panel)
+local title = label(header, profile.label, UDim2.fromOffset(16, 8), UDim2.new(1, -18, 0, 25), 19)
+local dragHint = label(header, "Зажми шапку и перетащи", UDim2.fromOffset(16, 35), UDim2.new(1, -18, 0, 18), 10, C.muted)
+local dragHandle = make("TextButton", {
+    Name = "DragHandle", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+    Text = "", AutoButtonColor = false, Active = true, ZIndex = 5,
+}, header)
+local hide = button(panel, "−", UDim2.new(1, -42, 0, 14), UDim2.fromOffset(30, 30))
+hide.Modal = true
+local tabs = make("Frame", {Position = UDim2.fromOffset(12, 66), Size = UDim2.new(1, -24, 0, 35), BackgroundTransparency = 1}, panel)
+local tabButtons = {}
+for index, name in ipairs({"AIM", "ESP", "ДВИЖЕНИЕ"}) do
+    tabButtons[name] = button(tabs, name, UDim2.new((index - 1) / 3, 2, 0, 0), UDim2.new(1 / 3, -4, 1, 0))
+end
+local scroll = make("ScrollingFrame", {
+    Name = "Settings", Position = UDim2.fromOffset(12, 111), Size = UDim2.new(1, -24, 1, -181),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+    ScrollBarThickness = 3, ScrollBarImageColor3 = C.active,
+    CanvasSize = UDim2.fromOffset(0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollingDirection = Enum.ScrollingDirection.Y,
+}, panel)
+make("UIListLayout", {Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder}, scroll)
+make("UIPadding", {PaddingBottom = UDim.new(0, 8), PaddingRight = UDim.new(0, 7)}, scroll)
+local status = label(panel, "Подключение…", UDim2.new(0, 16, 1, -65), UDim2.new(1, -32, 0, 22), 11, C.muted)
+status.TextTruncate = Enum.TextTruncate.AtEnd
+local stop = button(panel, "ВЫКЛЮЧИТЬ ВСЁ", UDim2.new(0, 12, 1, -40), UDim2.new(1, -24, 0, 29), Color3.fromRGB(79, 41, 54))
+local aimButton = button(gui, "AIM\nOFF", UDim2.new(1, -96, 1, -208), UDim2.fromOffset(78, 64))
+aimButton.TextSize = 14
+aimButton.Visible = false
+local crosshair = label(gui, "+", UDim2.new(0.5, -8, 0.5, -10), UDim2.fromOffset(16, 20), 17, C.text)
+crosshair.TextXAlignment = Enum.TextXAlignment.Center
+crosshair.Visible = false
+local fovCircle = make("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+    Size = UDim2.fromOffset(settings.AimFOV * 2, settings.AimFOV * 2),
+    BackgroundTransparency = 1, Visible = false,
+}, gui)
+make("UICorner", {CornerRadius = UDim.new(1, 0)}, fovCircle)
+local fovStroke = make("UIStroke", {Color = C.active, Thickness = 1, Transparency = 0.25}, fovCircle)
+
+local function releaseAim()
+    heldMouse, heldPad, latchedAim = false, false, false
+    target, orbitTarget = nil, nil
+end
+
+local function setMenu(visible)
+    if not visible and stopDrag then stopDrag() end
+    panel.Visible = visible
+    aimButton.Visible = profile.mobile and not visible
+    hide.Modal = visible
+    if visible then releaseAim() end
+end
+
+local function refresh()
+    for _, callback in ipairs(refreshers) do callback() end
+    fovCircle.Size = UDim2.fromOffset(settings.AimFOV * 2, settings.AimFOV * 2)
+end
+
+local function setSetting(key, value)
+    if not ready or dead then return end
+    local validated = Shared.Validate(key, value)
+    if validated == nil then return end
+    -- UI follows the server acknowledgement, so rejected settings are never applied locally.
+    request:FireServer("Set", key, validated)
+end
+
+local order = 0
+local function row(tab, title, description)
+    order = order + 1
+    local frame = make("Frame", {
+        Size = UDim2.new(1, 0, 0, 65), BackgroundColor3 = C.card,
+        BorderSizePixel = 0, LayoutOrder = order, Visible = tab == activeTab,
+    }, scroll)
+    round(frame, 10)
+    local titleLabel = label(frame, title, UDim2.fromOffset(11, 6), UDim2.new(1, -98, 0, 21), 13)
+    titleLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    local descriptionLabel = label(frame, description, UDim2.fromOffset(11, 29), UDim2.new(1, -99, 0, 31), 10, C.muted)
+    descriptionLabel.TextWrapped = true
+    descriptionLabel.TextYAlignment = Enum.TextYAlignment.Top
+    table.insert(rows, {frame = frame, tab = tab})
+    table.insert(refreshers, function()
+        frame.Size = UDim2.new(1, 0, 0, profile.mobile and 74 or 65)
+    end)
+    return frame
+end
+
+local function toggle(tab, key, title, description)
+    local frame = row(tab, title, description)
+    local switch = button(frame, "OFF", UDim2.new(1, -75, 0, 17), UDim2.fromOffset(64, 30))
+    table.insert(refreshers, function()
+        switch.Text = settings[key] and "ON" or "OFF"
+        switch.BackgroundColor3 = settings[key] and C.active or C.border
+        switch.Size = UDim2.fromOffset(64, profile.mobile and 42 or 30)
+    end)
+    connect(switch.Activated, function() setSetting(key, not settings[key]) end)
+end
+
+local function stepper(tab, key, title, unit)
+    local rule = Shared.Schema[key]
+    local frame = row(tab, title, "")
+    frame.Size = UDim2.new(1, 0, 0, 68)
+    local amount = label(frame, "", UDim2.new(1, -114, 0, 7), UDim2.fromOffset(101, 20), 13, C.gold)
+    amount.TextXAlignment = Enum.TextXAlignment.Right
+    local minus = button(frame, "−", UDim2.fromOffset(11, 32), UDim2.new(0.5, -15, 0, 27))
+    local plus = button(frame, "+", UDim2.new(0.5, 4, 0, 32), UDim2.new(0.5, -15, 0, 27))
+    minus.BackgroundColor3, plus.BackgroundColor3 = C.border, C.border
+    table.insert(refreshers, function()
+        amount.Text = string.format("%g%s", settings[key], unit or "")
+        frame.Size = UDim2.new(1, 0, 0, profile.mobile and 84 or 68)
+        minus.Size = UDim2.new(0.5, -15, 0, profile.mobile and 42 or 27)
+        plus.Size = minus.Size
+    end)
+    connect(minus.Activated, function() setSetting(key, settings[key] - rule.step) end)
+    connect(plus.Activated, function() setSetting(key, settings[key] + rule.step) end)
+end
+
+toggle("AIM", "Aim", "AIM Head", "Удерживай ПКМ / L2 или нажми кнопку AIM")
+toggle("AIM", "TeamCheck", "Team Check", "Союзники исключены во всех режимах")
+toggle("AIM", "WallCheck", "Проверка стен", "AIM выбирает видимую цель")
+stepper("AIM", "AimFOV", "Радиус AIM", " px")
+stepper("AIM", "AimSmooth", "Скорость наведения", "")
+toggle("AIM", "Hitbox", "Head Hitbox", "Увеличение видно только на твоём экране")
+stepper("AIM", "HeadScale", "Размер головы", "×")
+toggle("ESP", "ESP", "ESP", "Обводка игроков, видимая сквозь стены")
+toggle("ESP", "Names", "Имена и дистанция", "В studs; число меток зависит от устройства")
+toggle("ESP", "TeamCheck", "Team Check", "Только противники; нейтральные — цели")
+stepper("ESP", "MaxDistance", "Дальность ESP / AIM", " st")
+toggle("ДВИЖЕНИЕ", "Speed", "Speedhack", "Изменяет скорость ходьбы")
+stepper("ДВИЖЕНИЕ", "WalkSpeed", "Скорость ходьбы", " st/s")
+toggle("ДВИЖЕНИЕ", "Spin", "Крутилка", "Постоянное вращение персонажа")
+stepper("ДВИЖЕНИЕ", "SpinRate", "Скорость вращения", " °/s")
+toggle("ДВИЖЕНИЕ", "Strafe", "Target Strafe", "Движение по кругу; ПКМ / L2 / AIM")
+stepper("ДВИЖЕНИЕ", "StrafeRadius", "Радиус круга", " st")
+toggle("ДВИЖЕНИЕ", "StrafeClockwise", "По часовой стрелке", "OFF — вращение в обратную сторону")
+
+local function selectTab(name)
+    activeTab = name
+    for _, item in ipairs(rows) do item.frame.Visible = item.tab == name end
+    for tabName, control in pairs(tabButtons) do
+        control.BackgroundColor3 = tabName == name and C.active or C.card
+    end
+    scroll.CanvasPosition = Vector2.zero
+end
+for name, control in pairs(tabButtons) do
+    local tabName = name
+    connect(control.Activated, function() selectTab(tabName) end)
+end
+selectTab(activeTab)
+refresh()
+
+local function viewport()
+    local camera = workspace.CurrentCamera
+    return camera and camera.ViewportSize or Vector2.new(1280, 720)
+end
+
+local function layout()
+    if stopDrag then stopDrag() end
+    local size = viewport()
+    local inset = GuiService:GetGuiInset()
+    local width = math.min(profile.mobile and 340 or 370, math.max(200, size.X - inset.X - 12))
+    local height = math.min(570, math.max(180, size.Y - inset.Y - (profile.mobile and 16 or 64)))
+    panel.Size = UDim2.fromOffset(width, height)
+    local x, y = Shared.ClampPanel(panel.Position.X.Offset, panel.Position.Y.Offset,
+        width, height, size.X, size.Y, inset.X, inset.Y)
+    panel.Position = UDim2.fromOffset(x, y)
+    open.Position = UDim2.fromOffset(inset.X + 14, inset.Y + 10)
+end
+
+local dragInput, dragStart, panelStart, pendingDrag = nil, nil, nil, nil
+local dragStateConnection
+local function applyDrag()
+    if not pendingDrag then return end
+    local size, inset = viewport(), GuiService:GetGuiInset()
+    local x, y = Shared.ClampPanel(pendingDrag.X, pendingDrag.Y,
+        panel.Size.X.Offset, panel.Size.Y.Offset, size.X, size.Y, inset.X, inset.Y)
+    panel.Position = UDim2.fromOffset(x, y)
+    pendingDrag = nil
+end
+stopDrag = function()
+    applyDrag()
+    dragInput, dragStart, panelStart = nil, nil, nil
+    RunService:UnbindFromRenderStep(rootName .. "Drag")
+    if dragStateConnection then dragStateConnection:Disconnect() dragStateConnection = nil end
+end
+connect(dragHandle.InputBegan, function(input)
+    -- Only the finger/button that started dragging can move this panel.
+    if dragInput or not panel.Visible then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    dragInput, dragStart, panelStart = input, input.Position, panel.Position
+    dragStateConnection = input:GetPropertyChangedSignal("UserInputState"):Connect(function()
+        if input.UserInputState == Enum.UserInputState.End
+            or input.UserInputState == Enum.UserInputState.Cancel then stopDrag() end
+    end)
+    RunService:BindToRenderStep(rootName .. "Drag", Enum.RenderPriority.Input.Value + 1, applyDrag)
+end)
+connect(UIS.InputChanged, function(input)
+    if dragInput and (input == dragInput or (dragInput.UserInputType == Enum.UserInputType.MouseButton1
+        and input.UserInputType == Enum.UserInputType.MouseMovement)) then
+        local delta = input.Position - dragStart
+        -- Coalesce high-frequency mouse/touch events into one position write per frame.
+        pendingDrag = Vector2.new(panelStart.X.Offset + delta.X, panelStart.Y.Offset + delta.Y)
+    end
+end)
+connect(UIS.InputEnded, function(input)
+    if input == dragInput then stopDrag() end
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then heldMouse = false end
+    if input.KeyCode == Enum.KeyCode.ButtonL2 then heldPad = false end
+end)
+connect(open.Activated, function() setMenu(not panel.Visible) end)
+connect(hide.Activated, function() setMenu(false) end)
+connect(aimButton.Activated, function()
+    if not ready or not (settings.Aim or settings.Strafe) then
+        setMenu(true)
+        selectTab("AIM")
+        status.Text = "Включи AIM Head или Target Strafe"
+        return
+    end
+    setMenu(false)
+    latchedAim = not latchedAim
+end)
+local function stopAll()
+    releaseAim()
+    hitboxes:Clear()
+    if ready then request:FireServer("Stop") end
+end
+connect(stop.Activated, stopAll)
+CAS:BindActionAtPriority(rootName .. "ToggleMenu", function(_, state)
+    if UIS:GetFocusedTextBox() or GuiService.MenuIsOpen then return Enum.ContextActionResult.Pass end
+    if state == Enum.UserInputState.Begin then setMenu(not panel.Visible) end
+    return Enum.ContextActionResult.Sink
+end, false, Enum.ContextActionPriority.High.Value + 10, Enum.KeyCode.RightShift)
+connect(UIS.InputBegan, function(input, processed)
+    if UIS:GetFocusedTextBox() then return end
+    if input.KeyCode == Enum.KeyCode.End then stopAll() return end
+    if processed then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then heldMouse = true end
+    if input.KeyCode == Enum.KeyCode.ButtonL2 then heldPad = true end
+end)
+connect(UIS.WindowFocusReleased, function() releaseAim() stopDrag() end)
+connect(player.CharacterRemoving, function() releaseAim() hitboxes:Clear() end)
+connect(player.CharacterAdded, function() releaseAim() targetTimer, espTimer = 1, 1 end)
+
+local function refreshDevice()
+    profile = Shared.DeviceProfile(UIS.TouchEnabled, UIS.KeyboardEnabled, UIS.PreferredInput.Name)
+    reduced = false
+    budget = Shared.PerformanceBudget(profile, reduced)
+    title.Text, open.Text = profile.label, profile.label
+    dragHint.Text = profile.mobile and "Двигай окно пальцем за эту полосу" or "Перетаскивай за шапку · Right Shift"
+    aimButton.Visible = profile.mobile and not panel.Visible
+    releaseAim()
+    table.clear(sightCache)
+    targetTimer, espTimer = 1, 1
+    refresh()
+    layout()
+end
+connect(UIS:GetPropertyChangedSignal("PreferredInput"), refreshDevice)
+connect(UIS:GetPropertyChangedSignal("KeyboardEnabled"), refreshDevice)
+connect(UIS:GetPropertyChangedSignal("TouchEnabled"), refreshDevice)
+refreshDevice()
+
+connect(update.OnClientEvent, function(snapshot)
+    if type(snapshot) ~= "table" then return end
+    for key in pairs(Shared.Schema) do
+        local value = Shared.Validate(key, snapshot[key])
+        if value ~= nil then settings[key] = value end
+    end
+    ready = true
+    if not settings.Aim and not settings.Strafe then releaseAim() end
+    target, orbitTarget = nil, nil
+    table.clear(sightCache)
+    if not settings.Hitbox then hitboxes:Clear() end
+    targetTimer, espTimer = 1, 1
+    refresh()
+    if updateBindings then updateBindings() end
+end)
+
+local visuals = make("Folder", {Name = rootName .. "Visuals"}, workspace)
+local function destroyRecord(other)
+    local record = records[other]
+    if not record then return end
+    if record.highlight then record.highlight:Destroy() end
+    if record.billboard then record.billboard:Destroy() end
+    if record.box then record.box:Destroy() end
+    records[other] = nil
+end
+local function syncRecordObjects(record, other)
+    local character, head = record.character, record.head
+    if settings.ESP and not record.highlight then
+        record.highlight = make("Highlight", {
+        Name = "Outline", Adornee = character,
+        DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        FillTransparency = 0.85, OutlineTransparency = 0.05,
+        Enabled = false,
+        }, visuals)
+    elseif not settings.ESP and record.highlight then
+        record.highlight:Destroy()
+        record.highlight = nil
+    end
+    if settings.ESP and settings.Names and not record.billboard then
+        local billboard = make("BillboardGui", {
+        Name = "Label", Adornee = head, AlwaysOnTop = true,
+        Size = UDim2.fromOffset(180, 46), StudsOffsetWorldSpace = Vector3.new(0, 2.3, 0),
+        MaxDistance = settings.MaxDistance, Enabled = false,
+        }, visuals)
+        local name = label(billboard, other.DisplayName, UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 25), 13)
+        name.TextXAlignment = Enum.TextXAlignment.Center
+        name.TextStrokeTransparency = 0.3
+        name.TextTruncate = Enum.TextTruncate.AtEnd
+        local distance = label(billboard, "", UDim2.fromOffset(0, 25), UDim2.new(1, 0, 0, 18), 10, C.text)
+        distance.TextXAlignment = Enum.TextXAlignment.Center
+        distance.TextStrokeTransparency = 0.3
+        record.billboard, record.name, record.distance = billboard, name, distance
+    elseif (not settings.ESP or not settings.Names) and record.billboard then
+        record.billboard:Destroy()
+        record.billboard, record.name, record.distance = nil, nil, nil
+    end
+    if settings.Hitbox and not record.box then
+        record.box = make("BoxHandleAdornment", {
+        Name = "HeadBounds", Adornee = head, AlwaysOnTop = true,
+        ZIndex = 2, Size = head.Size, Color3 = C.gold, Transparency = 0.8, Visible = false,
+        }, visuals)
+    elseif not settings.Hitbox and record.box then
+        record.box:Destroy()
+        record.box = nil
+    end
+end
+
+local playerList = Players:GetPlayers()
+connect(Players.PlayerAdded, function() playerList = Players:GetPlayers() end)
+connect(Players.PlayerRemoving, function(other)
+    local record = records[other]
+    local _, _, _, head = Shared.Alive(other)
+    if head then hitboxes:Restore(head) end
+    if record then hitboxes:Restore(record.head) end
+    sightCache[other] = nil
+    destroyRecord(other)
+    local nextList = {}
+    for _, candidate in ipairs(playerList) do if candidate ~= other then table.insert(nextList, candidate) end end
+    playerList = nextList
+    if target == other then target = nil end
+    if orbitTarget == other then orbitTarget = nil end
+end)
+
+local function updateESP()
+    table.clear(visualCandidates)
+    table.clear(wantedHeads)
+    local camera = workspace.CurrentCamera
+    local _, _, localRoot = Shared.Alive(player)
+    if localRoot and camera and (settings.ESP or settings.Hitbox) then
+        for _, other in ipairs(playerList) do
+            if Shared.IsTarget(player, other, settings) then
+                local character, _, root, head = Shared.Alive(other)
+                if character then
+                    local distance = (root.Position - localRoot.Position).Magnitude
+                    if distance <= settings.MaxDistance then
+                        if settings.Hitbox and settings.HeadScale > 1 then
+                            wantedHeads[head] = true
+                            hitboxes:Apply(head, settings.HeadScale)
+                        end
+                        local _, onScreen = camera:WorldToViewportPoint(head.Position)
+                        local count = #visualCandidates
+                        if onScreen and (count < budget.espLimit or distance < visualCandidates[count].distance) then
+                            local at = count + 1
+                            while at > 1 and visualCandidates[at - 1].distance > distance do at = at - 1 end
+                            table.insert(visualCandidates, at, {player = other, character = character, head = head, distance = distance})
+                            if #visualCandidates > budget.espLimit then table.remove(visualCandidates) end
                         end
                     end
                 end
-                set(entry.gui, "Visible", visible and (showDot or settings.Tracers or showLabel))
-                set(entry.label, "Visible", showLabel)
-                if visible then
-                    set(entry.dot, "Visible", showDot)
-                    if showDot then set(entry.dot, "Position", UDim2.fromOffset(point.X, point.Y)) end
-                    set(entry.line, "Visible", settings.Tracers)
-                    if settings.Tracers then
-                        local target = Vector2.new(point.X, point.Y)
-                        local delta, midpoint = target - lineStart, (target + lineStart) * 0.5
-                        set(entry.line, "Position", UDim2.fromOffset(midpoint.X, midpoint.Y))
-                        set(entry.line, "Size", UDim2.fromOffset(delta.Magnitude, 1))
-                        set(entry.line, "Rotation", math.deg(math.atan2(delta.Y, delta.X)))
-                    end
-                end
             end
         end
     end
-    cleanup = function(recovering)
-        if stopped then return end
-        stopped = true
-        if not recovering then
-            unloaded = true
-            if playerGui:GetAttribute(OWNER_ATTRIBUTE) == runToken then
-                playerGui:SetAttribute(OWNER_ATTRIBUTE, nil)
-            end
+    hitboxes:Retain(wantedHeads)
+    local keep = {}
+    -- Only nearby on-screen targets allocate Highlight/Billboard objects.
+    for _, item in ipairs(visualCandidates) do
+        local other, head = item.player, item.head
+        keep[other] = true
+        local record = records[other]
+        if record and (record.character ~= item.character or record.head ~= head) then
+            destroyRecord(other)
+            record = nil
         end
-        RunService:UnbindFromRenderStep(RENDER_NAME)
-        for _, connection in ipairs(connections) do connection:Disconnect() end
-        drag = nil
-        active, tracked, highlightPool = {}, {}, {}
-        highlightFolder:Destroy()
-        overlayGui:Destroy()
-        menuGui:Destroy()
+        if not record then
+            record = {character = item.character, head = head}
+            records[other] = record
+        end
+        syncRecordObjects(record, other)
+        local color = Shared.SameTeam(player, other) and C.friend or C.enemy
+        if record.highlight then
+            setProperty(record.highlight, "FillColor", color)
+            setProperty(record.highlight, "OutlineColor", color)
+            setProperty(record.highlight, "Enabled", true)
+        end
+        if record.billboard then
+            setProperty(record.billboard, "Enabled", true)
+            setProperty(record.billboard, "MaxDistance", settings.MaxDistance)
+            setProperty(record.billboard, "StudsOffsetWorldSpace", Vector3.new(0, head.Size.Y / 2 + 1.5, 0))
+            setProperty(record.name, "TextColor3", color)
+            setProperty(record.name, "TextSize", math.floor(math.clamp(16 - item.distance / 160, 10, 16)))
+            setProperty(record.distance, "Text", string.format("%d studs", math.floor(item.distance + 0.5)))
+        end
+        if record.box then
+            setProperty(record.box, "Size", head.Size)
+            setProperty(record.box, "Visible", settings.Hitbox and settings.HeadScale > 1)
+        end
     end
-    local function recoverInterface()
-        if stopped then return end
-        local saved = {
-            panelPosition = panel.Position, buttonPosition = openButton.Position,
-            menuOpen = panel.Visible, scrollPosition = scroll.CanvasPosition,
-        }
-        cleanup(true)
-        task.defer(function()
-            if not unloaded and playerGui.Parent
-                and playerGui:GetAttribute(OWNER_ATTRIBUTE) == runToken then
-                startSession(saved)
-            end
-        end)
-    end
-    local function keepGuiAvailable(container)
-        connect(container:GetPropertyChangedSignal("Enabled"), function()
-            if not stopped and not container.Enabled then
-                container.Enabled = true
-                dirty = true
-            end
-        end)
-        connect(container.Destroying, recoverInterface)
-        connect(container.AncestryChanged, function()
-            if not stopped and container.Parent ~= playerGui then
-                local restored = pcall(function() container.Parent = playerGui end)
-                if not restored then recoverInterface() end
-            end
-        end)
-        set(container, "Enabled", true)
-    end
-    keepGuiAvailable(menuGui)
-    keepGuiAvailable(overlayGui)
-    -- These roots are always visible; the panel itself still obeys minimize.
-    for _, object in ipairs({ menuRoot, openButton }) do
-        connect(object:GetPropertyChangedSignal("Visible"), function()
-            if not stopped then set(object, "Visible", true) end
-        end)
-    end
-    connect(shutdown.Event, function() cleanup() end)
-    -- Do not tie the overlay to a temporary vehicle/loader script's lifetime.
-    local playerScripts = localPlayer:FindFirstChild("PlayerScripts")
-    if typeof(script) == "Instance" and playerScripts and script:IsDescendantOf(playerScripts) then
-        connect(script.Destroying, function() cleanup() end)
-    end
-    if savedUI then
-        panel.Position, openButton.Position = savedUI.panelPosition, savedUI.buttonPosition
-        if savedUI.scrollPosition then scroll.CanvasPosition = savedUI.scrollPosition end
-        setMenuOpen(savedUI.menuOpen)
-        fitPanel()
-    end
-    -- Read a vehicle camera after the normal camera/character render callbacks.
-    RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Last.Value + 1, render)
+    for other in pairs(records) do if not keep[other] then destroyRecord(other) end end
 end
 
-startSession()
+local viewParams = RaycastParams.new()
+viewParams.FilterType = Enum.RaycastFilterType.Exclude
+viewParams.IgnoreWater = true
+local movementParams = RaycastParams.new()
+movementParams.FilterType = Enum.RaycastFilterType.Exclude
+movementParams.IgnoreWater = true
+movementParams.RespectCanCollide = true
+
+local function hasSight(other, camera, character, head)
+    if not settings.WallCheck then return true end
+    local now = os.clock()
+    local cached = sightCache[other]
+    if cached and cached.character == character and now - cached.at < budget.aimInterval then
+        return cached.visible
+    end
+    viewParams.FilterDescendantsInstances = player.Character and {player.Character} or {}
+    local hit = workspace:Raycast(camera.CFrame.Position, head.Position - camera.CFrame.Position, viewParams)
+    local visible = not hit or hit.Instance:IsDescendantOf(character)
+    sightCache[other] = {character = character, at = now, visible = visible}
+    return visible
+end
+
+local function validTarget(other, camera, localRoot, requireFOV)
+    if not other or other.Parent ~= Players or not Shared.IsTarget(player, other, settings) then return nil end
+    local character, humanoid, root, head = Shared.Alive(other)
+    if not character or character:FindFirstChildOfClass("ForceField") then return nil end
+    if (root.Position - localRoot.Position).Magnitude > settings.MaxDistance then return nil end
+    local screen, onScreen = camera:WorldToViewportPoint(head.Position)
+    local distance = (Vector2.new(screen.X, screen.Y) - camera.ViewportSize / 2).Magnitude
+    if requireFOV and (not onScreen or screen.Z <= 0 or distance > settings.AimFOV) then return nil end
+    return head, root, distance, humanoid
+end
+
+local aimScanCursor = 1
+local function chooseTarget(camera, localRoot)
+    -- Keep the current target while it remains eligible, avoiding jumps between heads.
+    local currentHead = target and validTarget(target, camera, localRoot, true)
+    if currentHead and hasSight(target, camera, target.Character, currentHead) then return target end
+    table.clear(aimCandidates)
+    for _, other in ipairs(playerList) do
+        if other ~= player then
+            local head, _, distance = validTarget(other, camera, localRoot, true)
+            if head then table.insert(aimCandidates, {player = other, head = head, distance = distance}) end
+        end
+    end
+    table.sort(aimCandidates, function(a, b) return a.distance < b.distance end)
+    local count = #aimCandidates
+    if count == 0 then aimScanCursor = 1 return nil end
+    -- Rotate through candidates so occluded near targets don't permanently starve others.
+    aimScanCursor = math.min(aimScanCursor, count)
+    local checks = math.min(count, budget.aimChecks)
+    for offset = 0, checks - 1 do
+        local index = ((aimScanCursor + offset - 1) % count) + 1
+        local candidate = aimCandidates[index]
+        if hasSight(candidate.player, camera, candidate.player.Character, candidate.head) then
+            aimScanCursor = 1
+            return candidate.player
+        end
+    end
+    aimScanCursor = ((aimScanCursor + checks - 1) % count) + 1
+    return nil
+end
+
+local function engaged()
+    return ready and not panel.Visible and not UIS:GetFocusedTextBox()
+        and not GuiService.MenuIsOpen
+        and (heldMouse or heldPad or latchedAim) and (settings.Aim or settings.Strafe)
+end
+
+local cameraConnection
+local function bindCamera()
+    if cameraConnection then cameraConnection:Disconnect() end
+    local camera = workspace.CurrentCamera
+    if camera then cameraConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(layout) end
+    layout()
+    target, orbitTarget = nil, nil
+    table.clear(sightCache)
+end
+connect(workspace:GetPropertyChangedSignal("CurrentCamera"), bindCamera)
+bindCamera()
+
+local function aimStep(dt)
+    if dead then return end
+    local camera = workspace.CurrentCamera
+    local _, humanoid, root = Shared.Alive(player)
+    local using = camera and root and not humanoid.Sit and not humanoid.PlatformStand
+        and camera.CameraType ~= Enum.CameraType.Scriptable and engaged()
+    if using then
+        targetTimer = targetTimer + dt
+        if targetTimer >= budget.aimInterval then
+            targetTimer = 0
+            target = chooseTarget(camera, root)
+            if settings.Strafe and not orbitTarget then orbitTarget = target end
+        end
+        local head = target and validTarget(target, camera, root, true)
+        if head and settings.Aim then
+            local delta = head.Position - camera.CFrame.Position
+            if delta.Magnitude > 0.01 then
+                local goal = CFrame.lookAt(camera.CFrame.Position, head.Position)
+                camera.CFrame = camera.CFrame:Lerp(goal, 1 - math.exp(-settings.AimSmooth * math.min(dt, 0.1)))
+            end
+        end
+    else
+        target, orbitTarget = nil, nil
+        targetTimer = 1
+    end
+    setProperty(fovCircle, "Visible", ready and settings.Aim and not panel.Visible and root ~= nil)
+    setProperty(crosshair, "Visible", fovCircle.Visible)
+    setProperty(fovStroke, "Color", target and C.friend or C.active)
+    setProperty(aimButton, "Text", using and "AIM\nACTIVE" or "AIM\nREADY")
+    setProperty(aimButton, "BackgroundColor3", using and C.active or C.card)
+end
+
+local nextProbe, probeAllowed, probeTarget = 0, false, nil
+local function stopStrafe()
+    if lastStrafeHumanoid and lastStrafeHumanoid.Parent then
+        lastStrafeHumanoid:Move(Vector3.zero, false)
+    end
+    lastStrafeHumanoid = nil
+    nextProbe, probeAllowed, probeTarget = 0, false, nil
+end
+
+local function movementStep(dt)
+    if dead then return end
+    if not settings.Spin and (not settings.Strafe or not engaged()) then
+        stopStrafe()
+        return
+    end
+    local character, humanoid, root = Shared.Alive(player)
+    local camera = workspace.CurrentCamera
+    if not root or not camera or humanoid.Sit or humanoid.PlatformStand or root.Anchored then
+        stopStrafe()
+        return
+    end
+    if settings.Spin and ready then
+        root.CFrame = root.CFrame * CFrame.Angles(0, math.rad(settings.SpinRate) * math.min(dt, 0.1), 0)
+    end
+    if not settings.Strafe or not engaged() or camera.CameraType == Enum.CameraType.Scriptable then
+        stopStrafe()
+        orbitTarget = nil
+        return
+    end
+    local _, otherRoot = validTarget(orbitTarget, camera, root, false)
+    if not otherRoot then
+        orbitTarget = target
+        _, otherRoot = validTarget(orbitTarget, camera, root, false)
+    end
+    if not otherRoot or (otherRoot.Position - root.Position).Magnitude > 120 then
+        stopStrafe()
+        return
+    end
+    local offset = root.Position - otherRoot.Position
+    local flat = Vector3.new(offset.X, 0, offset.Z)
+    local distance = flat.Magnitude
+    if distance < 0.05 then flat, distance = Vector3.new(1, 0, 0), 1 end
+    local radial = flat / distance
+    local tangent = Vector3.new(-radial.Z, 0, radial.X) * (settings.StrafeClockwise and 1 or -1)
+    local correction = math.clamp((settings.StrafeRadius - distance) / 3, -2, 2)
+    local direction = (tangent + radial * correction).Unit
+    local now = os.clock()
+    if now >= nextProbe or probeTarget ~= orbitTarget then
+        nextProbe, probeTarget = now + budget.probeInterval, orbitTarget
+        movementParams.FilterDescendantsInstances = {character}
+        -- Probe ahead of the distance covered before the next scheduled check.
+        local lookAhead = math.clamp(humanoid.WalkSpeed * (budget.probeInterval + 0.1), 2.5, 24)
+        local obstacle = workspace:Raycast(root.Position, direction * lookAhead, movementParams)
+        local ground = workspace:Raycast(root.Position + direction * lookAhead, Vector3.new(0, -9, 0), movementParams)
+        local _, _, _, otherHead = Shared.Alive(orbitTarget)
+        probeAllowed = not obstacle and ground ~= nil and otherHead ~= nil
+            and hasSight(orbitTarget, camera, orbitTarget.Character, otherHead)
+    end
+    if not probeAllowed then direction = Vector3.zero end
+    humanoid:Move(direction, false)
+    lastStrafeHumanoid = humanoid
+end
+
+local aimBound, movementBound = false, false
+updateBindings = function()
+    local wantAim = ready and (settings.Aim or settings.Strafe)
+    local wantMovement = ready and (settings.Spin or settings.Strafe)
+    if wantAim and not aimBound then
+        RunService:BindToRenderStep(rootName .. "Aim", Enum.RenderPriority.Camera.Value + 1, aimStep)
+    elseif not wantAim and aimBound then
+        RunService:UnbindFromRenderStep(rootName .. "Aim")
+    end
+    if wantMovement and not movementBound then
+        RunService:BindToRenderStep(rootName .. "Movement", Enum.RenderPriority.Character.Value + 1, movementStep)
+    elseif not wantMovement and movementBound then
+        RunService:UnbindFromRenderStep(rootName .. "Movement")
+        stopStrafe()
+    end
+    aimBound, movementBound = wantAim, wantMovement
+    if not wantAim then
+        fovCircle.Visible, crosshair.Visible = false, false
+        aimButton.Text, aimButton.BackgroundColor3 = "AIM\nOFF", C.card
+    end
+end
+
+local fpsFrames, fpsTime = 0, 0
+
+connect(RunService.Heartbeat, function(dt)
+    if dead then return end
+    if profile.mobile and (settings.ESP or settings.Hitbox or settings.Aim or settings.Strafe) then
+        fpsFrames, fpsTime = fpsFrames + 1, fpsTime + dt
+        if fpsTime >= 1.5 then
+            local fps = fpsFrames / fpsTime
+            local nextReduced = reduced
+            if fps < 28 then nextReduced = true elseif fps > 40 then nextReduced = false end
+            if nextReduced ~= reduced then
+                reduced = nextReduced
+                budget = Shared.PerformanceBudget(profile, reduced)
+            end
+            fpsFrames, fpsTime = 0, 0
+        end
+    else
+        fpsFrames, fpsTime = 0, 0
+    end
+    espTimer = espTimer + dt
+    if espTimer < budget.espInterval then return end
+    espTimer = 0
+    if settings.ESP or settings.Hitbox or next(records) ~= nil then updateESP() end
+    if ready then
+        if panel.Visible then
+            setProperty(status, "Text", profile.mobile and ("AIM — захват цели · v" .. Shared.Version)
+                or ("Right Shift — меню · End — стоп · v" .. Shared.Version))
+        elseif orbitTarget and settings.Strafe then
+            setProperty(status, "Text", "Strafe: " .. orbitTarget.DisplayName)
+        else
+            setProperty(status, "Text", target and ("Цель: " .. target.DisplayName) or "ПКМ / L2 / AIM — захват цели")
+        end
+    end
+end)
+
+local function cleanup()
+    if dead then return end
+    dead = true
+    RunService:UnbindFromRenderStep(rootName .. "Aim")
+    RunService:UnbindFromRenderStep(rootName .. "Movement")
+    CAS:UnbindAction(rootName .. "ToggleMenu")
+    stopDrag()
+    stopStrafe()
+    hitboxes:Clear()
+    for _, connection in ipairs(connections) do connection:Disconnect() end
+    if cameraConnection then cameraConnection:Disconnect() end
+    visuals:Destroy()
+    -- Also restores server effects when the UI is manually removed during a Studio test.
+    if ready and runtime.Parent then request:FireServer("Stop") end
+end
+gui.Destroying:Connect(cleanup)
+script.Destroying:Connect(cleanup)
+
+-- Retry handshake if a slow client joined while replication was still settling.
+task.spawn(function()
+    while not ready and not dead and runtime.Parent do
+        request:FireServer("Sync")
+        task.wait(1)
+    end
+end)
+]====]
+
+local LOCALHITBOXES_SOURCE = [====[
+-- Required only by the LocalScript in PlayerGui. No server code uses this module.
+-- These are LOCAL visual/geometry changes, not a server-side damage extension.
+local LocalHitboxes = {}
+
+function LocalHitboxes.new()
+    local originals = {}
+    local self = {}
+    local changedKeys = {"Size", "CanCollide", "CanQuery", "Massless"}
+
+    function self:Apply(head, scale)
+        if not head.Parent or scale <= 1 then
+            self:Restore(head)
+            return
+        end
+        local old = originals[head]
+        if not old then
+            old = {base = {}, applied = {}}
+            for _, key in ipairs(changedKeys) do old.base[key] = head[key] end
+            originals[head] = old
+        else
+            -- If the game's server changed a property, use its new value as the baseline.
+            local unchanged = old.scale == scale
+            for _, key in ipairs(changedKeys) do
+                if head[key] ~= old.applied[key] then
+                    old.base[key] = head[key]
+                    unchanged = false
+                end
+            end
+            if unchanged then return end
+        end
+        local nextValues = {
+            Size = old.base.Size * scale, CanCollide = false, CanQuery = true, Massless = true,
+        }
+        for _, key in ipairs(changedKeys) do
+            if head[key] ~= nextValues[key] then head[key] = nextValues[key] end
+            old.applied[key] = nextValues[key]
+        end
+        old.scale = scale
+    end
+
+    function self:Restore(head)
+        local old = originals[head]
+        if not old then return end
+        if head.Parent then
+            for _, key in ipairs(changedKeys) do
+                -- Do not overwrite a newer value sent by another game system.
+                if head[key] == old.applied[key] then head[key] = old.base[key] end
+            end
+        end
+        originals[head] = nil
+    end
+
+    function self:Retain(wanted)
+        for head in pairs(originals) do
+            if not wanted[head] then self:Restore(head) end
+        end
+    end
+
+    function self:Clear()
+        for head in pairs(originals) do self:Restore(head) end
+    end
+
+    return self
+end
+
+return LocalHitboxes
+]====]
+
+local serverScript = Instance.new("Script")
+serverScript.Name = NAME
+serverScript.Source = SERVER_SOURCE
+serverScript:SetAttribute("ModMenuVersion", "1.1.0")
+local function child(className, name, source, parent)
+    local object = Instance.new(className)
+    object.Name = name
+    object.Source = source
+    object.Parent = parent or serverScript
+    return object
+end
+local configSource = CONFIG_SOURCE
+if previous then
+    local oldConfig = previous:FindFirstChild("Config")
+    if oldConfig and oldConfig:IsA("ModuleScript") then configSource = oldConfig.Source end
+end
+child("ModuleScript", "Config", configSource)
+child("ModuleScript", "Shared", SHARED_SOURCE)
+local client = child("LocalScript", "Client", CLIENT_SOURCE)
+child("ModuleScript", "LocalHitboxes", LOCALHITBOXES_SOURCE, client)
+if previous then previous:Destroy() end
+serverScript.Parent = ServerScriptService
+print("MOD MENU v1.1.0 установлен! Right Shift — меню, ПКМ — AIM, End — выключить всё.")
+print("Доступ: ServerScriptService > OwnGameModMenuServer > Config > AdminUserIds.")
