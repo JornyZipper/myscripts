@@ -1,0 +1,1478 @@
+-- Player + Drone ESP v3.10. Dronefront discovery adapted from the supplied ff.lua.
+-- Replace the entire previous LocalScript in StarterPlayerScripts.
+-- Drag the title or ESP button. Minus minimizes; X / "Удалить ESP" unloads.
+-- Mobile starts in Lite mode: 20 Hz, 24 markers, 6 outlines, 6 labels.
+-- AUTO mode: current PlaceId/name + runtime signatures choose TLF or generic team detection.
+-- Distant/unloaded server characters cannot be recovered by a LocalScript.
+-- ScreenGui priority affects 2D markers, not Roblox's system UI or 3D Highlight.
+-- Drone discovery: Workspace.SpawnedDrones + the model name patterns from ff.lua.
+-- Drone colors identify bot/player control and available team data; damage/armed flags are status text.
+-- Unknown drones remain visible when filtering allies. Camera proximity is NOT ownership.
+-- Uses Roblox GUI/Highlight; no Drawing API or downloaded UI library is required.
+-- Yellow BOT requires replicated AI metadata; missing ownership remains unknown/gray.
+-- X / the floating X button locks horizontal yaw while vertical aim stays free.
+-- When the view is inside a drone, X also stabilizes that viewed drone yaw client-side.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local MarketplaceService = game:GetService("MarketplaceService")
+
+local PLACE_ID = game.PlaceId
+local UNIVERSE_ID = game.GameId
+local PlaceName = "Place " .. tostring(PLACE_ID)
+do
+    local ok, info = pcall(MarketplaceService.GetProductInfo, MarketplaceService, PLACE_ID, Enum.InfoType.Asset)
+    if ok and type(info) == "table" and type(info.Name) == "string" and info.Name ~= "" then
+        PlaceName = info.Name
+    end
+end
+
+local function lower(value)
+    return string.lower(tostring(value or ""))
+end
+
+-- Display names from the user's Dronefront list. The actual Instance.Name is unchanged.
+local DRONE_DISPLAY_NAMES = {
+    ["drone1"] = "Шахед 136(Белый)",
+    ["drone2"] = "Ланцет",
+    ["drone3"] = "Молния 1",
+    ["drone4"] = "Блискавка",
+    ["drone5"] = "Привет-82",
+    ["drone6"] = "гербер белый",
+    ["drone8"] = "Дартсы",
+    ["drone9"] = "Италмас",
+    ["drone10"] = "Серая вдова 1М",
+    ["drone11"] = "AQ 400 Серп",
+    ["drone13"] = "Шахед-238",
+    ["drone14"] = "Лутий (Белый)",
+    ["drone15"] = "Шахед 136(Черный)",
+    ["drone16"] = "Морок [чёрный]",
+    ["drone17"] = "Шахед-107",
+    ["drone18"] = "BM-35",
+    ["drone19"] = "Геран-3",
+    ["drone20"] = "Геран-5",
+    ["drone21"] = "Геран-2(R-60 Missile)",
+    ["drone22"] = "Молния-2",
+    ["drone23"] = "Пародия",
+    ["drone24"] = "Молния 1 фосфор",
+    ["drone25"] = "FP-1",
+    ["drone26"] = "I-51",
+    ["drone27"] = "UJ-26 Бобр",
+    ["drone28"] = "Куб",
+    ["drone29"] = "Дельта",
+    ["drone30"] = "Геран-2",
+    ["drone32"] = "Молния птм",
+    ["drone33"] = "Черника-1",
+    ["drone35"] = "UJ-32 Lastivka",
+    ["drone36"] = "Чаклун(Белый)",
+    ["drone37"] = "Чаклун(Черный)",
+    ["drone38"] = "Рубака",
+    ["drone39"] = "ZTK-150(Серый)",
+    ["drone40"] = "ZTK-150(Черный)",
+    ["drone41"] = "гербер черный",
+    ["drone42"] = "Лутий (Черный)",
+    ["drone43"] = "дартс двойной мотоор",
+    ["drone44"] = "UAS-CET",
+    ["drone46"] = "Гарпия-A1",
+    ["drone47"] = "Привет-120",
+    ["drone48"] = "FP-1 (ракеты)",
+    ["drone49"] = "B-2",
+    ["drone50"] = "Бегемот",
+    ["drone51"] = "Разрушитель",
+    ["drone52"] = "BM-70",
+    ["drone53"] = "Жук",
+    ["drone54"] = "гербер(Модификация 1)",
+    ["drone55"] = "гербер(Модификация 2)",
+    ["drone56"] = "гербер(Модификация 3)",
+    ["drone57"] = "Дарт-250",
+    ["drone58"] = "R-15",
+    ["drone59"] = "Майя(Белый)",
+    ["drone60"] = "Майя(Черный)",
+}
+local function droneDisplayName(model)
+    return DRONE_DISPLAY_NAMES[lower(model.Name)] or model.Name
+end
+
+local initialProfile = lower(PlaceName):find("lost front", 1, true) and "THE_LOST_FRONT" or "GENERIC"
+
+local localPlayer = Players.LocalPlayer
+assert(localPlayer, "This script must run on the client")
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+local mobile = UserInputService.TouchEnabled
+local settings = {
+    Enabled = true, Outlines = true, Tracers = true, FarDots = true,
+    Labels = not mobile, ThroughWalls = true, LiteMode = mobile,
+    SmartTeams = true, EnemiesOnly = false,
+    PlayersEnabled = true, DronesEnabled = true, DroneLabels = true,
+    DroneTeamCheck = false, ShowOwnDrone = false, HideDeadDrones = false,
+    FarDistance = 150, Color = Color3.fromRGB(255, 213, 90),
+}
+local GUI_NAME = "PlayerESPMenu"
+local ESP_DISPLAY_ORDER = 2147483646
+local MENU_DISPLAY_ORDER = 2147483647
+local LEGACY_RENDER = "PlayerESP_Render_" .. localPlayer.UserId
+local HIGHLIGHT_NAME = "PlayerESPHighlights_" .. localPlayer.UserId
+local OWNER_ATTRIBUTE = "PlayerESPControllerToken"
+local runToken = tostring(os.clock()) .. ":" .. tostring({})
+local unloaded, sessionNumber = false, 0
+local xLock = { model = nil, camera = nil, pending = false, yaw = nil, controlModel = nil, controlRoot = nil, controlYawOffset = nil }
+playerGui:SetAttribute(OWNER_ATTRIBUTE, runToken)
+
+-- Rebuild only our interface if a vehicle script removes the player's HUD.
+-- The owner token prevents an old/deferred restart replacing a newer launch.
+local function startSession(savedUI)
+    if unloaded or playerGui:GetAttribute(OWNER_ATTRIBUTE) ~= runToken then return end
+    sessionNumber = sessionNumber + 1
+    local RENDER_NAME = LEGACY_RENDER .. "_v310controls_" .. runToken .. "_" .. sessionNumber
+    local LOCK_RENDER_NAME = RENDER_NAME .. "_XLock"
+    local oldMenu = playerGui:FindFirstChild(GUI_NAME)
+    if oldMenu then
+        local stop = oldMenu:FindFirstChild("Shutdown")
+        if stop and stop:IsA("BindableEvent") then stop:Fire() end
+        oldMenu:Destroy()
+    end
+    RunService:UnbindFromRenderStep(LEGACY_RENDER)
+    local oldOverlay = playerGui:FindFirstChild("PlayerESPOverlay")
+    if oldOverlay then oldOverlay:Destroy() end
+    local oldHighlights = Workspace:FindFirstChild(HIGHLIGHT_NAME)
+    if oldHighlights then oldHighlights:Destroy() end
+
+    local stopped, dirty = false, true
+    local connections, tracked, active, highlightPool = {}, {}, {}, {}
+    local entrySerial, nextDroneScan = 0, 0
+    local droneExclusionsDirty = true
+    local targetsReady = false
+    local cleanup, toggleXLock, releaseXLock
+    local function connect(signal, callback)
+        local connection = signal:Connect(callback)
+        table.insert(connections, connection)
+        return connection
+    end
+    local function make(className, properties, parent)
+        local object = Instance.new(className)
+        for key, value in pairs(properties) do object[key] = value end
+        object.Parent = parent
+        return object
+    end
+    local function set(object, property, value)
+        if object[property] ~= value then object[property] = value end
+    end
+    local function round(object, radius)
+        make("UICorner", { CornerRadius = UDim.new(0, radius) }, object)
+    end
+    local menuGui = make("ScreenGui", {
+        Name = GUI_NAME, ResetOnSpawn = false, DisplayOrder = MENU_DISPLAY_ORDER,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets,
+        SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
+    }, playerGui)
+    local overlayGui = make("ScreenGui", {
+        Name = "PlayerESPOverlay", ResetOnSpawn = false, DisplayOrder = ESP_DISPLAY_ORDER,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        SafeAreaCompatibility = Enum.SafeAreaCompatibility.None,
+    }, playerGui)
+    -- WorldToViewportPoint uses the DEVICE safe area, not the full phone display.
+    -- Set this explicitly, AFTER construction; don't mix it with ScreenInsets.None.
+    -- Disable fullscreen extension so full-size marker frames aren't stretched.
+    overlayGui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets
+    local highlightFolder = make("Folder", { Name = HIGHLIGHT_NAME }, Workspace)
+    local shutdown = make("BindableEvent", { Name = "Shutdown" }, menuGui)
+    local menuRoot = make("Frame", {
+        Name = "MenuRoot", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+    }, menuGui)
+    local textColor = Color3.fromRGB(235, 240, 248)
+    local mutedColor = Color3.fromRGB(157, 169, 189)
+    local rowColor = Color3.fromRGB(32, 39, 52)
+    local function label(parent, text, position, size, fontSize)
+        return make("TextLabel", {
+            BackgroundTransparency = 1, Position = position, Size = size,
+            Text = text, TextColor3 = textColor, Font = Enum.Font.Gotham,
+            TextSize = fontSize or 13, TextXAlignment = Enum.TextXAlignment.Left,
+        }, parent)
+    end
+    local function button(parent, text, position, size)
+        local result = make("TextButton", {
+            BackgroundColor3 = rowColor, BorderSizePixel = 0,
+            Position = position, Size = size, Text = text, TextColor3 = textColor,
+            Font = Enum.Font.GothamMedium, TextSize = 13, AutoButtonColor = true,
+        }, parent)
+        round(result, 8)
+        return result
+    end
+    local openButton = button(menuRoot, "ESP", UDim2.fromOffset(12, 12), UDim2.fromOffset(76, 38))
+    openButton.Name = "OpenMenu"
+    local lockButton = button(menuRoot, "X: захват", UDim2.fromOffset(96, 12), UDim2.fromOffset(110, 38))
+    lockButton.Name = "XLockButton"
+    local lockReticle = make("Frame", {
+        Name = "XLockReticle", AnchorPoint = Vector2.new(0.5, 0.5),
+        Size = UDim2.fromOffset(28, 28), BackgroundTransparency = 1,
+        Visible = false, ZIndex = 8,
+    }, overlayGui)
+    round(lockReticle, 14)
+    make("UIStroke", { Color = Color3.fromRGB(85, 180, 255), Thickness = 2 }, lockReticle)
+    local panel = make("Frame", {
+        Name = "Panel", Position = UDim2.fromOffset(12, 58),
+        Size = UDim2.fromOffset(300, 540), BackgroundColor3 = Color3.fromRGB(19, 24, 34),
+        BorderSizePixel = 0, Active = true, Visible = not mobile,
+    }, menuRoot)
+    round(panel, 12)
+    make("UIStroke", { Color = Color3.fromRGB(55, 67, 88), Thickness = 1 }, panel)
+    local panelScale = make("UIScale", { Scale = 1 }, panel)
+    local dragHandle = button(panel, "DRONE ESP  ·  v3.10", UDim2.fromOffset(12, 4), UDim2.fromOffset(192, 38))
+    dragHandle.Name = "DragHandle"
+    dragHandle.BackgroundTransparency = 1
+    dragHandle.TextXAlignment = Enum.TextXAlignment.Left
+    dragHandle.Font = Enum.Font.GothamBold
+    dragHandle.Modal = not mobile
+    local minimize = button(panel, "—", UDim2.fromOffset(212, 6), UDim2.fromOffset(36, 36))
+    minimize.Name = "MinimizeMenu"
+    local closeButton = button(panel, "×", UDim2.fromOffset(254, 6), UDim2.fromOffset(36, 36))
+    closeButton.Name = "UnloadMenu"
+    closeButton.TextColor3 = Color3.fromRGB(255, 135, 145)
+    local subtitle = label(panel, "Тяни за заголовок · — свернуть · × удалить", UDim2.fromOffset(12, 43), UDim2.fromOffset(278, 16), 10)
+    subtitle.TextColor3 = mutedColor
+    local scroll = make("ScrollingFrame", {
+        Name = "SettingsScroll", Position = UDim2.fromOffset(8, 64),
+        Size = UDim2.new(1, -16, 1, -134), BackgroundTransparency = 1,
+        BorderSizePixel = 0, CanvasSize = UDim2.fromOffset(0, 1014),
+        ScrollBarThickness = 3, ScrollBarImageColor3 = mutedColor,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ClipsDescendants = true, Active = true,
+    }, panel)
+    local status = label(panel, "", UDim2.new(0, 12, 1, -65), UDim2.fromOffset(278, 18), 10)
+    status.TextColor3 = mutedColor
+    local deleteButton = button(panel, "Удалить ESP", UDim2.new(0, 12, 1, -43), UDim2.new(1, -24, 0, 34))
+    deleteButton.Name = "DeleteESP"
+    deleteButton.TextColor3 = Color3.fromRGB(255, 145, 155)
+    local function setMenuOpen(isOpen)
+        panel.Visible = isOpen
+        dragHandle.Modal = isOpen and not mobile
+    end
+    connect(minimize.Activated, function() setMenuOpen(false) end)
+    connect(closeButton.Activated, function() cleanup() end)
+    connect(deleteButton.Activated, function() cleanup() end)
+
+    -- One shared drag listener: a second finger on the joystick cannot hijack it.
+    local drag, suppressUntil = nil, {}
+    local function clampPosition(target, x, y)
+        local available, size = menuRoot.AbsoluteSize, target.AbsoluteSize
+        return Vector2.new(
+            math.clamp(x, 0, math.max(0, available.X - size.X)),
+            math.clamp(y, 0, math.max(0, available.Y - size.Y))
+        )
+    end
+    local function place(target, position)
+        target.Position = UDim2.fromOffset(position.X, position.Y)
+    end
+    local function draggable(handle, target)
+        connect(handle.InputBegan, function(input)
+            local kind = input.UserInputType
+            if drag or (kind ~= Enum.UserInputType.Touch and kind ~= Enum.UserInputType.MouseButton1) then return end
+            drag = {
+                input = input, touch = kind == Enum.UserInputType.Touch,
+                handle = handle, target = target, moved = false,
+                start = Vector2.new(input.Position.X, input.Position.Y),
+                origin = Vector2.new(target.Position.X.Offset, target.Position.Y.Offset),
+            }
+        end)
+    end
+    draggable(dragHandle, panel)
+    draggable(openButton, openButton)
+    draggable(lockButton, lockButton)
+    connect(UserInputService.InputChanged, function(input)
+        if not drag then return end
+        if drag.touch and input ~= drag.input then return end
+        if not drag.touch and input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+        local delta = Vector2.new(input.Position.X, input.Position.Y) - drag.start
+        if delta.Magnitude > 5 then drag.moved = true end
+        if drag.moved then
+            suppressUntil[drag.handle] = os.clock() + 0.25
+            local p = drag.origin + delta
+            place(drag.target, clampPosition(drag.target, p.X, p.Y))
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if not drag then return end
+        if (drag.touch and input == drag.input)
+            or (not drag.touch and input.UserInputType == Enum.UserInputType.MouseButton1) then
+            if drag.moved then suppressUntil[drag.handle] = os.clock() + 0.25 end
+            drag = nil
+        end
+    end)
+    connect(openButton.Activated, function()
+        if os.clock() >= (suppressUntil[openButton] or 0) then setMenuOpen(not panel.Visible) end
+    end)
+    connect(lockButton.Activated, function()
+        if os.clock() >= (suppressUntil[lockButton] or 0) and toggleXLock then toggleXLock() end
+    end)
+    connect(UserInputService.InputBegan, function(input, processed)
+        if processed or UserInputService:GetFocusedTextBox() then return end
+        if input.KeyCode == Enum.KeyCode.RightShift then setMenuOpen(not panel.Visible)
+        elseif input.KeyCode == Enum.KeyCode.X and toggleXLock then toggleXLock() end
+    end)
+    local function fitPanel()
+        local size = menuRoot.AbsoluteSize
+        if size.X <= 0 or size.Y <= 0 then return end
+        local scale = math.max(0.4, math.min(1, (size.X - 16) / 300))
+        panelScale.Scale = scale
+        -- Scroll the content on short screens instead of shrinking the touch targets.
+        panel.Size = UDim2.fromOffset(300, math.max(170, math.min(540, (size.Y - 16) / scale)))
+        place(panel, clampPosition(panel, panel.Position.X.Offset, panel.Position.Y.Offset))
+        place(openButton, clampPosition(openButton, openButton.Position.X.Offset, openButton.Position.Y.Offset))
+        place(lockButton, clampPosition(lockButton, lockButton.Position.X.Offset, lockButton.Position.Y.Offset))
+        dirty = true
+    end
+    connect(menuRoot:GetPropertyChangedSignal("AbsoluteSize"), fitPanel)
+    fitPanel()
+
+    local toggleButtons, colorStrokes = {}, {}
+    local ENEMY_COLOR = Color3.fromRGB(255, 84, 100)
+    local FRIENDLY_COLOR = Color3.fromRGB(70, 225, 145)
+    local OWN_DRONE_COLOR = Color3.fromRGB(85, 180, 255)
+    local BOT_COLOR = Color3.fromRGB(255, 213, 90)
+    local UNKNOWN_DRONE_COLOR = Color3.fromRGB(165, 174, 190)
+    local PLAYER_DRONE_COLOR = Color3.fromRGB(235, 240, 248)
+
+    local function relationColor(entry)
+        if entry and entry.kind == "drone" then
+            if entry.own or entry.viewed then return OWN_DRONE_COLOR end
+            if entry.controlKind == "bot" then return BOT_COLOR end
+            if entry.controlKind ~= "player" then return UNKNOWN_DRONE_COLOR end
+            if not settings.SmartTeams or entry.relation == "unknown" then return PLAYER_DRONE_COLOR end
+        end
+        if not settings.SmartTeams then return settings.Color end
+        if entry and entry.relation == "enemy" then return ENEMY_COLOR end
+        if entry and entry.relation == "friendly" then return FRIENDLY_COLOR end
+        return settings.Color -- unknown / fallback color stays user-selectable
+    end
+
+    local function refreshStyles()
+        for key, item in pairs(toggleButtons) do
+            set(item, "Text", settings[key] and "ВКЛ" or "ВЫКЛ")
+            set(item, "TextColor3", settings[key] and Color3.fromRGB(12, 24, 20) or mutedColor)
+            set(item, "BackgroundColor3", settings[key] and relationColor(nil) or Color3.fromRGB(46, 54, 69))
+        end
+        set(dragHandle, "TextColor3", relationColor(nil))
+        set(openButton, "TextColor3", settings.Enabled and relationColor(nil) or mutedColor)
+        for _, swatch in ipairs(colorStrokes) do
+            set(swatch.stroke, "Transparency", swatch.color == settings.Color and 0 or 1)
+        end
+        for _, entry in pairs(tracked) do
+            local color = relationColor(entry)
+            set(entry.line, "BackgroundColor3", color)
+            set(entry.dot, "BackgroundColor3", color)
+            set(entry.label, "TextColor3", color)
+            if entry.info then set(entry.info, "TextColor3", color) end
+            if entry.highlight then set(entry.highlight, "OutlineColor", color) end
+            entry.clear = nil
+            entry.nextRelation = 0
+            entry.nextLabel = 0
+        end
+        if releaseXLock and (not settings.Enabled or not settings.DronesEnabled) then releaseXLock() end
+        dirty = true
+    end
+    local function addToggle(key, text, index)
+        local row = button(scroll, "", UDim2.fromOffset(4, (index - 1) * 42), UDim2.fromOffset(270, 38))
+        row.Name = key .. "Toggle"
+        label(row, text, UDim2.fromOffset(10, 0), UDim2.fromOffset(194, 38), 12)
+        local badge = label(row, "", UDim2.fromOffset(204, 5), UDim2.fromOffset(58, 28), 11)
+        badge.BackgroundTransparency = 0
+        badge.TextXAlignment = Enum.TextXAlignment.Center
+        round(badge, 6)
+        toggleButtons[key] = badge
+        connect(row.Activated, function()
+            settings[key] = not settings[key]
+            refreshStyles()
+        end)
+    end
+    addToggle("Enabled", "Весь ESP", 1)
+    addToggle("PlayersEnabled", "ESP игроков", 2)
+    addToggle("DronesEnabled", "ESP дронов", 3)
+    addToggle("Outlines", "Обводка", 4)
+    addToggle("Tracers", "Лучи к игрокам", 5)
+    addToggle("FarDots", "Точки вдали", 6)
+    addToggle("Labels", "Подписи игроков", 7)
+    addToggle("DroneLabels", "Подписи дронов", 8)
+    addToggle("ThroughWalls", "Сквозь стены", 9)
+    addToggle("LiteMode", "Лёгкий режим", 10)
+    addToggle("SmartTeams", "Автоопределение команд", 11)
+    addToggle("EnemiesOnly", "Игроки: только враги", 12)
+    addToggle("DroneTeamCheck", "Дроны: скрыть союзные", 13)
+    addToggle("ShowOwnDrone", "Свой / дрон камеры", 14)
+    addToggle("HideDeadDrones", "Скрыть подбитые дроны", 15)
+    label(scroll, "Точки начиная с:", UDim2.fromOffset(8, 635), UDim2.fromOffset(250, 22), 12)
+    local distanceValue = label(scroll, "", UDim2.fromOffset(54, 664), UDim2.fromOffset(170, 36), 13)
+    distanceValue.TextXAlignment = Enum.TextXAlignment.Center
+    local minus = button(scroll, "−", UDim2.fromOffset(8, 664), UDim2.fromOffset(38, 36))
+    minus.Name = "DistanceMinus"
+    local plus = button(scroll, "+", UDim2.fromOffset(232, 664), UDim2.fromOffset(38, 36))
+    plus.Name = "DistancePlus"
+    local function changeDistance(delta)
+        settings.FarDistance = math.clamp(settings.FarDistance + delta, 25, 2000)
+        distanceValue.Text = tostring(settings.FarDistance) .. " studs"
+        dirty = true
+    end
+    connect(minus.Activated, function() changeDistance(-25) end)
+    connect(plus.Activated, function() changeDistance(25) end)
+    changeDistance(0)
+    label(scroll, "Цвет неизвестных / обычный", UDim2.fromOffset(8, 719), UDim2.fromOffset(258, 34), 12)
+    local colors = {
+        Color3.fromRGB(75, 240, 150), Color3.fromRGB(85, 180, 255),
+        Color3.fromRGB(255, 100, 120), Color3.fromRGB(255, 213, 90), Color3.fromRGB(245, 245, 255),
+    }
+    for index, color in ipairs(colors) do
+        local swatch = button(scroll, "", UDim2.fromOffset(8 + (index - 1) * 40, 752), UDim2.fromOffset(34, 34))
+        swatch.Name = "Color" .. index
+        swatch.BackgroundColor3 = color
+        local stroke = make("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Thickness = 2, Transparency = 1 }, swatch)
+        table.insert(colorStrokes, { color = color, stroke = stroke })
+        connect(swatch.Activated, function() settings.Color = color; refreshStyles() end)
+    end
+    local shortPlace = #PlaceName > 30 and (string.sub(PlaceName, 1, 27) .. "...") or PlaceName
+    local hint = label(scroll, "Плейс: " .. shortPlace .. "\nЖёлтый — БОТ · серый — нет данных\nИгрок: красный — враг, зелёный — свой\nСиний — свой дрон / дрон камеры\nЛучи показываются только к игрокам.\nLITE: всего 24 метки и 6 обводок.", UDim2.fromOffset(8, 792), UDim2.fromOffset(264, 108), 10)
+    hint.TextColor3 = mutedColor
+    hint.TextWrapped = true
+    local lockAction = button(scroll, "Захват X: выбрать дрон", UDim2.fromOffset(4, 906), UDim2.fromOffset(270, 38))
+    lockAction.Name = "XLockAction"
+    connect(lockAction.Activated, function() if toggleXLock then toggleXLock() end end)
+    local lockHint = label(scroll, "Наведи центр на дрон и нажми X.\nX удерживает горизонталь; Y — свободно.", UDim2.fromOffset(8, 950), UDim2.fromOffset(264, 54), 10)
+    lockHint.Name = "XLockHint"
+    lockHint.TextWrapped = true
+    lockHint.TextColor3 = mutedColor
+
+    local function hide(entry)
+        set(entry.gui, "Visible", false)
+    end
+    local function releaseHighlight(entry)
+        for _, slot in ipairs(highlightPool) do
+            if slot.entry == entry then
+                slot.entry = nil
+                set(slot.object, "Enabled", false)
+                slot.object.Adornee = nil
+            end
+        end
+        entry.highlight = nil
+    end
+    local function trackTarget(key, kind)
+        if tracked[key] then return tracked[key] end
+        entrySerial = entrySerial + 1
+        local group = make("Frame", {
+            Name = kind == "player" and ("Player_" .. key.UserId) or ("Drone_" .. entrySerial), Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1, Visible = false,
+        }, overlayGui)
+        local line = make("Frame", {
+            Name = "Tracer", AnchorPoint = Vector2.new(0.5, 0.5),
+            BackgroundColor3 = settings.Color, BackgroundTransparency = 0.4,
+            BorderSizePixel = 0, Visible = false, ZIndex = 1,
+        }, group)
+        local dot = make("Frame", {
+            Name = "FarDot", AnchorPoint = Vector2.new(0.5, 0.5),
+            Size = UDim2.fromOffset(mobile and 6 or 8, mobile and 6 or 8),
+            BackgroundColor3 = settings.Color, BorderSizePixel = 0, Visible = false, ZIndex = 3,
+        }, group)
+        round(dot, kind == "drone" and 2 or 8)
+        make("UIStroke", { Color = Color3.fromRGB(12, 17, 24), Thickness = 1 }, dot)
+        local isDrone = kind == "drone"
+        local tag = label(group, "", UDim2.fromOffset(0, 0), UDim2.fromOffset(isDrone and 280 or 154, isDrone and 24 or 30), isDrone and (mobile and 16 or 18) or (mobile and 10 or 11))
+        tag.Name = kind == "player" and "PlayerLabel" or "DroneLabel"
+        tag.TextStrokeTransparency = 0.55
+        tag.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+        tag.TextTruncate = Enum.TextTruncate.AtEnd
+        tag.Visible = false
+        tag.ZIndex = 4
+        local info
+        if isDrone then
+            tag.Font = Enum.Font.GothamBold
+            tag.TextXAlignment = Enum.TextXAlignment.Center
+            info = label(group, "", UDim2.fromOffset(0, 0), UDim2.fromOffset(280, 30), mobile and 10 or 11)
+            info.Name = "DroneInfo"
+            info.TextXAlignment = Enum.TextXAlignment.Center
+            info.TextStrokeTransparency = 0.45
+            info.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+            info.TextTruncate = Enum.TextTruncate.AtEnd
+            info.Visible, info.ZIndex = false, 4
+        end
+        local entry = {
+            kind = kind, sortId = entrySerial,
+            player = kind == "player" and key or nil,
+            model = kind == "drone" and key or nil,
+            gui = group, line = line, dot = dot, label = tag, info = info,
+            controlKind = "unknown", controlReason = "нет данных",
+            nextLabel = 0, nextRay = 0, nextRelation = 0,
+            relation = "unknown", relationReason = "нет данных",
+        }
+        tracked[key] = entry
+        dirty = true
+        return entry
+    end
+    local function trackPlayer(player)
+        if player == localPlayer or tracked[player] or player.Parent ~= Players then return end
+        trackTarget(player, "player")
+    end
+    local function removeTarget(key)
+        local entry = tracked[key]
+        if not entry then return end
+        if key == xLock.model and releaseXLock then releaseXLock("Дрон исчез — захват снят.") end
+        releaseHighlight(entry)
+        entry.removed = true
+        entry.gui:Destroy()
+        tracked[key] = nil
+        if entry.kind == "drone" then droneExclusionsDirty = true end
+        dirty = true
+    end
+    connect(Players.PlayerAdded, trackPlayer)
+    connect(Players.PlayerRemoving, removeTarget)
+    for _, player in ipairs(Players:GetPlayers()) do trackPlayer(player) end
+
+    -- AUTO PLACE team classifier. The current place is identified by PlaceId/name.
+    -- Runtime signatures have priority, so teleports/subplaces with unexpected names
+    -- can still be recognized as The Lost Front when its internal registry exists.
+    local TeamRegistry
+    local LastTeamRegistrySearch = 0
+    local TeamRegistryFound = false
+    local LocalTeam = "unknown"
+    local ActiveProfile = initialProfile
+    local ProfileReason = initialProfile == "THE_LOST_FRONT" and "place name" or "generic"
+
+    local function getTeamRegistry()
+        if TeamRegistry and type(TeamRegistry.players) == "table" then
+            ActiveProfile = "THE_LOST_FRONT"
+            ProfileReason = "TeamRegistry"
+            return TeamRegistry
+        end
+
+        if os.clock() - LastTeamRegistrySearch < 2 then
+            return nil
+        end
+
+        LastTeamRegistrySearch = os.clock()
+        if type(filtergc) ~= "function" then
+            return nil
+        end
+
+        local success, registry = pcall(filtergc, "table", {
+            Keys = { "isFriendly", "getclient", "getEnemyTeam", "getPlayer", "players" }
+        }, true)
+
+        if not success or type(registry) ~= "table" or type(registry.players) ~= "table" then
+            return nil
+        end
+
+        TeamRegistry = registry
+        TeamRegistryFound = true
+        ActiveProfile = "THE_LOST_FRONT"
+        ProfileReason = "TeamRegistry"
+        local clientData = registry.players[localPlayer]
+        LocalTeam = clientData and clientData.team or "unknown"
+        return registry
+    end
+
+    local GENERIC_KEYS = {
+        "Team", "TeamId", "team", "teamId",
+        "Faction", "FactionId", "faction", "factionId",
+        "Side", "SideId", "side", "sideId",
+        "Squad", "SquadId", "squad", "squadId",
+    }
+
+    local function comparableAttribute(object, key)
+        if not object then return nil end
+        local ok, value = pcall(object.GetAttribute, object, key)
+        if not ok then return nil end
+        local kind = typeof(value)
+        if kind == "string" or kind == "number" or kind == "boolean" then
+            return value
+        end
+        return nil
+    end
+
+    local function compareGenericAttributes(player, character)
+        local localCharacter = localPlayer.Character
+        for _, key in ipairs(GENERIC_KEYS) do
+            local own = comparableAttribute(localPlayer, key)
+            local other = comparableAttribute(player, key)
+            if own ~= nil and other ~= nil then
+                return own == other and "friendly" or "enemy", "Attr:" .. key
+            end
+
+            own = comparableAttribute(localCharacter, key)
+            other = comparableAttribute(character, key)
+            if own ~= nil and other ~= nil then
+                return own == other and "friendly" or "enemy", "CharAttr:" .. key
+            end
+        end
+        return nil
+    end
+
+    local function classifyPlayer(player, character)
+        if not player then
+            return "unknown", "нет игрока"
+        end
+
+        -- Runtime probe: if the TLF registry exists, this place/subplace is TLF.
+        local registry = getTeamRegistry()
+        if registry then
+            local clientData = registry.players[localPlayer]
+            local playerData = registry.players[player]
+            if clientData and playerData and clientData.team ~= nil and playerData.team ~= nil then
+                if clientData.team == playerData.team then
+                    return "friendly", "TLF:" .. tostring(playerData.team)
+                end
+                return "enemy", "TLF:" .. tostring(playerData.team)
+            end
+        end
+
+        if player == localPlayer then
+            return "friendly", "self"
+        end
+
+        -- Standard Roblox Teams work in many games and are safe in every profile.
+        if localPlayer.Team and player.Team then
+            if localPlayer.Team == player.Team then
+                return "friendly", "RobloxTeam:" .. player.Team.Name
+            end
+            return "enemy", "RobloxTeam:" .. player.Team.Name
+        end
+
+        -- Generic games often replicate faction/side/squad IDs as Attributes.
+        local relation, reason = compareGenericAttributes(player, character)
+        if relation then
+            return relation, reason
+        end
+
+        -- TLF-specific last fallback: characters from each side can be placed under
+        -- different Workspace containers. Do NOT use this heuristic in generic games.
+        if ActiveProfile == "THE_LOST_FRONT" then
+            local localCharacter = localPlayer.Character
+            if not localCharacter or not character then
+                return "unknown", "нет Character"
+            end
+
+            local localContainer = localCharacter.Parent
+            local targetContainer = character.Parent
+            if not localContainer or not targetContainer
+                or localContainer == Workspace or targetContainer == Workspace then
+                return "unknown", "нет team container"
+            end
+
+            if localContainer == targetContainer then
+                return "friendly", "TLF Container"
+            end
+            return "enemy", "TLF Container"
+        end
+
+        return "unknown", "AUTO: нет team-сигнала"
+    end
+
+    -- Only inspect the known container and top-level drone model names from ff.lua.
+    -- No Workspace:GetDescendants(), bounding-box traversal, or external requests per frame.
+    local DRONE_PATTERNS = { "^drone%d+$", "fpvdrone$", "^x%d+$" }
+    local function droneName(name)
+        name = lower(name)
+        for _, pattern in ipairs(DRONE_PATTERNS) do
+            if name:match(pattern) then return true end
+        end
+        return false
+    end
+    local function scanDrones()
+        local found = {}
+        local function accept(model, inContainer)
+            if not model:IsA("Model") then return end
+            if not droneName(model.Name) and not (inContainer and model:FindFirstChild("Body")) then return end
+            -- Exclude actual player avatars, while allowing an NPC drone with a Humanoid.
+            if model:FindFirstChildOfClass("Humanoid") then
+                for _, player in ipairs(Players:GetPlayers()) do
+                    if player.Character == model then return end
+                end
+            end
+            found[model] = true
+            trackTarget(model, "drone")
+        end
+        for _, child in ipairs(Workspace:GetChildren()) do
+            if child.Name == "SpawnedDrones" then
+                for _, model in ipairs(child:GetChildren()) do
+                    accept(model, true)
+                    -- Allow one faction-folder layer without scanning the whole map.
+                    if model:IsA("Folder") then
+                        for _, nested in ipairs(model:GetChildren()) do accept(nested, true) end
+                    end
+                end
+            else
+                accept(child, false)
+            end
+        end
+        local gone = {}
+        for key, entry in pairs(tracked) do
+            if entry.kind == "drone" and not found[key] then gone[#gone + 1] = key end
+        end
+        for _, key in ipairs(gone) do removeTarget(key) end
+    end
+    local function droneRoot(model)
+        local body = model:FindFirstChild("Body")
+        if body and body:IsA("BasePart") then return body end
+        local hitbox = body and body:FindFirstChild("Hitbox")
+        if hitbox and hitbox:IsA("BasePart") then return hitbox end
+        local primary = model.PrimaryPart
+        if primary and primary:IsA("BasePart") and primary:IsDescendantOf(model) then return primary end
+        return model:FindFirstChildWhichIsA("BasePart", true)
+    end
+    local function readField(object, key)
+        if not object then return nil end
+        local value = object:GetAttribute(key)
+        if value ~= nil then return value end
+        local child = object:FindFirstChild(key)
+        if child and child:IsA("ValueBase") then return child.Value end
+        return nil
+    end
+    local function droneField(model, key)
+        local value = readField(model, key)
+        if value ~= nil then return value end
+        return readField(model:FindFirstChild("Body"), key)
+    end
+    local OWNER_KEYS = { "Owner", "OwnerId", "OwnerUserId", "Player", "PlayerId", "UserId" }
+    local PILOT_KEYS = { "Pilot", "PilotId", "PilotUserId", "Controller", "ControllerId", "ControllerUserId", "Operator", "OperatorUserId", "ControlledBy" }
+    local CONTROLLED_DRONE_KEYS = { "ControlledDrone", "CurrentDrone", "ActiveDrone", "PilotedDrone", "PilotingDrone" }
+    local TEAM_FIELDS = {
+        { "Team", "team" }, { "TeamId", "teamId" },
+        { "Faction", "faction" }, { "FactionId", "factionId" },
+        { "Side", "side" }, { "SideId", "sideId" },
+    }
+    local function buildPlayerIndex()
+        local index = { ids = {}, names = {}, characters = {}, teams = {}, pilots = {} }
+        local function addPilot(reference, player)
+            if typeof(reference) ~= "Instance" then return end
+            local object = reference
+            while object and object ~= Workspace do
+                local entry = tracked[object]
+                if entry and entry.kind == "drone" then
+                    local previous = index.pilots[object]
+                    if previous ~= nil and previous ~= player then index.pilots[object] = false
+                    else index.pilots[object] = player end
+                    return
+                end
+                object = object.Parent
+            end
+        end
+        for _, player in ipairs(Players:GetPlayers()) do
+            index.ids[player.UserId], index.names[lower(player.Name)] = player, player
+            if player.Character then index.characters[player.Character] = player end
+            for _, key in ipairs(CONTROLLED_DRONE_KEYS) do
+                addPilot(readField(player, key), player)
+                addPilot(readField(player.Character, key), player)
+            end
+            local character = player.Character
+            if character then
+                addPilot(character, player)
+                local humanoid = character:FindFirstChildOfClass("Humanoid")
+                if humanoid then addPilot(humanoid.SeatPart, player) end
+            end
+            if player.Team then
+                local name = player.Team.Name
+                if index.teams[name] and index.teams[name] ~= player.Team then index.teams[name] = false
+                elseif index.teams[name] == nil then index.teams[name] = player.Team end
+            end
+        end
+        return index
+    end
+    local function resolveOwner(value, index)
+        if typeof(value) == "Instance" then
+            if value:IsA("Player") and value.Parent == Players then return value end
+            if value:IsA("Humanoid") then return index.characters[value.Parent] end
+            return index.characters[value]
+        elseif type(value) == "number" then
+            return index.ids[value]
+        elseif type(value) == "string" then
+            return index.ids[tonumber(value)] or index.names[lower(value)]
+        end
+        return nil
+    end
+    local function classifyControl(model, index, owner)
+        local pilot = index.pilots[model]
+        if pilot == false then return "unknown", nil, "несколько пилотов" end
+        for _, key in ipairs(PILOT_KEYS) do
+            for _, object in ipairs({ model, model:FindFirstChild("Body") }) do
+                local candidate = resolveOwner(readField(object, key), index)
+                if candidate then
+                    if pilot and candidate ~= pilot then return "unknown", nil, "пилоты не совпадают" end
+                    pilot = candidate
+                end
+            end
+        end
+        if pilot then return "player", pilot, "ссылка на пилота" end
+        local function flag(keys)
+            for _, key in ipairs(keys) do
+                local camel = lower(key:sub(1, 1)) .. key:sub(2)
+                if droneField(model, key) == true or droneField(model, camel) == true
+                    or droneField(model, lower(key)) == true then return true end
+            end
+            return false
+        end
+        local bot = flag({ "IsBot", "IsNPC", "IsAI", "AIControlled", "BotControlled", "NPCControlled" })
+        local human = flag({ "PlayerControlled", "IsPlayerControlled", "HumanControlled" })
+        for _, key in ipairs({ "ControlType", "ControllerType", "PilotType" }) do
+            local mode = lower(droneField(model, key))
+            if mode == "bot" or mode == "npc" or mode == "ai" then bot = true end
+            if mode == "player" or mode == "human" then human = true end
+        end
+        if bot and human then return "unknown", nil, "противоречивый тип управления" end
+        -- A player can own an autonomous drone: explicit AI metadata beats ownership.
+        if bot then return "bot", nil, "AI-флаг игры" end
+        if human then return "player", owner, "player-флаг игры" end
+        -- Owner-only data establishes player association, not proof of current manual input.
+        if owner then return "player", owner, "владелец-игрок" end
+        return "unknown", nil, "нет данных о пилоте"
+    end
+    local function meaningfulTeam(value)
+        if type(value) == "number" then return value > 0 end
+        if type(value) ~= "string" then return false end
+        local text = lower(value)
+        return text ~= "" and text ~= "none" and text ~= "neutral" and text ~= "unknown" and text ~= "0"
+    end
+    local function firstField(object, keys)
+        for _, key in ipairs(keys) do
+            local value = readField(object, key)
+            if value ~= nil then return value end
+        end
+        return nil
+    end
+    local function classifyDrone(model, index)
+        -- These fields are optional. The supplied ff.lua has no drone team detector.
+        -- Do not infer ownership from nearby avatars, camera distance, or model color.
+        local owner
+        for _, key in ipairs(OWNER_KEYS) do
+            for _, object in ipairs({ model, model:FindFirstChild("Body") }) do
+                local candidate = resolveOwner(readField(object, key), index)
+                if candidate then
+                    if owner and owner ~= candidate then return "unknown", "владельцы не совпадают", nil end
+                    owner = candidate
+                end
+            end
+        end
+        if owner == localPlayer then return "friendly", "ваш дрон", owner end
+        if owner then
+            local relation, reason = classifyPlayer(owner, owner.Character)
+            if relation ~= "unknown" then return relation, "Владелец: " .. reason, owner end
+        end
+        local ownTeam = localPlayer.Neutral ~= true and localPlayer.Team or nil
+        local body = model:FindFirstChild("Body")
+        for groupIndex, keys in ipairs(TEAM_FIELDS) do
+            local value = firstField(model, keys)
+            if value == nil then value = firstField(body, keys) end
+            if value ~= nil then
+                -- Only resolve a Team name against actual Team instances, not arbitrary words.
+                local team
+                if typeof(value) == "Instance" and value:IsA("Team") then team = value
+                elseif groupIndex == 1 and type(value) == "string" then team = index.teams[value] end
+                if ownTeam and team then
+                    return ownTeam == team and "friendly" or "enemy", "Команда дрона", owner
+                end
+                local own = firstField(localPlayer, keys)
+                if own == nil then own = firstField(localPlayer.Character, keys) end
+                if meaningfulTeam(own) and meaningfulTeam(value) and type(own) == type(value) then
+                    return own == value and "friendly" or "enemy", "Поле: " .. keys[1], owner
+                end
+            end
+        end
+        return "unknown", "нет владельца/команды", owner
+    end
+    local function updateDrone(entry, camera, index)
+        local model = entry.model
+        entry.character = model -- common adornee/visibility target for both kinds
+        if not entry.root or not entry.root:IsDescendantOf(model) then
+            entry.root = droneRoot(model)
+            entry.clear, entry.nextRay = nil, 0
+        end
+        local clock = os.clock()
+        if clock >= entry.nextRelation then
+            local oldRelation, oldOwner, oldControl, oldPilot = entry.relation, entry.owner, entry.controlKind, entry.pilot
+            entry.relation, entry.relationReason, entry.owner = classifyDrone(model, index)
+            entry.controlKind, entry.pilot, entry.controlReason = classifyControl(model, index, entry.owner)
+            if entry.pilot then
+                entry.relation, entry.relationReason = classifyPlayer(entry.pilot, entry.pilot.Character)
+            end
+            if oldRelation ~= entry.relation or oldOwner ~= entry.owner
+                or oldControl ~= entry.controlKind or oldPilot ~= entry.pilot then entry.nextLabel = 0 end
+            entry.nextRelation = clock + (settings.LiteMode and 0.75 or 0.4)
+        end
+        local oldOwn, oldViewed = entry.own, entry.viewed
+        entry.own = entry.pilot == localPlayer or entry.owner == localPlayer
+        local subject = camera.CameraSubject
+        entry.viewed = typeof(subject) == "Instance" and (subject == model or subject:IsDescendantOf(model))
+        if oldOwn ~= entry.own or oldViewed ~= entry.viewed then
+            entry.nextLabel = 0
+            droneExclusionsDirty = true
+        end
+        local hit = droneField(model, "IsHit") == true
+        local falling = droneField(model, "IsFalling") == true
+        entry.damaged = hit or falling
+        local state = falling and "ПАДАЕТ" or hit and "ПОДБИТ"
+            or droneField(model, "Armed") == true and "ЗАРЯЖЕН"
+            or droneField(model, "IsMoving") == true and "ДВИЖЕТСЯ" or ""
+        if entry.state ~= state then entry.state = state; entry.nextLabel = 0 end
+    end
+
+    local function updateRelation(entry, force)
+        if not settings.SmartTeams then
+            entry.relation, entry.relationReason = "unknown", "AUTO check выкл"
+            return
+        end
+        local clock = os.clock()
+        if not force and clock < (entry.nextRelation or 0) then return end
+        entry.relation, entry.relationReason = classifyPlayer(entry.player, entry.character)
+        entry.nextRelation = clock + (settings.LiteMode and 0.75 or 0.4)
+    end
+
+    refreshStyles()
+
+    local function syncHighlights(wanted, limit)
+        local wantedSet = {}
+        for _, entry in ipairs(wanted) do wantedSet[entry] = true end
+        for _, slot in ipairs(highlightPool) do
+            if slot.entry and not wantedSet[slot.entry] then releaseHighlight(slot.entry) end
+        end
+        while #highlightPool > limit do
+            local slot = table.remove(highlightPool)
+            if slot.entry then slot.entry.highlight = nil end
+            slot.object:Destroy()
+        end
+        for _, entry in ipairs(wanted) do
+            if not entry.highlight then
+                local free
+                for _, slot in ipairs(highlightPool) do
+                    if not slot.entry then free = slot; break end
+                end
+                if not free and #highlightPool < limit then
+                    free = { object = make("Highlight", {
+                        Name = "OutlineSlot" .. (#highlightPool + 1), Enabled = false,
+                        FillTransparency = 1, OutlineTransparency = 0,
+                    }, highlightFolder) }
+                    table.insert(highlightPool, free)
+                end
+                if free then
+                    free.entry = entry
+                    entry.highlight = free.object
+                    free.object.Adornee = entry.character
+                end
+            end
+            if entry.highlight then
+                set(entry.highlight, "OutlineColor", relationColor(entry))
+                set(entry.highlight, "DepthMode", settings.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded)
+                set(entry.highlight, "Enabled", true)
+            end
+        end
+    end
+    local function alive(entry)
+        if entry.kind == "drone" then
+            return not entry.removed and entry.model:IsDescendantOf(Workspace)
+                and entry.root and entry.root:IsDescendantOf(entry.model)
+        end
+        return not entry.removed and entry.player.Character == entry.character
+            and entry.root and entry.root:IsDescendantOf(Workspace)
+            and entry.humanoid and entry.humanoid.Parent and entry.humanoid.Health > 0
+    end
+    local function allowedTarget(entry)
+        if entry.kind == "drone" then
+            if not settings.DronesEnabled then return false end
+            if settings.HideDeadDrones and entry.damaged then return false end
+            if entry.own or entry.viewed then return settings.ShowOwnDrone end
+            -- Unknown is deliberately not filtered out: enemy ownership may not replicate.
+            return not (settings.SmartTeams and settings.DroneTeamCheck and entry.relation == "friendly")
+        end
+        return settings.PlayersEnabled
+            and (not (settings.SmartTeams and settings.EnemiesOnly) or entry.relation == "enemy")
+    end
+    local function nearer(a, b)
+        if xLock.model then
+            local aLocked, bLocked = a.model == xLock.model, b.model == xLock.model
+            if aLocked ~= bLocked then return aLocked end
+        end
+        if a.distance == b.distance then return a.sortId < b.sortId end
+        return a.distance < b.distance
+    end
+    local function chooseBudget(candidates, limit)
+        -- Reserve a third for drones and the rest for players; lend unused slots.
+        -- Both passes together still obey the existing total mobile GPU/UI budget.
+        local selected, result = {}, {}
+        local locked = 0
+        for _, entry in ipairs(candidates) do
+            if xLock.model and entry.model == xLock.model then
+                selected[entry], result[1], locked = true, entry, 1
+                break
+            end
+        end
+        local function take(kind, count)
+            for _, entry in ipairs(candidates) do
+                if #result >= limit or count <= 0 then break end
+                if not selected[entry] and (not kind or entry.kind == kind) then
+                    selected[entry] = true
+                    result[#result + 1] = entry
+                    count = count - 1
+                end
+            end
+        end
+        local reserve = math.max(1, math.floor(limit / 3))
+        take("drone", reserve - locked)
+        take("player", limit - reserve)
+        take(nil, limit)
+        table.sort(result, nearer)
+        return result, selected
+    end
+    local loadedCount, totalCount = 0, 0
+    local function refreshTargets(camera, origin)
+        local candidates, wanted = {}, {}
+        local playerIndex = settings.DronesEnabled and buildPlayerIndex() or nil
+        loadedCount, totalCount = 0, 0
+        for _, entry in pairs(tracked) do
+            totalCount = totalCount + 1
+            if entry.kind == "drone" then
+                if settings.DronesEnabled then updateDrone(entry, camera, playerIndex) end
+            else
+                local character = entry.player.Character
+                if entry.character ~= character then
+                    releaseHighlight(entry)
+                    entry.character = character
+                    entry.clear, entry.nextLabel, entry.nextRay, entry.nextRelation = nil, 0, 0, 0
+                    local old = character and character:FindFirstChild("ClientPlayerOutline")
+                    if old and old:IsA("Highlight") then old:Destroy() end
+                end
+                entry.root = character and character:FindFirstChild("HumanoidRootPart")
+                if entry.root and not entry.root:IsA("BasePart") then entry.root = nil end
+                entry.head = character and character:FindFirstChild("Head")
+                entry.humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                if alive(entry) then updateRelation(entry, entry.nextRelation == 0) end
+            end
+            if alive(entry) then
+                loadedCount = loadedCount + 1
+                local color = relationColor(entry)
+                set(entry.line, "BackgroundColor3", color)
+                set(entry.dot, "BackgroundColor3", color)
+                set(entry.label, "TextColor3", color)
+                if entry.info then set(entry.info, "TextColor3", color) end
+                entry.distance = (entry.root.Position - origin).Magnitude
+                local target = entry.head and entry.head:IsA("BasePart") and entry.head.Position or entry.root.Position
+                if settings.Enabled and allowedTarget(entry) then
+                    local point, onScreen = camera:WorldToViewportPoint(target)
+                    if onScreen and point.Z > 0 then table.insert(candidates, entry) end
+                end
+            end
+        end
+        table.sort(candidates, nearer)
+        local markerLimit = settings.LiteMode and 24 or 64
+        local outlineLimit = settings.LiteMode and 6 or 16
+        local selected
+        active, selected = chooseBudget(candidates, markerLimit)
+        -- Outlines have no distance cutoff. FarDistance controls only the dots.
+        if settings.Outlines then wanted = chooseBudget(active, outlineLimit) end
+        for _, entry in pairs(tracked) do if not selected[entry] then hide(entry) end end
+        syncHighlights(wanted, outlineLimit)
+        targetsReady = true
+        if panel.Visible then
+            local e, f, u, drones = 0, 0, 0, 0
+            for _, entry in pairs(tracked) do
+                if alive(entry) then
+                    if entry.kind == "drone" then drones = drones + 1 end
+                    if entry.relation == "enemy" then e = e + 1
+                    elseif entry.relation == "friendly" then f = f + 1
+                    else u = u + 1 end
+                end
+            end
+            set(status, "Text", (settings.LiteMode and "LITE" or "FULL") .. " · меток " .. #active .. " · дронов " .. drones .. " · E" .. e .. " F" .. f .. " ?" .. u)
+        end
+    end
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.IgnoreWater = true
+    local function showLockState(message)
+        local locked = xLock.model ~= nil
+        set(lockButton, "Text", locked and "X: снять" or "X: захват")
+        set(lockButton, "TextColor3", locked and OWN_DRONE_COLOR or textColor)
+        set(lockAction, "Text", locked and "Захват X: снять" or "Захват X: выбрать дрон")
+        if message then set(lockHint, "Text", message) end
+    end
+    releaseXLock = function(message)
+        local old = xLock.model and tracked[xLock.model]
+        if old then old.nextLabel = 0 end
+        xLock.model, xLock.camera, xLock.yaw, xLock.pending = nil, nil, nil, false
+        xLock.subject, xLock.cameraType, xLock.nextRay = nil, nil, 0
+        xLock.controlModel, xLock.controlRoot, xLock.controlYawOffset = nil, nil, nil
+        set(lockReticle, "Visible", false)
+        showLockState(message or "Наведи центр на дрон и нажми X.\nX удерживает горизонталь; Y — свободно.")
+        dirty = true
+    end
+    toggleXLock = function()
+        if xLock.model or xLock.pending then releaseXLock(); return end
+        if not settings.Enabled or not settings.DronesEnabled then
+            showLockState("Сначала включи ESP и ESP дронов.")
+            return
+        end
+        xLock.pending = true
+        showLockState("Выбираю дрон возле центра экрана…")
+        dirty = true
+    end
+    local function lockEligible(entry, excludedModel)
+        return entry and entry.kind == "drone" and alive(entry) and allowedTarget(entry)
+            and entry.model ~= excludedModel and not entry.damaged
+    end
+    local function wrapAngle(value)
+        return math.atan2(math.sin(value), math.cos(value))
+    end
+    local function cameraDrone(camera)
+        if not camera then return nil end
+        local subject = camera.CameraSubject
+        if typeof(subject) == "Instance" then
+            local object = subject
+            while object and object ~= Workspace do
+                local entry = tracked[object]
+                if entry and entry.kind == "drone" and alive(entry) then return entry end
+                object = object.Parent
+            end
+        end
+        -- Scriptable drone cameras often leave CameraSubject unchanged/nil.
+        -- Proximity is used ONLY to identify the current view, never for ownership/team logic.
+        local best, bestDistance = nil, 30
+        local position = camera.CFrame.Position
+        for _, entry in pairs(tracked) do
+            if entry.kind == "drone" and alive(entry) and entry.root then
+                local distance = (entry.root.Position - position).Magnitude
+                if distance < bestDistance then
+                    best, bestDistance = entry, distance
+                end
+            end
+        end
+        return best
+    end
+    local function clearToDrone(entry, camera)
+        local hit = Workspace:Raycast(camera.CFrame.Position, entry.root.Position - camera.CFrame.Position, rayParams)
+        return not hit or hit.Instance:IsDescendantOf(entry.model)
+    end
+    local function updateXLock(deltaTime)
+        if stopped or (not xLock.pending and not xLock.model) then return end
+        local camera = Workspace.CurrentCamera
+        if not settings.Enabled or not settings.DronesEnabled or not camera then releaseXLock(); return end
+        if not targetsReady then return end
+        if xLock.pending then
+            local viewed = cameraDrone(camera)
+            local center = camera.ViewportSize * 0.5
+            local radius = math.min(220, math.min(camera.ViewportSize.X, camera.ViewportSize.Y) * 0.25)
+            local best, score = nil, radius * radius
+            for _, entry in pairs(tracked) do
+                if lockEligible(entry, viewed and viewed.model or nil) then
+                    local point, visible = camera:WorldToViewportPoint(entry.root.Position)
+                    local dx, dy = point.X - center.X, point.Y - center.Y
+                    local distance = dx * dx + dy * dy
+                    if visible and point.Z > 0 and distance < score
+                        and (settings.ThroughWalls or clearToDrone(entry, camera)) then
+                        best, score = entry, distance
+                    end
+                end
+            end
+            xLock.pending = false
+            if not best then releaseXLock("Дрон не найден возле центра.\nНаведи центр на нужный дрон и нажми X."); return end
+            xLock.model, xLock.camera = best.model, camera
+            xLock.subject, xLock.cameraType = camera.CameraSubject, camera.CameraType
+            xLock.yaw, xLock.nextRay = nil, 0
+            xLock.controlModel = viewed and viewed.model or nil
+            xLock.controlRoot = viewed and viewed.root or nil
+            if xLock.controlRoot and xLock.controlRoot:IsA("BasePart") then
+                local _, cameraYaw = camera.CFrame:ToOrientation()
+                local _, rootYaw = xLock.controlRoot.CFrame:ToOrientation()
+                xLock.controlYawOffset = wrapAngle(rootYaw - cameraYaw)
+            else
+                xLock.controlYawOffset = nil
+            end
+            best.nextLabel = 0
+            local controlText = xLock.controlModel and " · yaw дрона зафиксирован" or ""
+            showLockState("X: " .. droneDisplayName(best.model) .. controlText .. "\nПовторное нажатие снимает захват.")
+            dirty = true
+        end
+        local entry = tracked[xLock.model]
+        if camera ~= xLock.camera or not lockEligible(entry, xLock.controlModel) then
+            releaseXLock("Захват снят: цель или камера изменились.")
+            return
+        end
+        -- Drone camera scripts may swap CameraSubject/CameraType while keeping the same view.
+        -- Follow those changes instead of treating them as an unlock condition.
+        xLock.subject, xLock.cameraType = camera.CameraSubject, camera.CameraType
+        local point, visible = camera:WorldToViewportPoint(entry.root.Position)
+        if not visible or point.Z <= 0 then releaseXLock("Дрон вышел из кадра — захват снят."); return end
+        local clock = os.clock()
+        if not settings.ThroughWalls and clock >= (xLock.nextRay or 0) then
+            if not clearToDrone(entry, camera) then releaseXLock("Дрон закрыт препятствием — захват снят."); return end
+            xLock.nextRay = clock + (settings.LiteMode and 0.25 or 0.15)
+        end
+        local frame = camera.CFrame
+        local pitch, currentYaw, roll = frame:ToOrientation()
+        local offset = entry.root.Position - frame.Position
+        if offset.X * offset.X + offset.Z * offset.Z < 0.0001 then
+            releaseXLock("Дрон строго сверху/снизу — захват X снят."); return
+        end
+        local wantedYaw = math.atan2(-offset.X, -offset.Z)
+        local previousYaw = xLock.yaw or currentYaw
+        -- Shortest angular path avoids a full spin when crossing -pi / +pi.
+        local difference = wrapAngle(wantedYaw - previousYaw)
+        local blend = 1 - math.exp(-18 * math.min(deltaTime, 0.1))
+        local nextYaw = previousYaw + difference * blend
+        xLock.yaw = wrapAngle(nextYaw)
+        -- Preserve LIVE pitch (free vertical input), position and roll. CameraType is untouched.
+        camera.CFrame = CFrame.new(frame.Position) * CFrame.fromOrientation(pitch, xLock.yaw, roll)
+
+        -- If this is a drone/cockpit view, keep the viewed drone on the same horizontal yaw.
+        -- This fights local A/D or mouse yaw while leaving pitch/vertical movement free.
+        local control = xLock.controlModel and tracked[xLock.controlModel]
+        if control and alive(control) then
+            local root = control.root
+            if root and root:IsA("BasePart") then
+                xLock.controlRoot = root
+                if xLock.controlYawOffset == nil then
+                    local _, rootYaw = root.CFrame:ToOrientation()
+                    xLock.controlYawOffset = wrapAngle(rootYaw - xLock.yaw)
+                end
+                local rootFrame = root.CFrame
+                local rootPitch, _, rootRoll = rootFrame:ToOrientation()
+                local desiredRootYaw = wrapAngle(xLock.yaw + xLock.controlYawOffset)
+                pcall(function()
+                    root.CFrame = CFrame.new(rootFrame.Position) * CFrame.fromOrientation(rootPitch, desiredRootYaw, rootRoll)
+                    local angular = root.AssemblyAngularVelocity
+                    root.AssemblyAngularVelocity = Vector3.new(angular.X, 0, angular.Z)
+                end)
+            end
+        end
+    end
+    showLockState()
+    local lastCamera, lastSubject, lastCameraType, lastScanPosition
+    local filterCamera, filterCharacter
+    local now, frameElapsed, nextScan = 0, 0, 0
+    local previousEnabled = true
+    local function hideAll()
+        for _, entry in pairs(tracked) do hide(entry) end
+        syncHighlights({}, settings.LiteMode and 6 or 16)
+        set(lockReticle, "Visible", false)
+    end
+    local function render(deltaTime)
+        if stopped then return end
+        now, frameElapsed = now + deltaTime, frameElapsed + deltaTime
+        if not settings.Enabled then
+            if previousEnabled or dirty then hideAll(); dirty = false end
+            previousEnabled = false
+            return
+        end
+        if not previousEnabled then dirty = true; previousEnabled = true end
+        local camera = Workspace.CurrentCamera
+        local subject = camera and camera.CameraSubject
+        local cameraType = camera and camera.CameraType
+        if camera ~= lastCamera or subject ~= lastSubject or cameraType ~= lastCameraType then
+            lastCamera = camera
+            lastSubject, lastCameraType = subject, cameraType
+            lastScanPosition = nil
+            dirty = true
+            for _, entry in pairs(tracked) do entry.clear = nil; entry.nextLabel = 0 end
+            if not camera then hideAll() end
+        end
+        if not camera then return end
+        local interval = settings.LiteMode and 1 / 20 or 1 / 30
+        if not dirty and frameElapsed + 0.000001 < interval then return end
+        frameElapsed = frameElapsed % interval
+        if settings.DronesEnabled and (dirty or now >= nextDroneScan) then
+            scanDrones()
+            nextDroneScan = now + (settings.LiteMode and 0.75 or 0.4)
+        end
+        local character = localPlayer.Character
+        -- A remotely controlled drone can be kilometres from the avatar.
+        -- Rank players, switch near/far visuals and show distances from the VIEW.
+        local origin = camera.CFrame.Position
+        if lastScanPosition and (origin - lastScanPosition).Magnitude > 80 then dirty = true end
+        if dirty or now >= nextScan then
+            refreshTargets(camera, origin)
+            lastScanPosition = origin
+            nextScan = now + (settings.LiteMode and 0.35 or 0.2)
+            dirty = false
+        end
+        if camera ~= filterCamera or character ~= filterCharacter or droneExclusionsDirty then
+            filterCamera, filterCharacter = camera, character
+            local exclude = { camera, highlightFolder }
+            if character then exclude[#exclude + 1] = character end
+            for _, entry in pairs(tracked) do
+                if entry.kind == "drone" and (entry.own or entry.viewed) and entry.model.Parent then
+                    exclude[#exclude + 1] = entry.model
+                end
+            end
+            rayParams.FilterDescendantsInstances = exclude
+            droneExclusionsDirty = false
+        end
+        local viewport = camera.ViewportSize
+        local locked = xLock.model and tracked[xLock.model]
+        if locked and alive(locked) then
+            local point, visible = camera:WorldToViewportPoint(locked.root.Position)
+            set(lockReticle, "Visible", visible and point.Z > 0)
+            if visible and point.Z > 0 then set(lockReticle, "Position", UDim2.fromOffset(point.X, point.Y)) end
+        else
+            set(lockReticle, "Visible", false)
+        end
+        local lineStart = Vector2.new(viewport.X * 0.5, viewport.Y - (mobile and 64 or 24))
+        local occupied, labelCount = {}, 0
+        local labelLimit = settings.LiteMode and 6 or 14
+        for _, entry in ipairs(active) do
+            if not alive(entry) or not allowedTarget(entry) then
+                if not entry.removed then hide(entry); releaseHighlight(entry) end
+                dirty = true
+            else
+                local targetPosition = entry.head and entry.head.Parent == entry.character and entry.head.Position or entry.root.Position
+                local point, onScreen = camera:WorldToViewportPoint(targetPosition)
+                local visible = onScreen and point.Z > 0
+                if visible and not settings.ThroughWalls then
+                    if now >= entry.nextRay or entry.clear == nil then
+                        local hit = Workspace:Raycast(camera.CFrame.Position, targetPosition - camera.CFrame.Position, rayParams)
+                        entry.clear = not hit or hit.Instance:IsDescendantOf(entry.character)
+                        entry.nextRay = now + (settings.LiteMode and 0.25 or 0.15)
+                    end
+                    visible = entry.clear == true
+                end
+                local distance = (entry.root.Position - origin).Magnitude
+                -- In Lite mode, dots also cover nearby players outside the outline budget.
+                local showDot = settings.FarDots and (distance >= settings.FarDistance or (settings.Outlines and not entry.highlight))
+                local showLabel = false
+                local labelsEnabled = entry.kind == "drone" and settings.DroneLabels
+                    or entry.kind == "player" and settings.Labels
+                if visible and labelsEnabled and labelCount < labelLimit
+                    and (entry.kind == "drone" or not settings.LiteMode or distance <= 750) then
+                    local isDrone = entry.kind == "drone"
+                    local width, height = math.min(isDrone and 280 or 154, viewport.X), isDrone and 56 or 30
+                    -- Drone title above the model, with smaller distance/control text below it.
+                    local x = math.clamp(isDrone and (point.X - width * 0.5) or (point.X + 12), 0, math.max(0, viewport.X - width))
+                    local y = math.clamp(isDrone and (point.Y - height - 12) or (point.Y + 12), 0, math.max(0, viewport.Y - height))
+                    local overlaps = false
+                    for _, box in ipairs(occupied) do
+                        if x < box.x + box.width + 4 and x + width + 4 > box.x
+                            and y < box.y + box.height + 4 and y + height + 4 > box.y then overlaps = true; break end
+                    end
+                    if not overlaps then
+                        occupied[#occupied + 1] = { x = x, y = y, width = width, height = height }
+                        labelCount = labelCount + 1
+                        showLabel = true
+                        set(entry.label, "Position", UDim2.fromOffset(x, y))
+                        set(entry.label, "Size", UDim2.fromOffset(width, isDrone and 24 or height))
+                        if entry.info then
+                            set(entry.info, "Position", UDim2.fromOffset(x, y + 26))
+                            set(entry.info, "Size", UDim2.fromOffset(width, 30))
+                        end
+                        if now >= entry.nextLabel then
+                            local relationText = "?"
+                            if entry.relation == "enemy" then relationText = "ВРАГ"
+                            elseif entry.relation == "friendly" then relationText = "СВОЙ" end
+                            if entry.kind == "drone" then
+                                local control = "НЕТ ДАННЫХ"
+                                if entry.controlKind == "bot" then control = "БОТ"
+                                elseif entry.controlKind == "player" then
+                                    control = entry.pilot and ("ИГРОК: @" .. entry.pilot.Name) or "ИГРОК"
+                                end
+                                local details = {}
+                                if entry.own then details[#details + 1] = "МОЙ"
+                                elseif entry.viewed then details[#details + 1] = "КАМЕРА"
+                                elseif settings.SmartTeams and entry.relation ~= "unknown" then details[#details + 1] = relationText end
+                                if entry.state ~= "" then details[#details + 1] = entry.state end
+                                if entry.model == xLock.model then details[#details + 1] = "ЗАХВАТ X" end
+                                set(entry.label, "Text", droneDisplayName(entry.model))
+                                set(entry.info, "Text", math.floor(distance + 0.5) .. " studs · " .. control .. "\n" .. table.concat(details, " · "))
+                            else
+                                set(entry.label, "Text", relationText .. " · " .. entry.player.DisplayName .. "\n" .. math.floor(distance + 0.5) .. " studs")
+                            end
+                            entry.nextLabel = now + (settings.LiteMode and 0.5 or 0.25)
+                        end
+                    end
+                end
+                local showTracer = entry.kind == "player" and settings.Tracers
+                set(entry.gui, "Visible", visible and (showDot or showTracer or showLabel))
+                set(entry.label, "Visible", showLabel)
+                if entry.info then set(entry.info, "Visible", showLabel) end
+                set(entry.line, "Visible", visible and showTracer)
+                if visible then
+                    set(entry.dot, "Visible", showDot)
+                    if showDot then set(entry.dot, "Position", UDim2.fromOffset(point.X, point.Y)) end
+                    if showTracer then
+                        local target = Vector2.new(point.X, point.Y)
+                        local delta, midpoint = target - lineStart, (target + lineStart) * 0.5
+                        set(entry.line, "Position", UDim2.fromOffset(midpoint.X, midpoint.Y))
+                        set(entry.line, "Size", UDim2.fromOffset(delta.Magnitude, 1))
+                        set(entry.line, "Rotation", math.deg(math.atan2(delta.Y, delta.X)))
+                    end
+                end
+            end
+        end
+    end
+    cleanup = function(recovering)
+        if stopped then return end
+        stopped = true
+        if not recovering then
+            releaseXLock()
+            unloaded = true
+            if playerGui:GetAttribute(OWNER_ATTRIBUTE) == runToken then
+                playerGui:SetAttribute(OWNER_ATTRIBUTE, nil)
+            end
+        end
+        RunService:UnbindFromRenderStep(RENDER_NAME)
+        RunService:UnbindFromRenderStep(LOCK_RENDER_NAME)
+        for _, connection in ipairs(connections) do connection:Disconnect() end
+        drag = nil
+        active, tracked, highlightPool = {}, {}, {}
+        highlightFolder:Destroy()
+        overlayGui:Destroy()
+        menuGui:Destroy()
+    end
+    local function recoverInterface()
+        if stopped then return end
+        local saved = {
+            panelPosition = panel.Position, buttonPosition = openButton.Position, lockPosition = lockButton.Position,
+            menuOpen = panel.Visible, scrollPosition = scroll.CanvasPosition,
+        }
+        cleanup(true)
+        task.defer(function()
+            if not unloaded and playerGui.Parent
+                and playerGui:GetAttribute(OWNER_ATTRIBUTE) == runToken then
+                startSession(saved)
+            end
+        end)
+    end
+    local function keepGuiAvailable(container)
+        connect(container:GetPropertyChangedSignal("Enabled"), function()
+            if not stopped and not container.Enabled then
+                container.Enabled = true
+                dirty = true
+            end
+        end)
+        connect(container.Destroying, recoverInterface)
+        connect(container.AncestryChanged, function()
+            if not stopped and container.Parent ~= playerGui then
+                local restored = pcall(function() container.Parent = playerGui end)
+                if not restored then recoverInterface() end
+            end
+        end)
+        set(container, "Enabled", true)
+    end
+    keepGuiAvailable(menuGui)
+    keepGuiAvailable(overlayGui)
+    -- These roots are always visible; the panel itself still obeys minimize.
+    for _, object in ipairs({ menuRoot, openButton, lockButton }) do
+        connect(object:GetPropertyChangedSignal("Visible"), function()
+            if not stopped then set(object, "Visible", true) end
+        end)
+    end
+    connect(shutdown.Event, function() cleanup() end)
+    -- Do not tie the overlay to a temporary vehicle/loader script's lifetime.
+    local playerScripts = localPlayer:FindFirstChild("PlayerScripts")
+    if typeof(script) == "Instance" and playerScripts and script:IsDescendantOf(playerScripts) then
+        connect(script.Destroying, function() cleanup() end)
+    end
+    if savedUI then
+        panel.Position, openButton.Position = savedUI.panelPosition, savedUI.buttonPosition
+        if savedUI.lockPosition then lockButton.Position = savedUI.lockPosition end
+        if savedUI.scrollPosition then scroll.CanvasPosition = savedUI.scrollPosition end
+        setMenuOpen(savedUI.menuOpen)
+        fitPanel()
+    end
+    -- Read a vehicle camera after the normal camera/character render callbacks.
+    RunService:BindToRenderStep(LOCK_RENDER_NAME, Enum.RenderPriority.Last.Value + 1, updateXLock)
+    RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Last.Value + 2, render)
+end
+
+startSession()
