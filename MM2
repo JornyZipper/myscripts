@@ -2,7 +2,7 @@
 --// Put this LocalScript in: StarterPlayer > StarterPlayerScripts
 --// Designed for your own Roblox Studio game.
 
-local VERSION = "V0.5.0"
+local VERSION = "V0.6.0"
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -19,6 +19,11 @@ local CONFIG = {
     DefaultWalkSpeed = 16,
     DefaultJumpPower = 50,
     DefaultFlySpeed = 60,
+    DefaultStrafeSpeed = 60,
+    MinStrafeSpeed = 16,
+    MaxStrafeSpeed = 250,
+    StrafeAcceleration = 150,
+    StrafeTurnRate = 10,
     MinWalkSpeed = 16,
     MaxWalkSpeed = 150,
     MinJumpPower = 50,
@@ -28,7 +33,17 @@ local CONFIG = {
     MinFOV = 70,
     MaxFOV = 120,
     DefaultFOV = 70,
-    UIKey = Enum.KeyCode.RightShift,
+    UIKey = Enum.KeyCode.F9,
+    AimLockKey = Enum.KeyCode.B,
+    RevolverPickupTimeout = 0.9,
+    FlingSpeed = 2400,
+    FlingSpinSpeed = 20000,
+    FlingSpinTorque = 1e9,
+    FlingMapSearchRadius = 120,
+    FlingMapMaxSpan = 2048,
+    FlingExitMargin = 20,
+    FlingRoofMargin = 12,
+    FlingExitConfirmTime = 0.15,
 }
 
 local state = {
@@ -47,6 +62,7 @@ local state = {
     innocentESP = false,
     espLines = false,
     espNames = true,
+    aimLock = false,
     minimized = false,
     uiVisible = true,
     unloaded = false,
@@ -56,6 +72,7 @@ local values = {
     walkSpeed = CONFIG.DefaultWalkSpeed,
     jumpPower = CONFIG.DefaultJumpPower,
     flySpeed = CONFIG.DefaultFlySpeed,
+    strafeSpeed = CONFIG.DefaultStrafeSpeed,
     fov = CONFIG.DefaultFOV,
 }
 
@@ -69,27 +86,41 @@ local flyObjects = {
     down = false,
     flyVelocity = nil,
     flyGyro = nil,
+    humanoid = nil,
 }
 local savedLighting = nil
-local savedGravity = Workspace.Gravity
-local savedFOV = CONFIG.DefaultFOV
-local savedWalkSpeed = CONFIG.DefaultWalkSpeed
-local savedJumpPower = CONFIG.DefaultJumpPower
+local savedGravity = nil
+local fovState = {active = false, saved = setmetatable({}, {__mode = "k"})}
+local movementSnapshots = setmetatable({}, {__mode = "k"})
+local windowFocused = true
+local spinState = {}
 
 local setWalkSpeedSlider
 local setJumpPowerSlider
 local setFlySpeedSlider
 local setFOVSlider
+local setStrafeSpeedSlider
 
 local enableFullBright
 local disableFullBright
 local restoreNoclip
 local applyNoclip
+local clearESP
 
 local roles = {}
 local Murder = ""
 local Sheriff = ""
 local Hero = ""
+local rolesAvailable = false
+local updateAimLock
+local findRevolver
+local flingBusy = false
+local flingTrip = nil
+local stopMurdererFling
+local roleAlive
+local shootMurdererBusy = false
+local finishMurdererShot
+local aimLockBindingName = "ScriptMM2AimLock_" .. tostring(LocalPlayer.UserId) .. "_" .. tostring(os.clock())
 
 local function addConnection(connection, bucket)
     bucket = bucket or connections
@@ -129,6 +160,13 @@ local function getRoot()
     return character:FindFirstChild("HumanoidRootPart")
 end
 
+local function stopRegularSpin()
+    if spinState.root and spinState.root.Parent and not flingBusy then
+        pcall(function() spinState.root.AssemblyAngularVelocity = spinState.velocity end)
+    end
+    spinState.root, spinState.velocity = nil, nil
+end
+
 local function isAliveCharacter(player)
     local character = player.Character
     if not character then
@@ -137,6 +175,65 @@ local function isAliveCharacter(player)
 
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     return humanoid ~= nil and humanoid.Health > 0
+end
+
+-- Save only properties a feature actually overrides, per character.
+local function applyMovementSettings(humanoid)
+    if not humanoid then return end
+    local saved = movementSnapshots[humanoid]
+    if state.speed or state.jump then
+        saved = saved or {}
+        movementSnapshots[humanoid] = saved
+    end
+    if state.speed then
+        if saved.walkSpeed == nil then saved.walkSpeed = humanoid.WalkSpeed end
+        humanoid.WalkSpeed = values.walkSpeed
+    elseif saved and saved.walkSpeed ~= nil then
+        humanoid.WalkSpeed = saved.walkSpeed
+        saved.walkSpeed = nil
+    end
+    if state.jump then
+        if saved.useJumpPower == nil then
+            saved.useJumpPower = humanoid.UseJumpPower
+            saved.jumpPower = humanoid.JumpPower
+            saved.jumpHeight = humanoid.JumpHeight
+        end
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = values.jumpPower
+    elseif saved and saved.useJumpPower ~= nil then
+        humanoid.JumpPower = saved.jumpPower
+        humanoid.JumpHeight = saved.jumpHeight
+        humanoid.UseJumpPower = saved.useJumpPower
+        saved.useJumpPower, saved.jumpPower, saved.jumpHeight = nil, nil, nil
+    end
+    if saved and next(saved) == nil then movementSnapshots[humanoid] = nil end
+end
+
+local function applyCameraFOV()
+    local camera = Workspace.CurrentCamera
+    if state.unloaded or not fovState.active or not camera then return end
+    if fovState.saved[camera] == nil then fovState.saved[camera] = camera.FieldOfView end
+    camera.FieldOfView = values.fov
+end
+
+local function restoreCameraFOV()
+    fovState.active = false
+    for camera, value in pairs(fovState.saved) do
+        pcall(function() camera.FieldOfView = value end)
+    end
+    table.clear(fovState.saved)
+end
+
+local function isPointerMove(input, source)
+    return source and ((source.UserInputType == Enum.UserInputType.Touch and input == source)
+        or (source.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseMovement))
+end
+
+local function isPointerEnd(input, source)
+    return source and ((source.UserInputType == Enum.UserInputType.Touch and input == source)
+        or (source.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseButton1))
 end
 
 local function setButtonVisual(button, enabled)
@@ -218,7 +315,7 @@ local Status = create("TextLabel", {
     Position = UDim2.fromOffset(17, 30),
     Size = UDim2.new(1, -120, 0, 16),
     Font = Enum.Font.Gotham,
-    Text = "RightShift = hide/show",
+    Text = "F9 = hide/show • B = AimLock",
     TextColor3 = Color3.fromRGB(145, 145, 155),
     TextSize = 11,
     TextXAlignment = Enum.TextXAlignment.Left,
@@ -454,13 +551,13 @@ local function addSlider(name, minValue, maxValue, defaultValue, order, callback
         CornerRadius = UDim.new(1, 0),
     }, fill)
 
-    local dragging = false
-    local function setValue(value)
+    local dragInput = nil
+    local function setValue(value, silent)
         value = math.clamp(math.floor(value + 0.5), minValue, maxValue)
         local alpha = (value - minValue) / (maxValue - minValue)
         fill.Size = UDim2.fromScale(alpha, 1)
         valueLabel.Text = tostring(value)
-        callback(value)
+        if not silent then callback(value) end
     end
 
     local function valueFromX(x)
@@ -475,22 +572,22 @@ local function addSlider(name, minValue, maxValue, defaultValue, order, callback
 
     addConnection(bar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
+            if dragInput then return end
+            dragInput = input
             setValue(valueFromX(input.Position.X))
         end
     end))
 
     addConnection(UIS.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        if isPointerMove(input, dragInput) then
             setValue(valueFromX(input.Position.X))
         end
     end))
 
     addConnection(UIS.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
+        if isPointerEnd(input, dragInput) then dragInput = nil end
     end))
+    addConnection(UIS.WindowFocusReleased:Connect(function() dragInput = nil end))
 
     return holder, setValue
 end
@@ -501,30 +598,14 @@ local speedButton
 local setSpeedToggle
 speedButton, setSpeedToggle = addToggle("Speed", 2, function(enabled)
     state.speed = enabled
-    local humanoid = getHumanoid()
-    if humanoid then
-        if enabled then
-            humanoid.WalkSpeed = values.walkSpeed
-        else
-            humanoid.WalkSpeed = CONFIG.DefaultWalkSpeed
-        end
-    end
+    applyMovementSettings(getHumanoid())
 end)
 
 local jumpButton
 local setJumpToggle
 jumpButton, setJumpToggle = addToggle("JumpPower", 3, function(enabled)
     state.jump = enabled
-    local humanoid = getHumanoid()
-    if humanoid then
-        if enabled then
-            humanoid.UseJumpPower = true
-            humanoid.JumpPower = values.jumpPower
-        else
-            humanoid.UseJumpPower = true
-            humanoid.JumpPower = CONFIG.DefaultJumpPower
-        end
-    end
+    applyMovementSettings(getHumanoid())
 end)
 
 local noclipButton
@@ -560,26 +641,19 @@ end)
 
 local strafeButton
 local setStrafeToggle
-strafeButton, setStrafeToggle = addToggle("Strafe", 8, function(enabled)
+strafeButton, setStrafeToggle = addToggle("Air Strafe", 8, function(enabled)
     state.strafe = enabled
 end)
 
 local _, setWalkSpeedSliderValue = addSlider("WalkSpeed", CONFIG.MinWalkSpeed, CONFIG.MaxWalkSpeed, values.walkSpeed, 9, function(value)
     values.walkSpeed = value
-    local humanoid = getHumanoid()
-    if humanoid and state.speed then
-        humanoid.WalkSpeed = value
-    end
+    applyMovementSettings(getHumanoid())
 end)
 setWalkSpeedSlider = setWalkSpeedSliderValue
 
 local _, setJumpPowerSliderValue = addSlider("JumpPower", CONFIG.MinJumpPower, CONFIG.MaxJumpPower, values.jumpPower, 10, function(value)
     values.jumpPower = value
-    local humanoid = getHumanoid()
-    if humanoid and state.jump then
-        humanoid.UseJumpPower = true
-        humanoid.JumpPower = value
-    end
+    applyMovementSettings(getHumanoid())
 end)
 setJumpPowerSlider = setJumpPowerSliderValue
 
@@ -587,6 +661,45 @@ local _, setFlySpeedSliderValue = addSlider("FlySpeed", CONFIG.MinFlySpeed, CONF
     values.flySpeed = value
 end)
 setFlySpeedSlider = setFlySpeedSliderValue
+
+local _, setStrafeSpeedSliderValue = addSlider("StrafeSpeed", CONFIG.MinStrafeSpeed, CONFIG.MaxStrafeSpeed, values.strafeSpeed, 12, function(value)
+    values.strafeSpeed = value
+end)
+setStrafeSpeedSlider = setStrafeSpeedSliderValue
+
+addSection("COMBAT", 13)
+
+local aimLockButton
+local setAimLockToggle
+aimLockButton, setAimLockToggle = addToggle("AimLock Murderer [B]", 14, function(enabled)
+    state.aimLock = enabled
+    RunService:UnbindFromRenderStep(aimLockBindingName)
+
+    if enabled and updateAimLock and not state.unloaded then
+        -- Wait for a fresh role snapshot instead of locking onto last round's murderer.
+        rolesAvailable = false
+        -- Run after Roblox's camera controls so they cannot overwrite the aim.
+        RunService:BindToRenderStep(aimLockBindingName, Enum.RenderPriority.Camera.Value + 1, updateAimLock)
+    end
+
+    if not state.unloaded then
+        Status.Text = enabled and "AimLock: ON • B = OFF" or "AimLock: OFF • B = ON"
+    end
+end)
+
+local flingMurdererButton = create("TextButton", {
+    Name = "FlingMurderer",
+    Size = UDim2.new(1, -4, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(95, 44, 48),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamSemibold,
+    Text = "Fling Murderer",
+    TextColor3 = Color3.fromRGB(255, 235, 235),
+    TextSize = 13,
+    AutoButtonColor = false,
+    LayoutOrder = 15,
+}, Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, flingMurdererButton)
 
 addSection("VISUALS", 20)
 
@@ -604,32 +717,42 @@ end)
 local gravityButton
 local setGravityToggle
 gravityButton, setGravityToggle = addToggle("Low Gravity", 22, function(enabled)
+    if enabled and not state.lowGravity then savedGravity = Workspace.Gravity end
+    if not enabled and state.lowGravity and savedGravity then
+        Workspace.Gravity = savedGravity
+        savedGravity = nil
+    end
     state.lowGravity = enabled
-    Workspace.Gravity = enabled and 60 or savedGravity
+    if enabled then Workspace.Gravity = 60 end
 end)
 
 local spinButton
 local setSpinToggle
 spinButton, setSpinToggle = addToggle("Spin", 23, function(enabled)
     state.spin = enabled
+    if not enabled then stopRegularSpin() end
 end)
 
 local espButton
 local setESPToggle
+local function setESPState(key, enabled)
+    state[key] = enabled
+    if not (state.esp or state.roleESP or state.innocentESP) and clearESP then clearESP() end
+end
 espButton, setESPToggle = addToggle("ESP Players", 24, function(enabled)
-    state.esp = enabled
+    setESPState("esp", enabled)
 end)
 
 local roleESPButton
 local setRoleESPToggle
 roleESPButton, setRoleESPToggle = addToggle("Role ESP", 25, function(enabled)
-    state.roleESP = enabled
+    setESPState("roleESP", enabled)
 end)
 
 local innocentESPButton
 local setInnocentESPToggle
 innocentESPButton, setInnocentESPToggle = addToggle("Innocent ESP", 26, function(enabled)
-    state.innocentESP = enabled
+    setESPState("innocentESP", enabled)
 end)
 
 local espLinesButton
@@ -652,110 +775,223 @@ end)
 
 local _, setFOVSliderValue = addSlider("FOV", CONFIG.MinFOV, CONFIG.MaxFOV, values.fov, 29, function(value)
     values.fov = value
-    local camera = Workspace.CurrentCamera
-    if camera then
-        camera.FieldOfView = value
-    end
+    fovState.active = true
+    applyCameraFOV()
 end)
 setFOVSlider = setFOVSliderValue
+addConnection(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(applyCameraFOV))
 
-local function findRevolverInWorkspace()
-    local preferred = {
-        "revolver",
-        "sheriff",
-        "pistol",
-        "gun",
+--// Drop detection must never select a gun carried by a player or an NPC.
+local function isInCharacter(object, characters)
+    local ancestor = object
+    while ancestor and ancestor ~= Workspace do
+        if characters[ancestor]
+            or (ancestor:IsA("Model") and ancestor:FindFirstChildOfClass("Humanoid")) then
+            return true
+        end
+        ancestor = ancestor.Parent
+    end
+    return false
+end
+
+local function getDropPart(object)
+    if object:IsA("BasePart") then
+        return object
+    end
+    if not (object:IsA("Tool") or object:IsA("Model") or object:IsA("Folder")) then
+        return nil
+    end
+
+    -- Prefer the actual pickup trigger over the gun's decorative mesh.
+    local touch = object:FindFirstChildWhichIsA("TouchTransmitter", true)
+    if touch and touch.Parent and touch.Parent:IsA("BasePart") then
+        return touch.Parent
+    end
+
+    local handle = object:FindFirstChild("Handle", true)
+    if handle and handle:IsA("BasePart") then
+        return handle
+    end
+    if object:IsA("Model") and object.PrimaryPart then
+        return object.PrimaryPart
+    end
+    return object:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function findRevolverInWorkspace(origin)
+    local dropNames = {
+        gundrop = true, droppedgun = true, dropgun = true, gunpickup = true,
+        revolverdrop = true, droppedrevolver = true, revolverpickup = true,
+        pistoldrop = true, droppedpistol = true,
     }
+    local weaponNames = {gun = true, revolver = true, pistol = true, sheriff = true}
+    local characters = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character then
+            characters[player.Character] = true
+        end
+    end
 
+    local bestPart, bestPriority, bestDistance = nil, -1, math.huge
     for _, object in ipairs(Workspace:GetDescendants()) do
-        if object:IsA("Tool") or object:IsA("BasePart") or object:IsA("Model") then
-            local name = string.lower(object.Name)
-            for _, keyword in ipairs(preferred) do
-                if string.find(name, keyword, 1, true) then
-                    if object:IsA("Tool") then
-                        local handle = object:FindFirstChild("Handle")
-                        if handle and handle:IsA("BasePart") then
-                            return handle
-                        end
-                    elseif object:IsA("Model") then
-                        local handle = object:FindFirstChild("Handle", true)
-                        if handle and handle:IsA("BasePart") then
-                            return handle
-                        end
-                        local primary = object.PrimaryPart
-                        if primary then
-                            return primary
-                        end
-                    elseif object:IsA("BasePart") then
-                        return object
-                    end
+        local name = string.lower(object.Name):gsub("[^%w]", "")
+        local isDrop = dropNames[name]
+        local isWeapon = weaponNames[name]
+        if (isDrop or isWeapon) and not isInCharacter(object, characters) then
+            local part = getDropPart(object)
+            local isTool = object:IsA("Tool")
+            local hasTouch = part and part:FindFirstChildOfClass("TouchTransmitter")
+            if part and (isDrop or isTool or hasTouch) then
+                local priority = isDrop and 100 or (isTool and 50 or 25)
+                local distance = (part.Position - origin).Magnitude
+                if priority > bestPriority or (priority == bestPriority and distance < bestDistance) then
+                    bestPart, bestPriority, bestDistance = part, priority, distance
                 end
             end
         end
     end
-
-    return nil
+    return bestPart
 end
 
 local teleportBusy = false
-local function teleportToRevolver()
-    if state.unloaded or teleportBusy then
-        return
+local revolverTrip = nil
+
+local function finishRevolverTrip()
+    local trip = revolverTrip
+    if not trip or trip.finished then
+        return false
+    end
+    trip.finished = true
+    if trip.stepConnection then
+        trip.stepConnection:Disconnect()
+    end
+    -- Never move a new character after death/respawn during the pickup.
+    local returned, returnError = false, nil
+    if LocalPlayer.Character == trip.character and trip.character.Parent
+        and trip.root.Parent and trip.humanoid.Health > 0 then
+        local ok, err = pcall(function()
+            trip.character:PivotTo(trip.returnPivot)
+            trip.root.AssemblyLinearVelocity = Vector3.zero
+            trip.root.AssemblyAngularVelocity = Vector3.zero
+        end)
+        returned, returnError = ok, err
     end
 
-    teleportBusy = true
+    -- Restore flight even if returning failed or the character was replaced.
+    if trip.flyVelocity and trip.flyVelocity.Parent then
+        trip.flyVelocity.MaxForce = trip.flyMaxForce
+    end
+    if trip.flyGyro and trip.flyGyro.Parent then
+        trip.flyGyro.MaxTorque = trip.flyMaxTorque
+    end
+
+    revolverTrip = nil
+    teleportBusy = false
+    return returned, returnError
+end
+
+local function teleportToRevolver()
+    if state.unloaded or teleportBusy or flingBusy then
+        return
+    end
 
     local character = getCharacter()
     local root = character and character:FindFirstChild("HumanoidRootPart")
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-    local target = findRevolverInWorkspace()
-
-    if not root or not humanoid then
-        Status.Text = "Teleport: character not ready"
-        teleportBusy = false
+    if not root or not humanoid or humanoid.Health <= 0 or root.Anchored then
+        Status.Text = "Pickup: character not ready"
+        return
+    end
+    if findRevolver() then
+        Status.Text = "Pickup: you already have a revolver"
         return
     end
 
+    -- Capture the point of the click before searching or waiting.
+    local returnPivot = character:GetPivot()
+    local returnRootCFrame = root.CFrame
+    local deadline = os.clock() + CONFIG.RevolverPickupTimeout
+    local target = findRevolverInWorkspace(root.Position)
     if not target then
-        Status.Text = "Teleport: revolver not found"
-        teleportBusy = false
+        Status.Text = "Pickup: no dropped revolver found"
         return
     end
 
-    local targetPosition = target.Position + Vector3.new(0, 3.5, 0)
+    local trip = {
+        character = character, root = root, humanoid = humanoid,
+        returnPivot = returnPivot, finished = false,
+        flyVelocity = flyObjects.flyVelocity, flyGyro = flyObjects.flyGyro,
+    }
+    revolverTrip = trip
+    teleportBusy = true
+    local pickedUp = false
+    Status.Text = "Pickup: collecting revolver..."
 
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-    rayParams.FilterDescendantsInstances = {character, target.Parent}
+    local ok, err = pcall(function()
+        if trip.flyVelocity and trip.flyVelocity.Parent then
+            trip.flyMaxForce = trip.flyVelocity.MaxForce
+            trip.flyVelocity.MaxForce = Vector3.zero
+            trip.flyVelocity.Velocity = Vector3.zero
+        end
+        if trip.flyGyro and trip.flyGyro.Parent then
+            trip.flyMaxTorque = trip.flyGyro.MaxTorque
+            trip.flyGyro.MaxTorque = Vector3.zero
+        end
 
-    local floorHit = Workspace:Raycast(
-        targetPosition + Vector3.new(0, 8, 0),
-        Vector3.new(0, -20, 0),
-        rayParams
-    )
+        local standingHeight = humanoid.HipHeight + root.Size.Y * 0.5
+        if humanoid.RigType == Enum.HumanoidRigType.R6 then
+            local leg = character:FindFirstChild("Left Leg") or character:FindFirstChild("Right Leg")
+            standingHeight = standingHeight + (leg and leg.Size.Y or 2)
+        end
+        local destination = target.Position + Vector3.new(0, standingHeight + target.Size.Y * 0.5 + 0.15, 0)
+        local rootToPivot = returnRootCFrame:ToObjectSpace(returnPivot)
+        local destinationRoot = CFrame.new(destination) * returnRootCFrame.Rotation
 
-    if floorHit then
-        targetPosition = floorHit.Position + Vector3.new(0, 3.5, 0)
-    end
-
-    root.AssemblyLinearVelocity = Vector3.zero
-    root.AssemblyAngularVelocity = Vector3.zero
-    root.Anchored = true
-    root.CFrame = CFrame.new(targetPosition)
-    task.wait(0.15)
-
-    if root and root.Parent then
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
-        root.Anchored = false
+        character:PivotTo(destinationRoot * rootToPivot)
 
-        if humanoid and humanoid.Parent then
-            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-        end
+        -- Keep the character unanchored: a small physical movement is needed
+        -- for touch pickups; changing CFrame alone does not fire Touched.
+        trip.stepConnection = RunService.PreSimulation:Connect(function()
+            if not trip.finished and not state.unloaded and LocalPlayer.Character == character
+                and root.Parent and humanoid.Health > 0 then
+                humanoid:Move(Vector3.zero, false)
+                root.AssemblyLinearVelocity = Vector3.new(0, -3, 0)
+                root.AssemblyAngularVelocity = Vector3.zero
+            end
+        end)
+
+        repeat
+            -- A vanished drop can mean another player took it. Only a Tool in
+            -- our own Character/Backpack confirms that the pickup succeeded.
+            pickedUp = findRevolver() ~= nil
+            if pickedUp or trip.finished or state.unloaded or os.clock() >= deadline
+                or LocalPlayer.Character ~= character or not root.Parent or humanoid.Health <= 0 then
+                break
+            end
+            RunService.Heartbeat:Wait()
+        until false
+    end)
+
+    if trip.finished then
+        return
     end
-
-    Status.Text = "Teleported to revolver"
-    teleportBusy = false
+    local returned, returnError = finishRevolverTrip()
+    if state.unloaded then
+        return
+    end
+    if not ok then
+        Status.Text = "Pickup error: " .. tostring(err)
+    elseif returnError then
+        Status.Text = "Return error: " .. tostring(returnError)
+    elseif not returned then
+        Status.Text = "Pickup cancelled: character changed/dead"
+    elseif pickedUp then
+        Status.Text = "Revolver collected • returned to starting point"
+    else
+        Status.Text = "Returned • server did not confirm the pickup"
+    end
 end
 
 addSection("UTILITY", 30)
@@ -780,7 +1016,7 @@ local teleportRevolverButton = create("TextButton", {
     BackgroundColor3 = Color3.fromRGB(37, 37, 43),
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
-    Text = "Teleport To Revolver",
+    Text = "Grab Revolver & Return (~1s)",
     TextColor3 = Color3.fromRGB(220, 220, 225),
     TextSize = 13,
     AutoButtonColor = false,
@@ -819,11 +1055,14 @@ create("UICorner", {CornerRadius = UDim.new(0, 8)}, unloadButton)
 local dragStart = nil
 local startPosition = nil
 local draggingMain = false
+local mainDragInput = nil
 
 local function beginDrag(input)
     if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
         return
     end
+    if mainDragInput then return end
+    mainDragInput = input
     draggingMain = true
     dragStart = input.Position
     startPosition = Main.Position
@@ -833,11 +1072,9 @@ local function updateDrag(input)
     if not draggingMain then
         return
     end
-    if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
-        return
-    end
+    if not isPointerMove(input, mainDragInput) then return end
 
-    local delta = input.Position - dragStart
+    local delta = (input.Position - dragStart) / Scale.Scale
     Main.Position = UDim2.new(
         startPosition.X.Scale,
         startPosition.X.Offset + delta.X,
@@ -849,8 +1086,9 @@ end
 addConnection(dragHandle.InputBegan:Connect(beginDrag))
 addConnection(UIS.InputChanged:Connect(updateDrag))
 addConnection(UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+    if isPointerEnd(input, mainDragInput) then
         draggingMain = false
+        mainDragInput = nil
     end
 end))
 
@@ -858,12 +1096,15 @@ end))
 local draggingReopen = false
 local reopenDragStart = nil
 local reopenStartPosition = nil
+local reopenDragInput = nil
 
 addConnection(reopen.InputBegan:Connect(function(input)
     if not IsMobile then
         return
     end
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if reopenDragInput then return end
+        reopenDragInput = input
         draggingReopen = true
         reopenDragStart = input.Position
         reopenStartPosition = reopen.Position
@@ -874,19 +1115,17 @@ addConnection(UIS.InputChanged:Connect(function(input)
     if not draggingReopen or not IsMobile then
         return
     end
-    if input.UserInputType ~= Enum.UserInputType.Touch and input.UserInputType ~= Enum.UserInputType.MouseMovement then
-        return
-    end
+    if not isPointerMove(input, reopenDragInput) then return end
 
     local camera = Workspace.CurrentCamera
     if not camera then
         return
     end
 
-    local delta = input.Position - reopenDragStart
-    local viewport = camera.ViewportSize
-    local halfX = reopen.AbsoluteSize.X * 0.5
-    local halfY = reopen.AbsoluteSize.Y * 0.5
+    local delta = (input.Position - reopenDragStart) / Scale.Scale
+    local viewport = camera.ViewportSize / Scale.Scale
+    local halfX = reopen.AbsoluteSize.X * 0.5 / Scale.Scale
+    local halfY = reopen.AbsoluteSize.Y * 0.5 / Scale.Scale
 
     local newX = reopenStartPosition.X.Offset + delta.X
     local newY = reopenStartPosition.Y.Offset + delta.Y
@@ -897,58 +1136,58 @@ addConnection(UIS.InputChanged:Connect(function(input)
 end))
 
 addConnection(UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+    if isPointerEnd(input, reopenDragInput) then
         draggingReopen = false
+        reopenDragInput = nil
     end
 end))
 
 --// Mobile fly vertical controls
+local flyUpInput, flyDownInput = nil, nil
 addConnection(FlyUpButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        flyUpInput = input
         flyObjects.up = true
     end
 end))
 
-addConnection(FlyUpButton.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+addConnection(UIS.InputEnded:Connect(function(input)
+    if isPointerEnd(input, flyUpInput) then
+        flyUpInput = nil
         flyObjects.up = false
     end
 end))
 
 addConnection(FlyDownButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        flyDownInput = input
         flyObjects.down = true
     end
 end))
 
-addConnection(FlyDownButton.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+addConnection(UIS.InputEnded:Connect(function(input)
+    if isPointerEnd(input, flyDownInput) then
+        flyDownInput = nil
         flyObjects.down = false
     end
 end))
 
+addConnection(UIS.WindowFocusReleased:Connect(function()
+    windowFocused = false
+    flyObjects.up, flyObjects.down = false, false
+    flyUpInput, flyDownInput = nil, nil
+    draggingMain, draggingReopen = false, false
+    mainDragInput, reopenDragInput = nil, nil
+end))
+addConnection(UIS.WindowFocused:Connect(function() windowFocused = true end))
+
 --// Feature helpers
 local function setCharacterMovement()
-    local humanoid = getHumanoid()
-    if not humanoid then
-        return
-    end
-
-    humanoid.UseJumpPower = true
-    if state.speed then
-        humanoid.WalkSpeed = values.walkSpeed
-    else
-        humanoid.WalkSpeed = CONFIG.DefaultWalkSpeed
-    end
-
-    if state.jump then
-        humanoid.JumpPower = values.jumpPower
-    else
-        humanoid.JumpPower = CONFIG.DefaultJumpPower
-    end
+    applyMovementSettings(getHumanoid())
 end
 
 local function stopFly()
+    local humanoid = flyObjects.humanoid
     flyObjects.active = false
     flyObjects.up = false
     flyObjects.down = false
@@ -967,14 +1206,14 @@ local function stopFly()
         flyObjects.flyGyro = nil
     end
 
-    local humanoid = getHumanoid()
-    if humanoid then
-        humanoid.PlatformStand = false
-        humanoid.AutoRotate = true
+    if humanoid and humanoid.Parent == getCharacter() and humanoid.Health > 0 then
+        humanoid.PlatformStand = flyObjects.platformStand
+        humanoid.AutoRotate = flyObjects.autoRotate
         pcall(function()
-            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+            if not humanoid.PlatformStand then humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end
         end)
     end
+    flyObjects.humanoid = nil
 
     MobileFlyControls.Visible = false
 end
@@ -989,9 +1228,12 @@ local function startFly()
 
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     local root = character:FindFirstChild("HumanoidRootPart")
-    if not humanoid or not root then
+    if not humanoid or not root or humanoid.Health <= 0 or root.Anchored or humanoid.Sit then
         return
     end
+    flyObjects.humanoid = humanoid
+    flyObjects.platformStand = humanoid.PlatformStand
+    flyObjects.autoRotate = humanoid.AutoRotate
 
     local flyVelocity = Instance.new("BodyVelocity")
     flyVelocity.Name = "ModMenuFlyVelocity"
@@ -1019,7 +1261,7 @@ local function startFly()
 end
 
 applyNoclip = function()
-    if not state.noclip then
+    if not state.noclip or (flingTrip and flingTrip.active) then
         return
     end
 
@@ -1039,6 +1281,7 @@ applyNoclip = function()
 end
 
 restoreNoclip = function()
+    if flingTrip and flingTrip.active then return end
     for object, canCollide in pairs(originalCollisions) do
         if object and object.Parent then
             object.CanCollide = canCollide
@@ -1089,23 +1332,46 @@ local function findGetPlayerData()
     return nil
 end
 
+local roleRequestPending = false
+local function clearRoles()
+    roles, Murder, Sheriff, Hero = {}, "", "", ""
+    rolesAvailable = false
+end
+
 local function refreshRoles()
+    if state.unloaded then
+        return false
+    end
+    if roleRequestPending then
+        repeat RunService.Heartbeat:Wait() until not roleRequestPending or state.unloaded
+        return not state.unloaded and rolesAvailable
+    end
+
     local remote = findGetPlayerData()
     if not remote then
+        clearRoles()
         Status.Text = "Role ESP: GetPlayerData not found"
         return false
     end
 
+    roleRequestPending = true
     local success, result = pcall(function()
         return remote:InvokeServer()
     end)
+    roleRequestPending = false
+
+    if state.unloaded then
+        return false
+    end
 
     if not success or type(result) ~= "table" then
+        clearRoles()
         Status.Text = "Role ESP: failed to read roles"
         return false
     end
 
     roles = result
+    rolesAvailable = true
     Murder = ""
     Sheriff = ""
     Hero = ""
@@ -1122,6 +1388,7 @@ local function refreshRoles()
         end
     end
 
+    if teleportBusy or flingBusy or shootMurdererBusy then return true end
     if LocalPlayer.Name == Murder then
         Status.Text = "Role: Murderer"
     elseif LocalPlayer.Name == Sheriff then
@@ -1136,10 +1403,9 @@ local function refreshRoles()
 end
 
 
---// X = shoot murderer with revolver (own game)
-local shootMurdererBusy = false
+--// X = shoot murderer with revolver.
 
-local function findRevolver()
+findRevolver = function()
     local character = getCharacter()
     local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
 
@@ -1166,100 +1432,81 @@ local function findRevolver()
     return check(character) or check(backpack)
 end
 
+local shootTrip = nil
+local shootCooldownUntil = 0
+
+finishMurdererShot = function()
+    local trip = shootTrip
+    if not trip or trip.finished then return end
+    trip.finished = true
+    if trip.activated and trip.tool then
+        pcall(function() trip.tool:Deactivate() end)
+    end
+    if trip.cameraChanged then
+        pcall(function()
+            trip.camera.CFrame = trip.cameraCFrame
+            trip.camera.CameraType = trip.cameraType
+        end)
+    end
+    local previous = trip.previousTool
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if previous and previous.Parent and LocalPlayer.Character == trip.character and trip.humanoid.Health > 0
+        and (previous.Parent == trip.character or previous.Parent == backpack) then
+        pcall(function() trip.humanoid:EquipTool(previous) end)
+    end
+    shootTrip = nil
+    shootMurdererBusy = false
+    shootCooldownUntil = os.clock() + 0.25
+end
+
 local function shootMurderer()
-    if state.unloaded or shootMurdererBusy then
+    if state.unloaded or shootMurdererBusy or os.clock() < shootCooldownUntil then return end
+    if teleportBusy or flingBusy then
+        Status.Text = "Shoot: finish pickup / stop Fling first"
         return
     end
-
+    local character, humanoid = getCharacter(), getHumanoid()
+    if not character or not humanoid or humanoid.Health <= 0 then return end
+    local trip = {character = character, humanoid = humanoid, finished = false}
+    shootTrip = trip
     shootMurdererBusy = true
-
+    local outcome = "Shoot: cancelled"
     local ok, err = pcall(function()
-        -- Refresh role data even when ESP is disabled.
-        if not refreshRoles() then
-            Status.Text = "Shoot: roles unavailable"
-            return
-        end
-
-        if Murder == "" then
-            Status.Text = "Shoot: murderer not found"
-            return
-        end
-
-        local murderer = Players:FindFirstChild(Murder)
-        if not murderer or not isAliveCharacter(murderer) then
-            Status.Text = "Shoot: murderer is dead/not found"
-            return
-        end
-
+        if not refreshRoles() then outcome = "Shoot: roles unavailable"; return end
+        if trip.finished or state.unloaded or LocalPlayer.Character ~= character or humanoid.Health <= 0 then return end
+        local murderer = Murder ~= "" and Players:FindFirstChild(Murder) or nil
+        if not murderer or not roleAlive(Murder) then outcome = "Shoot: no living murderer"; return end
         local targetCharacter = murderer.Character
-        local targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
-        local targetHead = targetCharacter and targetCharacter:FindFirstChild("Head")
-        local targetPart = targetHead or targetRoot
-        if not targetPart then
-            Status.Text = "Shoot: no target part"
-            return
-        end
-
+        local targetPart = targetCharacter and (targetCharacter:FindFirstChild("Head")
+            or targetCharacter:FindFirstChild("HumanoidRootPart"))
+        if not targetPart then outcome = "Shoot: no target part"; return end
         local tool = findRevolver()
-        if not tool then
-            Status.Text = "Shoot: revolver not found"
-            return
+        if not tool then outcome = "Shoot: revolver not found"; return end
+        trip.tool = tool
+        for _, item in ipairs(character:GetChildren()) do
+            if item:IsA("Tool") and item ~= tool then trip.previousTool = item; break end
         end
-
-        local humanoid = getHumanoid()
-        if not humanoid then
-            Status.Text = "Shoot: humanoid not found"
-            return
-        end
-
-        local previousTool = nil
-        for _, item in ipairs(humanoid.Parent:GetChildren()) do
-            if item:IsA("Tool") and item ~= tool then
-                previousTool = item
-                break
-            end
-        end
-
-        if tool.Parent ~= humanoid.Parent then
+        if tool.Parent ~= character then
             humanoid:EquipTool(tool)
             task.wait(0.05)
         end
-
+        if trip.finished or state.unloaded or LocalPlayer.Character ~= character or humanoid.Health <= 0
+            or tool.Parent ~= character or Murder ~= murderer.Name or murderer.Character ~= targetCharacter
+            or not targetPart.Parent or not roleAlive(Murder) then return end
         local camera = Workspace.CurrentCamera
-        if not camera then
-            return
-        end
-
-        -- Aim the camera at the murderer for weapon implementations
-        -- that calculate the shot direction from the camera.
-        local oldCameraType = camera.CameraType
-        local oldCameraCFrame = camera.CFrame
+        if not camera then outcome = "Shoot: camera unavailable"; return end
+        trip.camera, trip.cameraType, trip.cameraCFrame = camera, camera.CameraType, camera.CFrame
+        trip.cameraChanged = true
         camera.CameraType = Enum.CameraType.Scriptable
         camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetPart.Position)
-
+        trip.activated = true
         tool:Activate()
         task.wait(0.05)
-        pcall(function()
-            tool:Deactivate()
-        end)
-
-        camera.CFrame = oldCameraCFrame
-        camera.CameraType = oldCameraType
-
-        if previousTool and previousTool.Parent == humanoid.Parent then
-            humanoid:EquipTool(previousTool)
-        end
-
-        Status.Text = "Shoot: fired at " .. murderer.DisplayName
+        if not trip.finished and not state.unloaded then outcome = "Shoot: fired at " .. murderer.DisplayName end
     end)
-
-    if not ok then
-        Status.Text = "Shoot error: " .. tostring(err)
-    end
-
-    task.delay(0.25, function()
-        shootMurdererBusy = false
-    end)
+    if trip.finished then return end
+    finishMurdererShot()
+    if not state.unloaded then Status.Text = ok and outcome or ("Shoot error: " .. tostring(err)) end
 end
 
 local ESPColors = {
@@ -1288,7 +1535,7 @@ local function getRoleName(playerName)
     return "Unknown"
 end
 
-local function roleAlive(playerName)
+roleAlive = function(playerName)
     local player = Players:FindFirstChild(playerName)
     if not player or player == LocalPlayer then
         return false
@@ -1300,6 +1547,471 @@ local function roleAlive(playerName)
     end
 
     return isAliveCharacter(player)
+end
+
+--// AimLock tracks only the living murderer from the shared role data.
+local function getMurdererAimPart()
+    if not rolesAvailable or Murder == "" or Murder == LocalPlayer.Name then
+        return nil
+    end
+
+    local murderer = Players:FindFirstChild(Murder)
+    if not murderer or not roleAlive(Murder) then
+        return nil
+    end
+
+    local character = murderer.Character
+    local head = character and character:FindFirstChild("Head")
+    if head and head:IsA("BasePart") then
+        return head
+    end
+
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    return root and root:IsA("BasePart") and root or nil
+end
+
+updateAimLock = function()
+    if state.unloaded or flingBusy or not state.aimLock or UIS:GetFocusedTextBox() then
+        return
+    end
+
+    local humanoid = getHumanoid()
+    local camera = Workspace.CurrentCamera
+    if not humanoid or humanoid.Health <= 0 or not camera then
+        return
+    end
+
+    -- Leave scripted cameras (including the existing X shot) in control.
+    if camera.CameraType == Enum.CameraType.Scriptable then
+        return
+    end
+
+    local targetPart = getMurdererAimPart()
+    if not targetPart then
+        return
+    end
+
+    local cameraPosition = camera.CFrame.Position
+    local targetPosition = targetPart.Position
+    if (targetPosition - cameraPosition).Magnitude > 0.001 then
+        camera.CFrame = CFrame.lookAt(cameraPosition, targetPosition)
+    end
+end
+
+--// Infer the active map from nearby anchored, collidable geometry. Characters,
+--// loose items, oversized backgrounds, and the whole Workspace are excluded.
+local function getFlingMapBounds(position)
+    local candidates, nearbyParts, characters = {}, {}, {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character then characters[player.Character] = true end
+    end
+
+    local function isGeometry(part)
+        return part:IsA("BasePart") and part.Anchored and part.CanCollide
+            and math.max(part.Size.X, part.Size.Y, part.Size.Z) <= CONFIG.FlingMapMaxSpan
+            and not isInCharacter(part, characters)
+    end
+    for _, part in ipairs(Workspace:GetDescendants()) do
+        if isGeometry(part) and (part.Position - position).Magnitude
+            <= CONFIG.FlingMapSearchRadius + part.Size.Magnitude * 0.5 then
+            table.insert(nearbyParts, part)
+            local ancestor = part.Parent
+            while ancestor and ancestor ~= Workspace do
+                if ancestor:IsA("Model") or ancestor:IsA("Folder") then
+                    candidates[ancestor] = (candidates[ancestor] or 0) + 1
+                end
+                ancestor = ancestor.Parent
+            end
+        end
+    end
+
+    local function measure(parts, skipPositionCheck)
+        local low, high, count = nil, nil, 0
+        for _, part in ipairs(parts) do
+            if isGeometry(part) then
+                local half = part.Size * 0.5
+                local right, up, look = part.CFrame.RightVector, part.CFrame.UpVector, part.CFrame.LookVector
+                local extent = Vector3.new(
+                    math.abs(right.X) * half.X + math.abs(up.X) * half.Y + math.abs(look.X) * half.Z,
+                    math.abs(right.Y) * half.X + math.abs(up.Y) * half.Y + math.abs(look.Y) * half.Z,
+                    math.abs(right.Z) * half.X + math.abs(up.Z) * half.Y + math.abs(look.Z) * half.Z
+                )
+                local a, b = part.Position - extent, part.Position + extent
+                low = low and Vector3.new(math.min(low.X, a.X), math.min(low.Y, a.Y), math.min(low.Z, a.Z)) or a
+                high = high and Vector3.new(math.max(high.X, b.X), math.max(high.Y, b.Y), math.max(high.Z, b.Z)) or b
+                count = count + 1
+            end
+        end
+        if not low then return nil end
+        local size = high - low
+        if size.X < 8 or size.Z < 8 or size.X + size.Z < 60
+            or math.max(size.X, size.Z) > CONFIG.FlingMapMaxSpan or size.Y > 1024 then
+            return nil
+        end
+        if not skipPositionCheck and (position.X < low.X - 32 or position.X > high.X + 32
+            or position.Z < low.Z - 32 or position.Z > high.Z + 32
+            or position.Y < low.Y - 32 or position.Y > high.Y + 32) then
+            return nil
+        end
+        return {low = low, high = high, count = count}
+    end
+
+    local ranked = {}
+    local names = {map = true, currentmap = true, activemap = true, normal = true, roundmap = true}
+    for container, hits in pairs(candidates) do
+        local name = string.lower(container.Name):gsub("[^%w]", "")
+        table.insert(ranked, {
+            container = container,
+            score = hits + (names[name] and 500 or 0) + (container:IsA("Model") and 10 or 0),
+        })
+    end
+    table.sort(ranked, function(a, b) return a.score > b.score end)
+    for index = 1, math.min(8, #ranked) do
+        local candidate = ranked[index]
+        local bounds = measure(candidate.container:GetDescendants())
+        if bounds then
+            bounds.name = candidate.container.Name
+            bounds.estimated = Workspace.StreamingEnabled == true
+            if bounds.estimated then
+                bounds.refresh = function()
+                    if not candidate.container.Parent then return end
+                    local updated = measure(candidate.container:GetDescendants(), true)
+                    if updated then
+                        -- New streamed sections can expand the bounds, but
+                        -- unloading old sections must never shrink them.
+                        bounds.low = Vector3.new(math.min(bounds.low.X, updated.low.X),
+                            math.min(bounds.low.Y, updated.low.Y), math.min(bounds.low.Z, updated.low.Z))
+                        bounds.high = Vector3.new(math.max(bounds.high.X, updated.high.X),
+                            math.max(bounds.high.Y, updated.high.Y), math.max(bounds.high.Z, updated.high.Z))
+                    end
+                end
+            end
+            return bounds
+        end
+    end
+    local fallback = measure(nearbyParts)
+    if fallback then
+        fallback.name = "nearby map geometry"
+        fallback.estimated = true
+    end
+    return fallback
+end
+
+local function getFlingExitDirection(bounds, position)
+    local exits = {
+        {distance = math.abs(position.X - bounds.low.X), direction = Vector3.new(-1, 0, 0)},
+        {distance = math.abs(bounds.high.X - position.X), direction = Vector3.new(1, 0, 0)},
+        {distance = math.abs(position.Z - bounds.low.Z), direction = Vector3.new(0, 0, -1)},
+        {distance = math.abs(bounds.high.Z - position.Z), direction = Vector3.new(0, 0, 1)},
+    }
+    table.sort(exits, function(a, b) return a.distance < b.distance end)
+    return exits[1].direction
+end
+
+local function isOutsideFlingMap(bounds, position)
+    local margin = CONFIG.FlingExitMargin
+    -- Height and speed alone do not mean the murderer left the map.
+    return position.X < bounds.low.X - margin or position.X > bounds.high.X + margin
+        or position.Z < bounds.low.Z - margin or position.Z > bounds.high.Z + margin
+end
+
+--// Murderer fling: spin inside the target until the user presses Stop Fling.
+--// Server collision rules/network ownership can prevent the target moving.
+stopMurdererFling = function()
+    local trip = flingTrip
+    if not trip or trip.finished then
+        return
+    end
+    trip.finished = true
+    if trip.stepConnection then
+        trip.stepConnection:Disconnect()
+    end
+    if trip.contactConnection then
+        trip.contactConnection:Disconnect()
+    end
+    if trip.spinConstraint then
+        pcall(function() trip.spinConstraint:Destroy() end)
+    end
+    if trip.spinAttachment then
+        pcall(function() trip.spinAttachment:Destroy() end)
+    end
+
+    local returned, returnError = false, nil
+    if trip.active then
+        for part, saved in pairs(trip.collisions) do
+            if part.Parent then
+                pcall(function()
+                    part.CanCollide = saved
+                end)
+                if originalCollisions[part] ~= nil then
+                    originalCollisions[part] = saved
+                end
+            end
+        end
+
+        if trip.root.Parent then
+            pcall(function()
+                trip.root.AssemblyLinearVelocity = Vector3.zero
+                trip.root.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+        if LocalPlayer.Character == trip.character and trip.character.Parent
+            and trip.root.Parent and trip.humanoid.Health > 0 then
+            local ok, err = pcall(function()
+                trip.character:PivotTo(trip.returnPivot)
+                if state.fly then
+                    trip.humanoid.PlatformStand = true
+                    trip.humanoid.AutoRotate = false
+                elseif trip.startedFlying then
+                    trip.humanoid.PlatformStand = false
+                    trip.humanoid.AutoRotate = true
+                else
+                    trip.humanoid.PlatformStand = trip.platformStand
+                    trip.humanoid.AutoRotate = trip.autoRotate
+                end
+                if not trip.humanoid.PlatformStand then
+                    trip.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+                end
+            end)
+            returned, returnError = ok, err
+        end
+
+        if trip.flyVelocity and trip.flyVelocity.Parent and trip.flyMaxForce then
+            trip.flyVelocity.MaxForce = trip.flyMaxForce
+        end
+        if trip.flyGyro and trip.flyGyro.Parent and trip.flyMaxTorque then
+            trip.flyGyro.MaxTorque = trip.flyMaxTorque
+        end
+    end
+
+    flingTrip = nil
+    flingBusy = false
+    if state.noclip then applyNoclip() else restoreNoclip() end
+    if not state.unloaded then
+        flingMurdererButton.Text = "Fling Murderer"
+        setButtonVisual(flingMurdererButton, false)
+    end
+    return returned, returnError
+end
+
+local function flingMurderer()
+    if state.unloaded then return end
+    if flingBusy then
+        local trip = flingTrip
+        local returned, returnError = stopMurdererFling()
+        if returnError then
+            Status.Text = "Fling return error: " .. tostring(returnError)
+        elseif trip and trip.active and not returned then
+            Status.Text = "Fling stopped: character changed/dead"
+        else
+            Status.Text = returned and "Fling stopped • returned" or "Fling stopped"
+        end
+        return
+    end
+    if teleportBusy then
+        Status.Text = "Fling: wait for the revolver pickup to finish"
+        return
+    end
+
+    local character = getCharacter()
+    local root = getRoot()
+    local humanoid = getHumanoid()
+    if not character or not root or not humanoid or humanoid.Health <= 0
+        or root.Anchored or humanoid.Sit then
+        Status.Text = "Fling: character not ready / leave the seat first"
+        return
+    end
+
+    local trip = {
+        character = character, root = root, humanoid = humanoid,
+        returnPivot = character:GetPivot(), rootCFrame = root.CFrame,
+        platformStand = humanoid.PlatformStand, autoRotate = humanoid.AutoRotate,
+        startedFlying = state.fly, collisions = {}, active = false, finished = false,
+        flyVelocity = flyObjects.flyVelocity, flyGyro = flyObjects.flyGyro,
+    }
+    flingTrip = trip
+    flingBusy = true
+    flingMurdererButton.Text = "Stop Fling [ON]"
+    setButtonVisual(flingMurdererButton, true)
+    Status.Text = "Fling: checking murderer..."
+
+    local outcome = "Fling stopped • returned"
+    local ok, err = pcall(function()
+        if not refreshRoles() then
+            outcome = "Fling: roles unavailable"
+            return
+        end
+        if trip.finished or state.unloaded then
+            return
+        end
+        local murderer = Murder ~= "" and Players:FindFirstChild(Murder) or nil
+        if not murderer or murderer == LocalPlayer or not roleAlive(Murder) then
+            outcome = "Fling: no living murderer found"
+            return
+        end
+
+        local targetCharacter = murderer.Character
+        local targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
+        if not targetRoot or targetRoot.Anchored then
+            outcome = "Fling: target is unavailable / anchored"
+            return
+        end
+        if LocalPlayer.Character ~= character or not root.Parent or humanoid.Health <= 0 then
+            outcome = "Fling cancelled: character changed/dead"
+            return
+        end
+
+        local bounds = getFlingMapBounds(targetRoot.Position)
+        local direction
+        if bounds then
+            direction = getFlingExitDirection(bounds, targetRoot.Position)
+        else
+            -- Spinning remains available outside the map or before its geometry
+            -- streams in. Without bounds, do not claim a confirmed map exit.
+            local forward = targetRoot.CFrame.LookVector
+            local horizontal = Vector3.new(forward.X, 0, forward.Z)
+            direction = horizontal.Magnitude > 0.001 and horizontal.Unit or Vector3.new(1, 0, 0)
+        end
+        local rootToPivot = trip.rootCFrame:ToObjectSpace(trip.returnPivot)
+        local boundsRefreshTime = os.clock()
+        local outsideSince = nil
+        local outsideConfirmed = false
+        local runningStatus = bounds and "Fling: fast spin toward " .. bounds.name .. " edge • Stop Fling = return"
+            or "Fling: fast spin • Stop Fling = return"
+        -- Role lookup can yield while the user changes Fly. Capture the current
+        -- controllers immediately before pausing them, not before that request.
+        trip.flyVelocity, trip.flyGyro = flyObjects.flyVelocity, flyObjects.flyGyro
+        trip.startedFlying = state.fly
+        trip.platformStand, trip.autoRotate = humanoid.PlatformStand, humanoid.AutoRotate
+        trip.active = true
+        Status.Text = runningStatus
+
+        for _, part in ipairs(character:GetChildren()) do
+            if part:IsA("BasePart") then
+                local saved = originalCollisions[part]
+                if saved == nil then saved = part.CanCollide end
+                trip.collisions[part] = saved
+                part.CanCollide = true
+            end
+        end
+        if trip.flyVelocity and trip.flyVelocity.Parent then
+            trip.flyMaxForce = trip.flyVelocity.MaxForce
+            trip.flyVelocity.MaxForce = Vector3.zero
+            trip.flyVelocity.Velocity = Vector3.zero
+        end
+        if trip.flyGyro and trip.flyGyro.Parent then
+            trip.flyMaxTorque = trip.flyGyro.MaxTorque
+            trip.flyGyro.MaxTorque = Vector3.zero
+        end
+        humanoid.PlatformStand = true
+        humanoid.AutoRotate = false
+
+        local spinVelocity = Vector3.new(CONFIG.FlingSpinSpeed, CONFIG.FlingSpinSpeed, CONFIG.FlingSpinSpeed)
+        -- Keep applying torque throughout the attempt, rather than giving
+        -- one angular impulse that collisions can slow down.
+        trip.spinAttachment = Instance.new("Attachment")
+        trip.spinAttachment.Name = "ScriptMM2FlingSpinAttachment"
+        trip.spinAttachment.Parent = root
+        trip.spinConstraint = Instance.new("AngularVelocity")
+        trip.spinConstraint.Name = "ScriptMM2FlingSpin"
+        trip.spinConstraint.Attachment0 = trip.spinAttachment
+        trip.spinConstraint.RelativeTo = Enum.ActuatorRelativeTo.World
+        trip.spinConstraint.AngularVelocity = spinVelocity
+        trip.spinConstraint.MaxTorque = CONFIG.FlingSpinTorque
+        trip.spinConstraint.ReactionTorqueEnabled = false
+        trip.spinConstraint.Enabled = true
+        trip.spinConstraint.Parent = root
+
+        local function canMaintainContact()
+            return not trip.finished and not trip.error and not state.unloaded
+                and LocalPlayer.Character == character and murderer.Character == targetCharacter
+                and root.Parent and targetRoot.Parent and humanoid.Health > 0
+                and not targetRoot.Anchored and rolesAvailable
+                and Murder == murderer.Name and roleAlive(murderer.Name)
+        end
+        local function alignWithMurderer()
+            -- Match only the target's position. Keep our physics rotation so
+            -- centering inside the target never cancels the rapid spin.
+            local contact = CFrame.new(targetRoot.Position) * root.CFrame.Rotation
+            character:PivotTo(contact * rootToPivot)
+        end
+
+        trip.stepConnection = RunService.PreSimulation:Connect(function()
+            if not canMaintainContact() then return end
+            local stepOK, stepError = pcall(function()
+                local aboveRoof = not bounds or targetRoot.Position.Y > bounds.high.Y + CONFIG.FlingRoofMargin
+                local launch = direction * (CONFIG.FlingSpeed * (aboveRoof and 1 or 0.65))
+                    + Vector3.new(0, CONFIG.FlingSpeed * (aboveRoof and 0.12 or 0.9), 0)
+                humanoid:Move(Vector3.zero, false)
+                alignWithMurderer()
+                root.AssemblyLinearVelocity = launch
+                root.AssemblyAngularVelocity = spinVelocity
+            end)
+            if not stepOK then trip.error = stepError end
+        end)
+        trip.contactConnection = RunService.PostSimulation:Connect(function()
+            if not canMaintainContact() then return end
+            local contactOK, contactError = pcall(function()
+                -- Correct upward drift after physics without resetting rotation.
+                alignWithMurderer()
+            end)
+            if not contactOK then trip.error = contactError end
+        end)
+
+        repeat
+            if trip.finished or state.unloaded or trip.error then break end
+            if LocalPlayer.Character ~= character or not root.Parent or humanoid.Health <= 0 then
+                outcome = "Fling cancelled: character changed/dead"
+                break
+            end
+            if not rolesAvailable or Murder ~= murderer.Name then
+                outcome = "Fling: murderer role changed / roles unavailable"
+                break
+            end
+            if murderer.Character ~= targetCharacter or not targetRoot.Parent or not roleAlive(murderer.Name) then
+                outcome = "Fling: target left / died"
+                break
+            end
+            if targetRoot.Anchored then
+                outcome = "Fling: target became anchored"
+                break
+            end
+            local currentTime = os.clock()
+            if bounds and bounds.refresh and currentTime - boundsRefreshTime >= 0.15 then
+                bounds.refresh()
+                boundsRefreshTime = currentTime
+            end
+            if bounds and isOutsideFlingMap(bounds, targetRoot.Position) then
+                outsideSince = outsideSince or currentTime
+                if not outsideConfirmed and currentTime - outsideSince >= CONFIG.FlingExitConfirmTime then
+                    outsideConfirmed = true
+                    Status.Text = bounds.estimated and "Fling: outside estimated map bounds • Stop Fling = return"
+                        or "Fling: target outside map bounds • Stop Fling = return"
+                end
+            else
+                outsideSince = nil
+                if outsideConfirmed then
+                    outsideConfirmed = false
+                    Status.Text = runningStatus
+                end
+            end
+            RunService.Heartbeat:Wait()
+        until false
+        if trip.error then error(trip.error) end
+    end)
+
+    if trip.finished then return end
+    local returned, returnError = stopMurdererFling()
+    if state.unloaded then return end
+    if not ok then
+        Status.Text = "Fling error: " .. tostring(err)
+    elseif returnError then
+        Status.Text = "Fling return error: " .. tostring(returnError)
+    elseif trip.active and not returned then
+        Status.Text = "Fling cancelled: character changed/dead"
+    else
+        Status.Text = outcome
+    end
 end
 
 local function getLocalRole()
@@ -1528,8 +2240,6 @@ local function setTracer(tracer, startPoint, endPoint, color, visible)
     tracer.BackgroundColor3 = color
 end
 
-local clearESP
-
 local function updateESP()
     local anyESP = state.esp or state.roleESP or state.innocentESP
     if not anyESP then
@@ -1551,7 +2261,7 @@ local function updateESP()
             local show = true
 
             if state.innocentESP and not state.esp and not state.roleESP then
-                show = (localRole == "Murderer" or localRole == "Sheriff") and isInnocent and alive
+                show = (localRole == "Murderer" or localRole == "Sheriff" or localRole == "Hero") and isInnocent and alive
             end
 
             local object = show and createESPForPlayer(player) or nil
@@ -1657,26 +2367,51 @@ clearESP = function()
     end
 end
 
---// Main runtime loop
-addConnection(RunService.RenderStepped:Connect(function()
-    if state.unloaded then
+--// Air steering preserves vertical motion and existing momentum above the cap.
+local function calculateStrafeVelocity(velocity, moveDirection, maxSpeed, deltaTime)
+    local wish = Vector3.new(moveDirection.X, 0, moveDirection.Z)
+    if wish.Magnitude <= 0.05 then return velocity end
+    wish = wish.Unit
+    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+    local speed = horizontal.Magnitude
+    if speed > maxSpeed + 0.001 then return velocity end
+    local dt = math.clamp(deltaTime, 0, 0.1)
+    local angle = math.atan2(wish.Z, wish.X)
+    if speed > 0.001 then
+        local currentAngle = math.atan2(horizontal.Z, horizontal.X)
+        local difference = math.atan2(math.sin(angle - currentAngle), math.cos(angle - currentAngle))
+        angle = currentAngle + difference * (1 - math.exp(-CONFIG.StrafeTurnRate * dt))
+    end
+    speed = math.min(maxSpeed, speed + CONFIG.StrafeAcceleration * dt)
+    return Vector3.new(math.cos(angle) * speed, velocity.Y, math.sin(angle) * speed)
+end
+
+--// Physics movement runs after input, before the simulation.
+local function updateMovement(deltaTime)
+    if state.unloaded or teleportBusy or (flingTrip and flingTrip.active) then
         return
     end
 
     local humanoid = getHumanoid()
     local root = getRoot()
 
-    if humanoid then
-        if state.speed then
-            humanoid.WalkSpeed = values.walkSpeed
-        end
-        if state.jump then
-            humanoid.UseJumpPower = true
-            humanoid.JumpPower = values.jumpPower
-        end
-
-        if state.bunnyHop and humanoid.MoveDirection.Magnitude > 0.05 then
+    applyMovementSettings(humanoid)
+    local canMove = humanoid and root and humanoid.Health > 0 and not root.Anchored
+        and not humanoid.Sit and not humanoid.PlatformStand and not state.fly
+        and windowFocused and not UIS:GetFocusedTextBox()
+    local movementState = humanoid and humanoid:GetState()
+    local grounded = humanoid and humanoid.FloorMaterial ~= Enum.Material.Air
+    if canMove then
+        if state.bunnyHop and grounded and humanoid.MoveDirection.Magnitude > 0.05
+            and (movementState == Enum.HumanoidStateType.Running
+                or movementState == Enum.HumanoidStateType.RunningNoPhysics
+                or movementState == Enum.HumanoidStateType.Landed) then
             humanoid.Jump = true
+        end
+        if state.strafe and not grounded and (movementState == Enum.HumanoidStateType.Jumping
+            or movementState == Enum.HumanoidStateType.Freefall) then
+            root.AssemblyLinearVelocity = calculateStrafeVelocity(root.AssemblyLinearVelocity,
+                humanoid.MoveDirection, values.strafeSpeed, deltaTime)
         end
     end
 
@@ -1693,18 +2428,14 @@ addConnection(RunService.RenderStepped:Connect(function()
         Workspace.Gravity = 60
     end
 
-    if root and state.spin and not state.fly then
-        root.AssemblyAngularVelocity = Vector3.new(0, 12, 0)
-    elseif root and not state.spin and not state.fly then
-        root.AssemblyAngularVelocity = Vector3.zero
-    end
-
-    if root and state.strafe and not state.fly then
-        local move = humanoid and humanoid.MoveDirection or Vector3.zero
-        if move.Magnitude > 0.05 then
-            local velocity = root.AssemblyLinearVelocity
-            root.AssemblyLinearVelocity = Vector3.new(move.X * values.walkSpeed, velocity.Y, move.Z * values.walkSpeed)
+    if root and humanoid and humanoid.Health > 0 and not root.Anchored and state.spin and not state.fly then
+        if spinState.root ~= root then
+            stopRegularSpin()
+            spinState.root, spinState.velocity = root, root.AssemblyAngularVelocity
         end
+        root.AssemblyAngularVelocity = Vector3.new(0, 12, 0)
+    elseif spinState.root then
+        stopRegularSpin()
     end
 
     if state.fly then
@@ -1722,7 +2453,8 @@ addConnection(RunService.RenderStepped:Connect(function()
         local flyVelocity = flyObjects.flyVelocity
         local flyGyro = flyObjects.flyGyro
 
-        if currentHumanoid and currentRoot and camera and flyVelocity and flyGyro and flyObjects.active then
+        if currentHumanoid and currentHumanoid.Health > 0 and currentRoot and not currentRoot.Anchored
+            and not currentHumanoid.Sit and camera and flyVelocity and flyGyro and flyObjects.active then
             currentHumanoid.PlatformStand = true
             currentHumanoid.AutoRotate = false
 
@@ -1730,48 +2462,29 @@ addConnection(RunService.RenderStepped:Connect(function()
             local look = camera.CFrame.LookVector
             local right = camera.CFrame.RightVector
 
-            if IsMobile then
+            if windowFocused and not UIS:GetFocusedTextBox() then
                 local moveDirection = currentHumanoid.MoveDirection
                 local flatLook = Vector3.new(look.X, 0, look.Z)
-                local flatRight = Vector3.new(right.X, 0, right.Z)
 
                 if flatLook.Magnitude > 0.001 then
                     flatLook = flatLook.Unit
                 else
-                    flatLook = Vector3.zero
+                    local flatRight = Vector3.new(right.X, 0, right.Z)
+                    flatLook = flatRight.Magnitude > 0.001
+                        and Vector3.new(flatRight.Unit.Z, 0, -flatRight.Unit.X) or Vector3.new(0, 0, -1)
                 end
-
-                if flatRight.Magnitude > 0.001 then
-                    flatRight = flatRight.Unit
-                else
-                    flatRight = Vector3.zero
-                end
+                local flatRight = Vector3.new(-flatLook.Z, 0, flatLook.X)
 
                 if moveDirection.Magnitude > 0.001 then
-                    movement += flatLook * moveDirection:Dot(flatLook)
-                    movement += flatRight * moveDirection:Dot(flatRight)
+                    movement += look * moveDirection:Dot(flatLook)
+                    movement += right * moveDirection:Dot(flatRight)
                 end
-            else
-                if UIS:IsKeyDown(Enum.KeyCode.W) then
-                    movement += look
+                if UIS:IsKeyDown(Enum.KeyCode.Space) or UIS:IsKeyDown(Enum.KeyCode.E) or flyObjects.up then
+                    movement += Vector3.new(0, 1, 0)
                 end
-                if UIS:IsKeyDown(Enum.KeyCode.S) then
-                    movement -= look
+                if UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.Q) or flyObjects.down then
+                    movement -= Vector3.new(0, 1, 0)
                 end
-                if UIS:IsKeyDown(Enum.KeyCode.A) then
-                    movement -= right
-                end
-                if UIS:IsKeyDown(Enum.KeyCode.D) then
-                    movement += right
-                end
-            end
-
-            if UIS:IsKeyDown(Enum.KeyCode.Space) or UIS:IsKeyDown(Enum.KeyCode.E) or flyObjects.up then
-                movement += Vector3.new(0, 1, 0)
-            end
-
-            if UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.Q) or flyObjects.down then
-                movement -= Vector3.new(0, 1, 0)
             end
 
             if movement.Magnitude > 0.001 then
@@ -1785,63 +2498,71 @@ addConnection(RunService.RenderStepped:Connect(function()
             if look.Magnitude > 0.001 then
                 flyGyro.CFrame = CFrame.lookAt(currentRoot.Position, currentRoot.Position + look)
             end
+        elseif flyObjects.active then
+            stopFly()
         end
     elseif flyObjects.active then
         stopFly()
     end
 
-end))
-
-addConnection(RunService.Heartbeat:Connect(function()
-    if state.unloaded then
-        return
-    end
-end))
+end
+addConnection(RunService.PreSimulation:Connect(updateMovement))
 
 --// Infinite jump
 addConnection(UIS.JumpRequest:Connect(function()
-    if not state.infiniteJump then
+    if state.unloaded or not state.infiniteJump or state.fly or flingBusy or teleportBusy
+        or not windowFocused or UIS:GetFocusedTextBox() then
         return
     end
 
     local humanoid = getHumanoid()
-    if humanoid then
+    local root = getRoot()
+    if humanoid and root and humanoid.Health > 0 and not humanoid.Sit
+        and not humanoid.PlatformStand and not root.Anchored then
         humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
     end
 end))
 
 --// Respawn handler
 local function onCharacterAdded(character)
+    if state.unloaded or not character or LocalPlayer.Character ~= character then return end
     disconnectBucket(characterConnections)
+    finishMurdererShot()
+    finishRevolverTrip()
+    stopMurdererFling()
+    stopRegularSpin()
+    stopFly()
 
     local humanoid = character:WaitForChild("Humanoid", 10)
     local root = character:WaitForChild("HumanoidRootPart", 10)
 
-    if not humanoid or not root or state.unloaded then
+    if not humanoid or not root or state.unloaded or LocalPlayer.Character ~= character then
         return
     end
 
     setCharacterMovement()
 
-    if state.fly then
+    if state.fly and not teleportBusy and not flingBusy then
         startFly()
     end
 
     if state.noclip then
         task.wait(0.1)
-        applyNoclip()
+        if not state.unloaded and LocalPlayer.Character == character then applyNoclip() end
     end
 end
 
 addConnection(LocalPlayer.CharacterAdded:Connect(onCharacterAdded))
 if LocalPlayer.Character then
+    local initialCharacter = LocalPlayer.Character
     task.spawn(function()
-        onCharacterAdded(LocalPlayer.Character)
+        onCharacterAdded(initialCharacter)
     end)
 end
 
 --// Role refresh and ESP update
 local roleTimer = 0
+local roleRefreshPending = false
 addConnection(RunService.Heartbeat:Connect(function(deltaTime)
     if state.unloaded then
         return
@@ -1853,13 +2574,18 @@ addConnection(RunService.Heartbeat:Connect(function(deltaTime)
     end
     roleTimer = 0
 
-    if state.roleESP or state.innocentESP then
-        refreshRoles()
+    if (state.roleESP or state.innocentESP or state.aimLock or flingBusy) and not roleRefreshPending then
+        -- Network requests must not run inside the camera callback or overlap
+        -- on every Heartbeat while a previous role request is still waiting.
+        roleRefreshPending = true
+        task.spawn(function()
+            if not state.unloaded then
+                refreshRoles()
+            end
+            roleRefreshPending = false
+        end)
     end
 
-    if state.esp or state.roleESP or state.innocentESP then
-        updateESP()
-    end
 end))
 
 addConnection(Players.PlayerRemoving:Connect(function(player)
@@ -1894,13 +2620,15 @@ addConnection(RunService.RenderStepped:Connect(function(deltaTime)
     end
 end))
 
---// X bind: Shoot Murderer
+--// Combat binds: X = Shoot Murderer, B = toggle AimLock
 addConnection(UIS.InputBegan:Connect(function(input, processed)
-    if processed or state.unloaded or IsMobile then
+    if processed or state.unloaded or UIS:GetFocusedTextBox() then
         return
     end
 
-    if input.KeyCode == Enum.KeyCode.X then
+    if input.KeyCode == CONFIG.AimLockKey then
+        setAimLockToggle(not state.aimLock)
+    elseif input.KeyCode == Enum.KeyCode.X and not IsMobile then
         shootMurderer()
     end
 end))
@@ -1918,12 +2646,25 @@ local function setMainVisible(visible)
 end
 
 addConnection(UIS.InputBegan:Connect(function(input, processed)
-    if processed or state.unloaded then
+    if state.unloaded or UIS:GetFocusedTextBox() then
         return
     end
 
     if input.KeyCode == CONFIG.UIKey then
+        -- F9 is also a core Roblox shortcut; it may arrive as processed input.
+        if processed and input.KeyCode ~= Enum.KeyCode.F9 then
+            return
+        end
         setMainVisible(not state.uiVisible)
+        if input.KeyCode == Enum.KeyCode.F9 then
+            task.defer(function()
+                if not state.unloaded then
+                    pcall(function()
+                        game:GetService("StarterGui"):SetCore("DevConsoleVisible", false)
+                    end)
+                end
+            end)
+        end
     end
 end))
 
@@ -1940,6 +2681,9 @@ local function unload()
         return
     end
     state.unloaded = true
+    finishMurdererShot()
+    finishRevolverTrip()
+    stopMurdererFling()
 
     setSpeedToggle(false)
     setJumpToggle(false)
@@ -1956,24 +2700,13 @@ local function unload()
     setInnocentESPToggle(false)
     setESPLinesToggle(false)
     setESPNamesToggle(false)
+    setAimLockToggle(false)
 
     stopFly()
     restoreNoclip()
     clearESP()
     disableFullBright()
-    Workspace.Gravity = savedGravity
-
-    local humanoid = getHumanoid()
-    if humanoid then
-        humanoid.WalkSpeed = CONFIG.DefaultWalkSpeed
-        humanoid.UseJumpPower = true
-        humanoid.JumpPower = CONFIG.DefaultJumpPower
-    end
-
-    local camera = Workspace.CurrentCamera
-    if camera then
-        camera.FieldOfView = CONFIG.DefaultFOV
-    end
+    restoreCameraFOV()
 
     disconnectBucket(characterConnections)
     disconnectBucket(connections)
@@ -1995,6 +2728,8 @@ addConnection(teleportRevolverButton.MouseButton1Click:Connect(function()
     teleportToRevolver()
 end))
 
+addConnection(flingMurdererButton.MouseButton1Click:Connect(flingMurderer))
+
 addConnection(refreshButton.MouseButton1Click:Connect(function()
     if refreshRoles() then
         Status.Text = "Roles refreshed"
@@ -2013,6 +2748,9 @@ addConnection(refreshButton.MouseButton1Click:Connect(function()
 end))
 
 addConnection(resetButton.MouseButton1Click:Connect(function()
+    finishMurdererShot()
+    finishRevolverTrip()
+    stopMurdererFling()
     setSpeedToggle(false)
     setJumpToggle(false)
     setNoclipToggle(false)
@@ -2028,28 +2766,21 @@ addConnection(resetButton.MouseButton1Click:Connect(function()
     setInnocentESPToggle(false)
     setESPLinesToggle(false)
     setESPNamesToggle(true)
+    setAimLockToggle(false)
+    restoreCameraFOV()
 
     values.walkSpeed = CONFIG.DefaultWalkSpeed
     values.jumpPower = CONFIG.DefaultJumpPower
     values.flySpeed = CONFIG.DefaultFlySpeed
+    values.strafeSpeed = CONFIG.DefaultStrafeSpeed
     values.fov = CONFIG.DefaultFOV
 
     if setWalkSpeedSlider then setWalkSpeedSlider(CONFIG.DefaultWalkSpeed) end
     if setJumpPowerSlider then setJumpPowerSlider(CONFIG.DefaultJumpPower) end
     if setFlySpeedSlider then setFlySpeedSlider(CONFIG.DefaultFlySpeed) end
-    if setFOVSlider then setFOVSlider(CONFIG.DefaultFOV) end
-
-    local humanoid = getHumanoid()
-    if humanoid then
-        humanoid.WalkSpeed = CONFIG.DefaultWalkSpeed
-        humanoid.UseJumpPower = true
-        humanoid.JumpPower = CONFIG.DefaultJumpPower
-    end
-
-    local camera = Workspace.CurrentCamera
-    if camera then
-        camera.FieldOfView = CONFIG.DefaultFOV
-    end
+    if setStrafeSpeedSlider then setStrafeSpeedSlider(CONFIG.DefaultStrafeSpeed) end
+    if setFOVSlider then setFOVSlider(CONFIG.DefaultFOV, true) end
+    setCharacterMovement()
 
     clearESP()
     Status.Text = "Settings reset"
@@ -2066,15 +2797,13 @@ if IsMobile then
     reopen.Visible = false
 else
     Title.Text = "ScriptMM2 | PC  •  " .. VERSION
-    Status.Text = "RightShift = hide/show"
+    Status.Text = "F9 = hide/show • B = AimLock"
     reopen.Visible = false
     MobileFlyControls.Visible = false
 end
 
---// Keep defaults applied after script starts.
-savedGravity = Workspace.Gravity
-savedFOV = CONFIG.DefaultFOV
+--// Apply enabled overrides without changing the game's untouched defaults.
 setCharacterMovement()
 refreshRoles()
 
-print("[ScriptMM2] " .. VERSION .. " loaded successfully. RightShift = show/hide.")
+print("[ScriptMM2] " .. VERSION .. " loaded successfully. F9 = show/hide, B = AimLock Murderer.")
