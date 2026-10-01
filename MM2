@@ -1,8 +1,7 @@
 --// ScriptMM2
---// Put this LocalScript in: StarterPlayer > StarterPlayerScripts
---// Designed for your own Roblox Studio game.
+--// Client menu. Silent Aim requires executor hook APIs.
 
-local VERSION = "V0.6.0"
+local VERSION = "V0.6.6"
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -35,15 +34,28 @@ local CONFIG = {
     DefaultFOV = 70,
     UIKey = Enum.KeyCode.F9,
     AimLockKey = Enum.KeyCode.B,
+    -- Roblox exposes MouseButton1-3 only. Map Mouse4 to G in mouse software
+    -- or run the accompanying MM2_Mouse4_Revolver.ahk on Windows.
+    RevolverPickupKey = Enum.KeyCode.G,
     RevolverPickupTimeout = 0.9,
-    FlingSpeed = 2400,
-    FlingSpinSpeed = 20000,
-    FlingSpinTorque = 1e9,
+    FlingSpeed = 12000,
+    FlingContactSpeed = 240,
+    FlingLinearForce = 1e9,
+    FlingResponseSpeed = 80,
+    FlingResponseGrace = 1.5,
+    FlingSpinSpeed = 30000,
+    FlingSpinTorque = 1e10,
     FlingMapSearchRadius = 120,
     FlingMapMaxSpan = 2048,
     FlingExitMargin = 20,
     FlingRoofMargin = 12,
     FlingExitConfirmTime = 0.15,
+    AntiFlingScanInterval = 0.15,
+    AntiFlingTeleportDistance = 12,
+    AntiFlingTeleportGrace = 0.45,
+    SilentAimMaxRange = 1500,
+    SilentAimRoleMaxAge = 1.25,
+    SilentAimSampleMaxAge = 0.12,
 }
 
 local state = {
@@ -63,6 +75,8 @@ local state = {
     espLines = false,
     espNames = true,
     aimLock = false,
+    silentAim = false,
+    antiFling = false,
     minimized = false,
     uiVisible = true,
     unloaded = false,
@@ -112,11 +126,24 @@ local Murder = ""
 local Sheriff = ""
 local Hero = ""
 local rolesAvailable = false
+local rolesUpdatedAt = -math.huge
 local updateAimLock
+local enableSilentAim
+local disableSilentAim
+local shutdownSilentAim
+local setSilentAimToggle
+local getSilentAimRemote
+local getSilentAimPosition
+local updateSilentAim
+local silentAimStatus
+local silentAimHook
 local findRevolver
 local flingBusy = false
 local flingTrip = nil
 local stopMurdererFling
+local pauseAntiFling
+local updateAntiFling
+local guardAntiFling
 local roleAlive
 local shootMurdererBusy = false
 local finishMurdererShot
@@ -672,6 +699,7 @@ addSection("COMBAT", 13)
 local aimLockButton
 local setAimLockToggle
 aimLockButton, setAimLockToggle = addToggle("AimLock Murderer [B]", 14, function(enabled)
+    if enabled and state.silentAim and setSilentAimToggle then setSilentAimToggle(false) end
     state.aimLock = enabled
     RunService:UnbindFromRenderStep(aimLockBindingName)
 
@@ -700,6 +728,46 @@ local flingMurdererButton = create("TextButton", {
     LayoutOrder = 15,
 }, Content)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, flingMurdererButton)
+
+local antiFlingButton
+local setAntiFlingToggle
+antiFlingButton, setAntiFlingToggle = addToggle("AntiFling", 16, function(enabled)
+    state.antiFling = enabled
+    if not enabled and pauseAntiFling then pauseAntiFling() end
+end)
+
+local silentAimButton
+silentAimButton, setSilentAimToggle = addToggle("Silent Aim Murderer", 17, function(enabled)
+    if enabled then
+        local ok, reason = enableSilentAim()
+        if not ok then
+            setSilentAimToggle(false)
+            Status.Text = "Silent Aim: " .. tostring(reason)
+            if silentAimStatus then silentAimStatus.Text = Status.Text end
+            return
+        end
+        setAimLockToggle(false)
+        Status.Text = "Silent Aim: ON • equip revolver and shoot"
+    else
+        if disableSilentAim then disableSilentAim() end
+        if not state.unloaded then Status.Text = "Silent Aim: OFF" end
+    end
+end)
+
+silentAimStatus = create("TextLabel", {
+    Name = "SilentAimStatus",
+    Size = UDim2.new(1, -4, 0, 66),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    Font = Enum.Font.Gotham,
+    Text = "Silent Aim: OFF",
+    TextColor3 = Color3.fromRGB(180, 185, 195),
+    TextSize = 12,
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    LayoutOrder = 18,
+}, Content)
 
 addSection("VISUALS", 20)
 
@@ -894,6 +962,7 @@ local function teleportToRevolver()
     if state.unloaded or teleportBusy or flingBusy then
         return
     end
+    if pauseAntiFling then pauseAntiFling() end
 
     local character = getCharacter()
     local root = character and character:FindFirstChild("HumanoidRootPart")
@@ -1016,7 +1085,7 @@ local teleportRevolverButton = create("TextButton", {
     BackgroundColor3 = Color3.fromRGB(37, 37, 43),
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
-    Text = "Grab Revolver & Return (~1s)",
+    Text = IsMobile and "Grab Revolver & Return (~1s)" or "Grab Revolver & Return [G]",
     TextColor3 = Color3.fromRGB(220, 220, 225),
     TextSize = 13,
     AutoButtonColor = false,
@@ -1336,6 +1405,7 @@ local roleRequestPending = false
 local function clearRoles()
     roles, Murder, Sheriff, Hero = {}, "", "", ""
     rolesAvailable = false
+    rolesUpdatedAt = -math.huge
 end
 
 local function refreshRoles()
@@ -1372,6 +1442,7 @@ local function refreshRoles()
 
     roles = result
     rolesAvailable = true
+    rolesUpdatedAt = os.clock()
     Murder = ""
     Sheriff = ""
     Hero = ""
@@ -1493,16 +1564,26 @@ local function shootMurderer()
         if trip.finished or state.unloaded or LocalPlayer.Character ~= character or humanoid.Health <= 0
             or tool.Parent ~= character or Murder ~= murderer.Name or murderer.Character ~= targetCharacter
             or not targetPart.Parent or not roleAlive(Murder) then return end
-        local camera = Workspace.CurrentCamera
-        if not camera then outcome = "Shoot: camera unavailable"; return end
-        trip.camera, trip.cameraType, trip.cameraCFrame = camera, camera.CameraType, camera.CFrame
-        trip.cameraChanged = true
-        camera.CameraType = Enum.CameraType.Scriptable
-        camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetPart.Position)
+        if state.silentAim then
+            if not silentAimHook.mouseInstalled and not getSilentAimRemote(tool) then
+                outcome = "Silent Aim: gun interface not supported"; return
+            end
+            updateSilentAim()
+            if not getSilentAimPosition(tool) then outcome = "Silent Aim: no clear shot"; return end
+        else
+            local camera = Workspace.CurrentCamera
+            if not camera then outcome = "Shoot: camera unavailable"; return end
+            trip.camera, trip.cameraType, trip.cameraCFrame = camera, camera.CameraType, camera.CFrame
+            trip.cameraChanged = true
+            camera.CameraType = Enum.CameraType.Scriptable
+            camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetPart.Position)
+        end
         trip.activated = true
         tool:Activate()
         task.wait(0.05)
-        if not trip.finished and not state.unloaded then outcome = "Shoot: fired at " .. murderer.DisplayName end
+        if not trip.finished and not state.unloaded then
+            outcome = (state.silentAim and "Shoot: requested at " or "Shoot: fired at ") .. murderer.DisplayName
+        end
     end)
     if trip.finished then return end
     finishMurdererShot()
@@ -1595,6 +1676,222 @@ updateAimLock = function()
     local targetPosition = targetPart.Position
     if (targetPosition - cameraPosition).Magnitude > 0.001 then
         camera.CFrame = CFrame.lookAt(cameraPosition, targetPosition)
+    end
+end
+
+--// Feed the native weapon's mouse input, with a checked CreateBeam adapter
+--// for weapons that send that known request. Cache targeting outside hooks:
+--// property/method hooks must not yield or recursively query Roblox methods.
+--// Counters show client activity, never server acceptance or confirmed damage.
+do
+    silentAimHook = {
+        installed = false, restores = {}, sample = nil, mouseReads = 0,
+        requestsSeen = 0, redirects = 0, lastRequest = "waiting for a shot",
+        message = "OFF",
+    }
+
+    getSilentAimRemote = function(tool)
+        local character = getCharacter()
+        if not character or not tool or tool.Parent ~= character then return nil end
+        local beam = tool:FindFirstChild("CreateBeam", true)
+        local remote = beam and beam:FindFirstChild("RemoteFunction")
+        return remote and remote:IsA("RemoteFunction") and remote or nil
+    end
+
+    getSilentAimPosition = function(tool)
+        local character, humanoid = getCharacter(), getHumanoid()
+        if not character or not humanoid or humanoid.Health <= 0 then return nil, nil, "character unavailable" end
+        if not tool or tool.Parent ~= character then return nil, nil, "equip revolver" end
+        if not rolesAvailable then return nil, nil, "waiting for roles" end
+        if os.clock() - rolesUpdatedAt > CONFIG.SilentAimRoleMaxAge then return nil, nil, "role data stale" end
+        local target = getMurdererAimPart()
+        if not target then return nil, nil, "no living murderer" end
+        local muzzle = tool:FindFirstChild("Muzzle", true)
+        local handle = tool:FindFirstChild("Handle")
+        local root = getRoot()
+        local origin = muzzle and muzzle:IsA("Attachment") and muzzle.WorldPosition
+            or handle and handle:IsA("BasePart") and handle.Position
+            or root and root.Position
+        if not origin then return nil, nil, "weapon origin unavailable" end
+        local destination = target.Position
+        local direction = destination - origin
+        if direction.Magnitude < 0.001 or direction.Magnitude > CONFIG.SilentAimMaxRange then
+            return nil, nil, "target out of range"
+        end
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = {character}
+        params.IgnoreWater = true
+        params.RespectCanCollide = true
+        local hit = Workspace:Raycast(origin, direction, params)
+        if hit and (not hit.Instance or not hit.Instance:IsDescendantOf(target.Parent)) then
+            return nil, nil, "target obstructed"
+        end
+        return destination, target
+    end
+
+    local function paintSilentAimStatus()
+        if not silentAimStatus or state.unloaded then return end
+        if not state.silentAim then
+            silentAimStatus.Text = "Silent Aim: " .. silentAimHook.message
+            return
+        end
+        silentAimStatus.Text = "Silent Aim: " .. silentAimHook.message
+            .. "\nAim reads: " .. silentAimHook.mouseReads .. " • Requests: " .. silentAimHook.requestsSeen
+            .. " • Redirected: " .. silentAimHook.redirects
+            .. "\nLast: " .. silentAimHook.lastRequest
+    end
+
+    updateSilentAim = function()
+        silentAimHook.sample = nil
+        if not state.silentAim or state.unloaded then return end
+        local ok, err = pcall(function()
+            if not windowFocused or UIS:GetFocusedTextBox() then silentAimHook.message = "paused for input"; return end
+            if teleportBusy or flingBusy then silentAimHook.message = "paused for pickup / Fling"; return end
+            local tool = findRevolver()
+            local position, target, reason = getSilentAimPosition(tool)
+            if not position then silentAimHook.message = reason; return end
+            local targetCharacter = target.Parent
+            local remotes = {}
+            for _, item in ipairs(tool:GetDescendants()) do
+                if item:IsA("RemoteFunction") or item:IsA("RemoteEvent") then remotes[item] = true end
+            end
+            silentAimHook.sample = {
+                time = os.clock(), tool = tool, character = getCharacter(), humanoid = getHumanoid(),
+                position = position, hit = CFrame.new(position), target = target, targetCharacter = targetCharacter,
+                targetHumanoid = targetCharacter:FindFirstChildOfClass("Humanoid"),
+                murderer = Players:FindFirstChild(Murder), murdererName = Murder,
+                remote = getSilentAimRemote(tool), remotes = remotes,
+            }
+            silentAimHook.message = "ready • " .. Murder
+        end)
+        if not ok then silentAimHook.message = "target check failed: " .. tostring(err) end
+        paintSilentAimStatus()
+    end
+
+    local function getSilentAimSample()
+        local sample = silentAimHook.sample
+        if not sample or not state.silentAim or state.unloaded or teleportBusy or flingBusy or not windowFocused
+            or not rolesAvailable or os.clock() - rolesUpdatedAt > CONFIG.SilentAimRoleMaxAge
+            or os.clock() - sample.time > CONFIG.SilentAimSampleMaxAge
+            or Murder ~= sample.murdererName or LocalPlayer.Character ~= sample.character
+            or sample.tool.Parent ~= sample.character or not sample.humanoid or sample.humanoid.Health <= 0
+            or not sample.murderer or sample.murderer.Character ~= sample.targetCharacter
+            or sample.target.Parent ~= sample.targetCharacter or not sample.targetCharacter.Parent
+            or not sample.targetHumanoid or sample.targetHumanoid.Health <= 0 then return nil end
+        local data = roles[Murder]
+        if type(data) ~= "table" or data.Role ~= "Murderer" or data.Dead or data.Killed then return nil end
+        return sample
+    end
+
+    enableSilentAim = function()
+        if state.unloaded then return false, "menu unloaded" end
+        local installer = hookmetamethod
+        if type(installer) ~= "function" then
+            silentAimHook.message = "hook support unavailable"
+            paintSilentAimStatus()
+            return false, silentAimHook.message
+        end
+        if not silentAimHook.installed then
+            local restores = {}
+            local function install(method, makeHandler)
+                local original
+                local closure = makeHandler(function(...) return original(...) end)
+                if type(newcclosure) == "function" then
+                    local ok, wrapped = pcall(newcclosure, closure)
+                    if not ok or type(wrapped) ~= "function" then return false end
+                    closure = wrapped
+                end
+                local ok, previous = pcall(installer, game, method, closure)
+                if not ok or type(previous) ~= "function" then return false end
+                original = previous
+                table.insert(restores, {method = method, handler = closure, original = previous})
+                return true
+            end
+            local isExecutorCall = checkcaller
+            silentAimHook.mouseInstalled = install("__index", function(original)
+                return function(self, key)
+                    if key ~= "Hit" and key ~= "Target" and key ~= "UnitRay" then return original(self, key) end
+                    local sample = getSilentAimSample()
+                    if not sample or typeof(self) ~= "Instance"
+                        or (type(isExecutorCall) == "function" and isExecutorCall()) then return original(self, key) end
+                    -- ToolMouse inherits Mouse. Dot notation avoids __namecall.
+                    if not self.IsA(self, "Mouse") then return original(self, key) end
+                    if key == "UnitRay" then
+                        local ray = original(self, key)
+                        if typeof(ray) ~= "Ray" then return ray end
+                        local direction = sample.position - ray.Origin
+                        if direction.Magnitude < 0.001 then return ray end
+                        silentAimHook.mouseReads += 1
+                        return Ray.new(ray.Origin, direction.Unit)
+                    end
+                    silentAimHook.mouseReads += 1
+                    return key == "Hit" and sample.hit or sample.target
+                end
+            end)
+            local getMethod = getnamecallmethod
+            if type(getMethod) == "function" then
+                silentAimHook.namecallInstalled = install("__namecall", function(original)
+                    return function(self, ...)
+                        if not state.silentAim or state.unloaded then return original(self, ...) end
+                        local method = getMethod()
+                        if method ~= "InvokeServer" and method ~= "FireServer" then return original(self, ...) end
+                        local sample = getSilentAimSample()
+                        if not sample or not sample.remotes[self] then return original(self, ...) end
+                        local args = table.pack(...)
+                        silentAimHook.requestsSeen += 1
+                        local types = {}
+                        for i = 1, math.min(args.n, 4) do types[i] = typeof(args[i]) end
+                        silentAimHook.lastRequest = method .. "(" .. table.concat(types, ", ") .. ")"
+                        if self == sample.remote and method == "InvokeServer" and args.n >= 2
+                            and args[1] == 1 and typeof(args[2]) == "Vector3" then
+                            args[2] = sample.position
+                            silentAimHook.redirects += 1
+                            return original(self, table.unpack(args, 1, args.n))
+                        end
+                        -- Unknown contracts use the native mouse input. Never
+                        -- guess argument positions or forge new network requests.
+                        return original(self, ...)
+                    end
+                end)
+            end
+            if not silentAimHook.mouseInstalled and not silentAimHook.namecallInstalled then
+                silentAimHook.message = "could not install aim hooks"
+                paintSilentAimStatus()
+                return false, silentAimHook.message
+            end
+            silentAimHook.restores = restores
+            silentAimHook.installed = true
+            local getRaw = getrawmetatable
+            silentAimHook.restore = function()
+                if type(getRaw) ~= "function" then return end
+                local mt = getRaw(game)
+                for i = #restores, 1, -1 do
+                    local entry = restores[i]
+                    if mt and mt[entry.method] == entry.handler then installer(game, entry.method, entry.original) end
+                end
+            end
+        end
+        state.silentAim = true
+        rolesAvailable = false
+        silentAimHook.mouseReads, silentAimHook.requestsSeen, silentAimHook.redirects = 0, 0, 0
+        silentAimHook.lastRequest = "waiting for a shot"
+        silentAimHook.message = "waiting for roles"
+        silentAimHook.sample = nil
+        paintSilentAimStatus()
+        return true
+    end
+
+    disableSilentAim = function()
+        state.silentAim = false
+        silentAimHook.sample = nil
+        silentAimHook.message = "OFF"
+        paintSilentAimStatus()
+    end
+
+    shutdownSilentAim = function()
+        disableSilentAim()
+        if silentAimHook.restore then pcall(silentAimHook.restore) end
     end
 end
 
@@ -1732,12 +2029,22 @@ stopMurdererFling = function()
     if trip.spinConstraint then
         pcall(function() trip.spinConstraint:Destroy() end)
     end
+    if trip.launchConstraint then
+        pcall(function() trip.launchConstraint:Destroy() end)
+    end
     if trip.spinAttachment then
         pcall(function() trip.spinAttachment:Destroy() end)
     end
 
     local returned, returnError = false, nil
     if trip.active then
+        for part, saved in pairs(trip.physics) do
+            if part.Parent then
+                pcall(function() part.CollisionGroup = saved.collisionGroup end)
+                pcall(function() part.CustomPhysicalProperties = saved.properties end)
+                pcall(function() part.Massless = saved.massless end)
+            end
+        end
         for part, saved in pairs(trip.collisions) do
             if part.Parent then
                 pcall(function()
@@ -1812,6 +2119,7 @@ local function flingMurderer()
         Status.Text = "Fling: wait for the revolver pickup to finish"
         return
     end
+    if pauseAntiFling then pauseAntiFling() end
 
     local character = getCharacter()
     local root = getRoot()
@@ -1826,7 +2134,7 @@ local function flingMurderer()
         character = character, root = root, humanoid = humanoid,
         returnPivot = character:GetPivot(), rootCFrame = root.CFrame,
         platformStand = humanoid.PlatformStand, autoRotate = humanoid.AutoRotate,
-        startedFlying = state.fly, collisions = {}, active = false, finished = false,
+        startedFlying = state.fly, collisions = {}, physics = {}, active = false, finished = false,
         flyVelocity = flyObjects.flyVelocity, flyGyro = flyObjects.flyGyro,
     }
     flingTrip = trip
@@ -1876,8 +2184,10 @@ local function flingMurderer()
         local boundsRefreshTime = os.clock()
         local outsideSince = nil
         local outsideConfirmed = false
-        local runningStatus = bounds and "Fling: fast spin toward " .. bounds.name .. " edge • Stop Fling = return"
-            or "Fling: fast spin • Stop Fling = return"
+        local runningStatus = "Fling: contact attempt • Stop = return"
+        local attemptStarted = os.clock()
+        local collisionCheckTime = -math.huge
+        local collisionAllowed = false
         -- Role lookup can yield while the user changes Fly. Capture the current
         -- controllers immediately before pausing them, not before that request.
         trip.flyVelocity, trip.flyGyro = flyObjects.flyVelocity, flyObjects.flyGyro
@@ -1891,7 +2201,17 @@ local function flingMurderer()
                 local saved = originalCollisions[part]
                 if saved == nil then saved = part.CanCollide end
                 trip.collisions[part] = saved
+                trip.physics[part] = {
+                    collisionGroup = part.CollisionGroup,
+                    properties = part.CustomPhysicalProperties,
+                    massless = part.Massless,
+                }
                 part.CanCollide = true
+                -- CanCollide alone does not override non-colliding groups.
+                -- Change only our body and restore its settings on every exit.
+                part.CollisionGroup = "Default"
+                part.CustomPhysicalProperties = PhysicalProperties.new(100, 0, 1, 100, 100)
+                part.Massless = false
             end
         end
         if trip.flyVelocity and trip.flyVelocity.Parent then
@@ -1922,6 +2242,37 @@ local function flingMurderer()
         trip.spinConstraint.Enabled = true
         trip.spinConstraint.Parent = root
 
+        -- Maintain the contact velocity throughout the physics step. A one-off
+        -- velocity assignment can be cancelled by the first wall/body contact.
+        trip.launchConstraint = Instance.new("LinearVelocity")
+        trip.launchConstraint.Name = "ScriptMM2FlingLaunch"
+        trip.launchConstraint.Attachment0 = trip.spinAttachment
+        trip.launchConstraint.RelativeTo = Enum.ActuatorRelativeTo.World
+        trip.launchConstraint.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+        trip.launchConstraint.ForceLimitsEnabled = true
+        trip.launchConstraint.ForceLimitMode = Enum.ForceLimitMode.Magnitude
+        trip.launchConstraint.MaxForce = CONFIG.FlingLinearForce
+        trip.launchConstraint.VectorVelocity = Vector3.zero
+        trip.launchConstraint.Enabled = true
+        trip.launchConstraint.Parent = root
+
+        local function hasCollisionPair()
+            for _, part in ipairs(targetCharacter:GetChildren()) do
+                if part:IsA("BasePart") and part.CanCollide and root:CanCollideWith(part) then
+                    local blocked = false
+                    for _, constraint in ipairs(root:GetNoCollisionConstraints()) do
+                        if constraint.Enabled and ((constraint.Part0 == root and constraint.Part1 == part)
+                            or (constraint.Part1 == root and constraint.Part0 == part)) then
+                            blocked = true
+                            break
+                        end
+                    end
+                    if not blocked then return true end
+                end
+            end
+            return false
+        end
+
         local function canMaintainContact()
             return not trip.finished and not trip.error and not state.unloaded
                 and LocalPlayer.Character == character and murderer.Character == targetCharacter
@@ -1930,21 +2281,43 @@ local function flingMurderer()
                 and Murder == murderer.Name and roleAlive(murderer.Name)
         end
         local function alignWithMurderer()
-            -- Match only the target's position. Keep our physics rotation so
-            -- centering inside the target never cancels the rapid spin.
-            local contact = CFrame.new(targetRoot.Position) * root.CFrame.Rotation
+            -- Stay inside the body at the same height, slightly behind the
+            -- launch direction so the overlap has a consistent outward side.
+            local inset = math.min(0.25, targetRoot.Size.X * 0.2, targetRoot.Size.Z * 0.2)
+            local contact = CFrame.new(targetRoot.Position - direction * inset) * root.CFrame.Rotation
             character:PivotTo(contact * rootToPivot)
         end
 
-        trip.stepConnection = RunService.PreSimulation:Connect(function()
+        trip.stepConnection = RunService.PreSimulation:Connect(function(deltaTime)
             if not canMaintainContact() then return end
             local stepOK, stepError = pcall(function()
+                if os.clock() - collisionCheckTime >= 0.25 then
+                    collisionAllowed = hasCollisionPair()
+                    collisionCheckTime = os.clock()
+                end
                 local aboveRoof = not bounds or targetRoot.Position.Y > bounds.high.Y + CONFIG.FlingRoofMargin
-                local launch = direction * (CONFIG.FlingSpeed * (aboveRoof and 1 or 0.65))
-                    + Vector3.new(0, CONFIG.FlingSpeed * (aboveRoof and 0.12 or 0.9), 0)
+                local targetVelocity = targetRoot.AssemblyLinearVelocity
+                local horizontal = Vector3.new(targetVelocity.X, 0, targetVelocity.Z)
+                local stepTime = math.clamp(deltaTime or 1 / 60, 1 / 240, 0.1)
+                local contactWidth = math.max(0.5, math.min(root.Size.X, root.Size.Z,
+                    targetRoot.Size.X, targetRoot.Size.Z) * 0.75)
+                -- Build the first contact at a speed that does not cross the
+                -- whole body between solver updates. Boost once the target
+                -- actually starts moving outward; our own speed is not proof.
+                local speed = math.min(CONFIG.FlingContactSpeed, contactWidth * 4 / stepTime)
+                if horizontal:Dot(direction) >= CONFIG.FlingResponseSpeed then
+                    speed = CONFIG.FlingSpeed
+                end
+                local launch = collisionAllowed and (direction * speed
+                    + Vector3.new(0, speed * (aboveRoof and 0.08 or 0.3), 0)) or Vector3.zero
+                -- Follow a moving target without letting reported velocity make
+                -- the contact speed grow indefinitely after repeated hits.
+                local carry = targetVelocity
+                if carry.Magnitude > 2000 then carry = carry.Unit * 2000 end
                 humanoid:Move(Vector3.zero, false)
                 alignWithMurderer()
-                root.AssemblyLinearVelocity = launch
+                trip.launchConstraint.VectorVelocity = launch + carry
+                root.AssemblyLinearVelocity = trip.launchConstraint.VectorVelocity
                 root.AssemblyAngularVelocity = spinVelocity
             end)
             if not stepOK then trip.error = stepError end
@@ -1992,6 +2365,19 @@ local function flingMurderer()
                 outsideSince = nil
                 if outsideConfirmed then
                     outsideConfirmed = false
+                    Status.Text = runningStatus
+                end
+            end
+            if not outsideConfirmed then
+                local velocity = targetRoot.AssemblyLinearVelocity
+                local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+                if not collisionAllowed and currentTime - attemptStarted >= 0.25 then
+                    Status.Text = "Fling: collisions blocked • Stop = return"
+                elseif horizontalSpeed >= CONFIG.FlingResponseSpeed then
+                    Status.Text = "Fling: target moving • Stop = return"
+                elseif currentTime - attemptStarted >= CONFIG.FlingResponseGrace then
+                    Status.Text = "Fling: no knockback detected • Stop = return"
+                else
                     Status.Text = runningStatus
                 end
             end
@@ -2367,6 +2753,177 @@ clearESP = function()
     end
 end
 
+--// AntiFling changes only our collision pairs. Map collisions remain active.
+local antiFlingGuard = {pairs = {}, scanTime = -math.huge, jumpUntil = 0, teleportUntil = 0}
+
+local function releaseAntiFlingHold(preserveVelocity)
+    local guard = antiFlingGuard
+    if guard.holding and guard.root and guard.root.Parent and not preserveVelocity then
+        guard.root.AssemblyLinearVelocity = Vector3.zero
+        guard.root.AssemblyAngularVelocity = Vector3.zero
+    end
+    guard.holding = false
+    guard.idlePivot = nil
+end
+
+pauseAntiFling = function()
+    releaseAntiFlingHold()
+    for _, targets in pairs(antiFlingGuard.pairs) do
+        for _, constraint in pairs(targets) do
+            pcall(function() constraint:Destroy() end)
+        end
+    end
+    if antiFlingGuard.folder then
+        pcall(function() antiFlingGuard.folder:Destroy() end)
+    end
+    antiFlingGuard.pairs = {}
+    antiFlingGuard.folder = nil
+    antiFlingGuard.character, antiFlingGuard.root, antiFlingGuard.humanoid = nil, nil, nil
+    antiFlingGuard.safePivot = nil
+    antiFlingGuard.scanTime = -math.huge
+    antiFlingGuard.teleportUntil = 0
+end
+
+-- Accept a discrete relocation with ordinary velocity before restoring any
+-- held position. This is a teleport heuristic, not proof of server authority.
+-- Player contact remains blocked throughout the short landing grace period.
+local function acceptAntiFlingTeleport()
+    local guard = antiFlingGuard
+    local baseline = guard.idlePivot or guard.safePivot
+    if not baseline or not guard.character or not guard.root or guard.root.Anchored then return false end
+    local current = guard.character:GetPivot()
+    if (current.Position - baseline.Position).Magnitude < CONFIG.AntiFlingTeleportDistance then return false end
+    local velocity = guard.root.AssemblyLinearVelocity
+    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+    if horizontal.Magnitude > math.max(80, guard.humanoid.WalkSpeed * 2)
+        or math.abs(velocity.Y) > 100 or guard.root.AssemblyAngularVelocity.Magnitude > 80 then return false end
+    releaseAntiFlingHold(true)
+    guard.safePivot = current
+    guard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
+    return true
+end
+
+local function refreshAntiFlingPairs(character)
+    local guard = antiFlingGuard
+    if not guard.folder then
+        guard.folder = Instance.new("Folder")
+        guard.folder.Name = "ScriptMM2AntiFling"
+        guard.folder.Parent = character
+    end
+    local wanted, body = {}, {}
+    for _, part in ipairs(character:GetChildren()) do
+        if part:IsA("BasePart") and part.CanCollide then table.insert(body, part) end
+    end
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            for _, targetPart in ipairs(player.Character:GetChildren()) do
+                if targetPart:IsA("BasePart") and targetPart.CanCollide then
+                    for _, part in ipairs(body) do
+                        wanted[part] = wanted[part] or {}
+                        wanted[part][targetPart] = true
+                        guard.pairs[part] = guard.pairs[part] or {}
+                        local constraint = guard.pairs[part][targetPart]
+                        if not constraint or not constraint.Parent then
+                            constraint = Instance.new("NoCollisionConstraint")
+                            constraint.Name = "AntiFlingPlayerContact"
+                            constraint.Part0, constraint.Part1 = part, targetPart
+                            constraint.Enabled = true
+                            constraint.Parent = guard.folder
+                            guard.pairs[part][targetPart] = constraint
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for part, targets in pairs(guard.pairs) do
+        for targetPart, constraint in pairs(targets) do
+            if not wanted[part] or not wanted[part][targetPart] then
+                constraint:Destroy()
+                targets[targetPart] = nil
+            end
+        end
+        if not next(targets) then guard.pairs[part] = nil end
+    end
+end
+
+updateAntiFling = function()
+    if state.unloaded or not state.antiFling or teleportBusy or flingBusy or state.fly then
+        if antiFlingGuard.character then pauseAntiFling() end
+        return
+    end
+    local character, root, humanoid = getCharacter(), getRoot(), getHumanoid()
+    if not character or not root or not humanoid or humanoid.Health <= 0 or humanoid.Sit then
+        pauseAntiFling()
+        return
+    end
+    if antiFlingGuard.character ~= character or antiFlingGuard.root ~= root then
+        pauseAntiFling()
+        if root.Anchored then return end
+        antiFlingGuard.character, antiFlingGuard.root, antiFlingGuard.humanoid = character, root, humanoid
+        antiFlingGuard.safePivot = character:GetPivot()
+    end
+    if root.Anchored then
+        pauseAntiFling()
+        return
+    end
+    if os.clock() - antiFlingGuard.scanTime >= CONFIG.AntiFlingScanInterval then
+        refreshAntiFlingPairs(character)
+        antiFlingGuard.scanTime = os.clock()
+    end
+    acceptAntiFlingTeleport()
+    local movementState = humanoid:GetState()
+    local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
+    local idle = humanoid.MoveDirection.Magnitude <= 0.05
+    local canHold = idle and not humanoid.Jump and os.clock() >= antiFlingGuard.jumpUntil
+        and os.clock() >= antiFlingGuard.teleportUntil
+        and (antiFlingGuard.holding or (grounded and (movementState == Enum.HumanoidStateType.Running
+            or movementState == Enum.HumanoidStateType.RunningNoPhysics
+            or movementState == Enum.HumanoidStateType.Landed
+            or movementState == Enum.HumanoidStateType.GettingUp)))
+    if canHold then
+        if not antiFlingGuard.holding then
+            antiFlingGuard.idlePivot = character:GetPivot()
+            antiFlingGuard.holding = true
+        end
+        -- Keep the root unanchored so the game's normal movement/round
+        -- teleport path can move it. Hold only the ordinary idle simulation.
+        character:PivotTo(antiFlingGuard.idlePivot)
+        root.AssemblyLinearVelocity, root.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
+    else
+        releaseAntiFlingHold()
+    end
+end
+
+guardAntiFling = function()
+    local guard = antiFlingGuard
+    if not state.antiFling or state.unloaded or teleportBusy or flingBusy or state.fly
+        or not guard.character or LocalPlayer.Character ~= guard.character
+        or not guard.root.Parent or guard.humanoid.Health <= 0 then return end
+    if guard.root.Anchored or guard.humanoid.Sit then releaseAntiFlingHold(true); return end
+    if acceptAntiFlingTeleport() then return end
+    if guard.holding then
+        guard.character:PivotTo(guard.idlePivot)
+        guard.root.AssemblyLinearVelocity, guard.root.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
+        guard.safePivot = guard.idlePivot
+        return
+    end
+    local velocity = guard.root.AssemblyLinearVelocity
+    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+    local speedLimit = math.max(80, guard.humanoid.WalkSpeed * 2,
+        state.strafe and values.strafeSpeed * 1.5 or 0)
+    local jumpSpeed = guard.humanoid.UseJumpPower and guard.humanoid.JumpPower
+        or math.sqrt(2 * math.max(0, Workspace.Gravity) * guard.humanoid.JumpHeight)
+    if horizontal.Magnitude > speedLimit or velocity.Y > math.max(100, jumpSpeed * 2)
+        or guard.root.AssemblyAngularVelocity.Magnitude > 80 then
+        if guard.safePivot then guard.character:PivotTo(guard.safePivot) end
+        local movement = guard.humanoid.MoveDirection * guard.humanoid.WalkSpeed
+        guard.root.AssemblyLinearVelocity = Vector3.new(movement.X, math.min(velocity.Y, jumpSpeed), movement.Z)
+        guard.root.AssemblyAngularVelocity = state.spin and Vector3.new(0, 12, 0) or Vector3.zero
+    end
+    guard.safePivot = guard.character:GetPivot()
+end
+
 --// Air steering preserves vertical motion and existing momentum above the cap.
 local function calculateStrafeVelocity(velocity, moveDirection, maxSpeed, deltaTime)
     local wish = Vector3.new(moveDirection.X, 0, moveDirection.Z)
@@ -2506,7 +3063,29 @@ local function updateMovement(deltaTime)
     end
 
 end
-addConnection(RunService.PreSimulation:Connect(updateMovement))
+addConnection(RunService.PreSimulation:Connect(function(deltaTime)
+    local ok, err = pcall(updateAntiFling)
+    if not ok then
+        setAntiFlingToggle(false)
+        Status.Text = "AntiFling error: " .. tostring(err)
+    end
+    updateMovement(deltaTime)
+end))
+addConnection(RunService.PostSimulation:Connect(function()
+    local ok, err = pcall(guardAntiFling)
+    if not ok then
+        setAntiFlingToggle(false)
+        Status.Text = "AntiFling error: " .. tostring(err)
+    end
+end))
+
+-- Release an idle hold before the normal jump or Infinite Jump is processed.
+addConnection(UIS.JumpRequest:Connect(function()
+    if state.antiFling and not state.unloaded and windowFocused and not UIS:GetFocusedTextBox() then
+        pauseAntiFling()
+        antiFlingGuard.jumpUntil = os.clock() + 0.25
+    end
+end))
 
 --// Infinite jump
 addConnection(UIS.JumpRequest:Connect(function()
@@ -2532,6 +3111,7 @@ local function onCharacterAdded(character)
     stopMurdererFling()
     stopRegularSpin()
     stopFly()
+    pauseAntiFling()
 
     local humanoid = character:WaitForChild("Humanoid", 10)
     local root = character:WaitForChild("HumanoidRootPart", 10)
@@ -2561,6 +3141,10 @@ if LocalPlayer.Character then
 end
 
 --// Role refresh and ESP update
+addConnection(RunService.Heartbeat:Connect(function()
+    if state.silentAim and not state.unloaded then updateSilentAim() end
+end))
+
 local roleTimer = 0
 local roleRefreshPending = false
 addConnection(RunService.Heartbeat:Connect(function(deltaTime)
@@ -2574,7 +3158,7 @@ addConnection(RunService.Heartbeat:Connect(function(deltaTime)
     end
     roleTimer = 0
 
-    if (state.roleESP or state.innocentESP or state.aimLock or flingBusy) and not roleRefreshPending then
+    if (state.roleESP or state.innocentESP or state.aimLock or state.silentAim or flingBusy) and not roleRefreshPending then
         -- Network requests must not run inside the camera callback or overlap
         -- on every Heartbeat while a previous role request is still waiting.
         roleRefreshPending = true
@@ -2620,7 +3204,7 @@ addConnection(RunService.RenderStepped:Connect(function(deltaTime)
     end
 end))
 
---// Combat binds: X = Shoot Murderer, B = toggle AimLock
+--// Combat binds: X = Shoot Murderer, B = AimLock, G = pickup (Mouse4 via remap).
 addConnection(UIS.InputBegan:Connect(function(input, processed)
     if processed or state.unloaded or UIS:GetFocusedTextBox() then
         return
@@ -2628,6 +3212,8 @@ addConnection(UIS.InputBegan:Connect(function(input, processed)
 
     if input.KeyCode == CONFIG.AimLockKey then
         setAimLockToggle(not state.aimLock)
+    elseif input.KeyCode == CONFIG.RevolverPickupKey then
+        teleportToRevolver()
     elseif input.KeyCode == Enum.KeyCode.X and not IsMobile then
         shootMurderer()
     end
@@ -2701,6 +3287,9 @@ local function unload()
     setESPLinesToggle(false)
     setESPNamesToggle(false)
     setAimLockToggle(false)
+    setAntiFlingToggle(false)
+    setSilentAimToggle(false)
+    shutdownSilentAim()
 
     stopFly()
     restoreNoclip()
@@ -2767,6 +3356,8 @@ addConnection(resetButton.MouseButton1Click:Connect(function()
     setESPLinesToggle(false)
     setESPNamesToggle(true)
     setAimLockToggle(false)
+    setAntiFlingToggle(false)
+    setSilentAimToggle(false)
     restoreCameraFOV()
 
     values.walkSpeed = CONFIG.DefaultWalkSpeed
@@ -2797,7 +3388,7 @@ if IsMobile then
     reopen.Visible = false
 else
     Title.Text = "ScriptMM2 | PC  •  " .. VERSION
-    Status.Text = "F9 = hide/show • B = AimLock"
+    Status.Text = "F9 = menu • B = AimLock • G = grab"
     reopen.Visible = false
     MobileFlyControls.Visible = false
 end
@@ -2806,4 +3397,4 @@ end
 setCharacterMovement()
 refreshRoles()
 
-print("[ScriptMM2] " .. VERSION .. " loaded successfully. F9 = show/hide, B = AimLock Murderer.")
+print("[ScriptMM2] " .. VERSION .. " loaded successfully. F9 = show/hide, B = AimLock, G = Grab Revolver (Mouse4 via remap).")
