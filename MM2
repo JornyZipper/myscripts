@@ -1,7 +1,9 @@
 --// ScriptMM2
---// Client menu. Silent Aim requires executor hook APIs.
+--// UI and callback references are grouped to keep the root chunk below Luau register limits.
+--// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
 
-local VERSION = "V0.6.6"
+local VERSION = "V0.9.15"
+local UIRefs = {}
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -18,6 +20,12 @@ local CONFIG = {
     DefaultWalkSpeed = 16,
     DefaultJumpPower = 50,
     DefaultFlySpeed = 60,
+    CoinFarmSpeed = 18, -- default auto-collect travel speed
+    MinCoinFarmSpeed = 10,
+    MaxCoinFarmSpeed = 250,
+    CoinFarmReach = 1.65,
+    CoinFarmScanInterval = 0.65,
+    CoinFarmRetryDelay = 3.0,
     DefaultStrafeSpeed = 60,
     MinStrafeSpeed = 16,
     MaxStrafeSpeed = 250,
@@ -32,30 +40,40 @@ local CONFIG = {
     MinFOV = 70,
     MaxFOV = 120,
     DefaultFOV = 70,
-    UIKey = Enum.KeyCode.F9,
+    UIKey = Enum.KeyCode.G,
     AimLockKey = Enum.KeyCode.B,
-    -- Roblox exposes MouseButton1-3 only. Map Mouse4 to G in mouse software
-    -- or run the accompanying MM2_Mouse4_Revolver.ahk on Windows.
-    RevolverPickupKey = Enum.KeyCode.G,
+    -- Roblox does not expose side buttons directly. Map Mouse4/XButton1 to G.
+    -- Revolver pickup uses H to avoid a bind conflict.
+    RevolverPickupKey = Enum.KeyCode.H,
     RevolverPickupTimeout = 0.9,
-    FlingSpeed = 12000,
-    FlingContactSpeed = 240,
-    FlingLinearForce = 1e9,
-    FlingResponseSpeed = 80,
-    FlingResponseGrace = 1.5,
-    FlingSpinSpeed = 30000,
-    FlingSpinTorque = 1e10,
+    -- Local physics contact only: the server retains authority over other players.
+    -- Very large angular/linear velocities tunnel through collision geometry.
+    FlingSpeed = 440,
+    FlingContactSpeed = 110,
+    FlingLinearForce = 1e7,
+    FlingResponseSpeed = 32,
+    FlingResponseGrace = 2.0,
+    FlingSpinSpeed = 1900,
+    FlingInsideRealignInterval = 0.20,
+    FlingInsideMaxDrift = 2.4,
+    FlingInsideFollowSpeed = 90,
+    FlingSpinTorque = 1e8,
     FlingMapSearchRadius = 120,
     FlingMapMaxSpan = 2048,
     FlingExitMargin = 20,
     FlingRoofMargin = 12,
     FlingExitConfirmTime = 0.15,
+    FlingRoleWait = 3.0,
+    FlingTargetWait = 3.0,
+    FlingNoContactTimeout = 3.0,
+    FlingNoResponseTimeout = 7.0,
+    FlingRealignInterval = 0.55, -- legacy edge-mode setting (unused in Inside Fling)
+    -- A bounded final lunge on manual release; extreme velocities tunnel through bodies.
+    FlingReleaseSpeed = 390,
+    FlingReleaseTime = 0.16,
     AntiFlingScanInterval = 0.15,
     AntiFlingTeleportDistance = 12,
     AntiFlingTeleportGrace = 0.45,
-    SilentAimMaxRange = 1500,
-    SilentAimRoleMaxAge = 1.25,
-    SilentAimSampleMaxAge = 0.12,
 }
 
 local state = {
@@ -75,8 +93,20 @@ local state = {
     espLines = false,
     espNames = true,
     aimLock = false,
-    silentAim = false,
+    smoothAim = false,
+    xenoShotSnap = false, -- opt-in J key; camera briefly moves, NOT Silent Aim
+    silentGun = false, -- only operates with a supported __namecall hook
+    silentKnife = false,
+    aimVisibleOnly = true,
+    aimTeamCheck = true,
+    aimMurdererOnly = true,
+    aimHead = false,
     antiFling = false,
+    localGhost = false, -- visual-only; does not replicate to other players
+    hitRegistrationDiagnostic = false, -- read-only client position/LOS diagnostics
+    bringActive = false, -- local attempt only; server replication is not guaranteed
+    coinFarm = false,
+    spectateMurderer = false, -- compatibility flag: any spectator mode active
     minimized = false,
     uiVisible = true,
     unloaded = false,
@@ -86,14 +116,20 @@ local values = {
     walkSpeed = CONFIG.DefaultWalkSpeed,
     jumpPower = CONFIG.DefaultJumpPower,
     flySpeed = CONFIG.DefaultFlySpeed,
+    coinFarmSpeed = CONFIG.CoinFarmSpeed,
     strafeSpeed = CONFIG.DefaultStrafeSpeed,
     fov = CONFIG.DefaultFOV,
+    aimRadius = 115, -- screen pixels (not camera field of view)
+    aimSmooth = 9, -- higher = faster camera tracking
 }
 
 local connections = {}
 local characterConnections = {}
 local originalCollisions = {}
 local espObjects = {}
+local coinFarm = {targets = {}, skipped = setmetatable({}, {__mode="k"}), target = nil,
+    savedFly = false, savedNoclip = false, switching = false, lastScan = 0,
+    lastDistance = math.huge, progressAt = 0, lastTargetAt = 0}
 local flyObjects = {
     active = false,
     up = false,
@@ -109,11 +145,12 @@ local movementSnapshots = setmetatable({}, {__mode = "k"})
 local windowFocused = true
 local spinState = {}
 
-local setWalkSpeedSlider
-local setJumpPowerSlider
-local setFlySpeedSlider
-local setFOVSlider
-local setStrafeSpeedSlider
+UIRefs.setWalkSpeedSlider = nil
+UIRefs.setJumpPowerSlider = nil
+UIRefs.setFlySpeedSlider = nil
+UIRefs.setCoinFarmSpeedSlider = nil
+UIRefs.setFOVSlider = nil
+UIRefs.setStrafeSpeedSlider = nil
 
 local enableFullBright
 local disableFullBright
@@ -128,19 +165,13 @@ local Hero = ""
 local rolesAvailable = false
 local rolesUpdatedAt = -math.huge
 local updateAimLock
-local enableSilentAim
-local disableSilentAim
-local shutdownSilentAim
-local setSilentAimToggle
-local getSilentAimRemote
-local getSilentAimPosition
-local updateSilentAim
-local silentAimStatus
-local silentAimHook
+local updateSmoothAim
 local findRevolver
 local flingBusy = false
 local flingTrip = nil
-local stopMurdererFling
+local stopRoleFling
+local stopSpectateMurderer
+local toggleSpectateMurderer
 local pauseAntiFling
 local updateAntiFling
 local guardAntiFling
@@ -148,6 +179,106 @@ local roleAlive
 local shootMurdererBusy = false
 local finishMurdererShot
 local aimLockBindingName = "ScriptMM2AimLock_" .. tostring(LocalPlayer.UserId) .. "_" .. tostring(os.clock())
+local smoothAimBindingName = "ScriptMM2SmoothAim_" .. tostring(LocalPlayer.UserId) .. "_" .. tostring(os.clock())
+
+--// Experimental remote-argument Silent Aim based on the supplied readable MM2 script.
+--// Does not turn the camera, fire weapons automatically, or promise server acceptance.
+local Silent = {installed = false, old = nil, error = nil, rawMeta = nil, wrapper = nil}
+function Silent.target(name)
+    local player = name and Players:FindFirstChild(name)
+    local char = player and player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local part = char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso"))
+    if player ~= LocalPlayer and hum and hum.Health > 0 and part and part:IsA("BasePart") then
+        return part
+    end
+    return nil
+end
+function Silent.closest()
+    local mine = LocalPlayer.Character
+    local root = mine and mine:FindFirstChild("HumanoidRootPart")
+    if not root then return nil end
+    local best, distance = nil, math.huge
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local part = Silent.target(player.Name)
+            if part then
+                local d = (part.Position - root.Position).Magnitude
+                if d < distance then best, distance = part, d end
+            end
+        end
+    end
+    return best, distance
+end
+function Silent.redirect(object, method, args)
+    if state.unloaded then return end
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChildOfClass("Humanoid") then return end
+    -- Only modify an expected Vector3 aim coordinate. Unknown remote signatures pass untouched.
+    if typeof(args[2]) ~= "Vector3" then return end
+    if state.silentGun and method == "InvokeServer" and object:IsA("RemoteFunction") and object.Name == "ShootGun" then
+        local target = rolesAvailable and Murder ~= "" and Silent.target(Murder)
+        if target then
+            local velocity = target.AssemblyLinearVelocity
+            args[2] = target.Position + Vector3.new(velocity.X, 0, velocity.Z) / 40
+        end
+    elseif state.silentKnife and method == "FireServer" and object:IsA("RemoteEvent") and object.Name == "Throw" then
+        local target, distance = Silent.closest()
+        if target then
+            local velocity = target.AssemblyLinearVelocity
+            -- Short lead rather than the source's long 0.5*distance/100 lead;
+            -- projectile velocity is unverified, so this is only an experiment.
+            local lead = math.clamp(distance / 180, 0.035, 0.22)
+            args[2] = target.Position + Vector3.new(velocity.X, 0, velocity.Z) * lead
+        end
+    end
+end
+function Silent.install()
+    if Silent.installed then return true end
+    if type(getnamecallmethod) ~= "function" or type(newcclosure) ~= "function" then
+        return false, "Xeno: getnamecallmethod/newcclosure unavailable"
+    end
+    if type(hookmetamethod) == "function" then
+        local old
+        local wrapper = newcclosure(function(object, ...)
+            local args = {...}
+            if not (type(checkcaller) == "function" and checkcaller()) then
+                pcall(Silent.redirect, object, getnamecallmethod(), args)
+            end
+            return old(object, (table.unpack or unpack)(args))
+        end)
+        local ok, result = pcall(function() return hookmetamethod(game, "__namecall", wrapper) end)
+        if not ok or type(result) ~= "function" then return false, "hookmetamethod failed" end
+        old = result
+        Silent.wrapper, Silent.old, Silent.installed = wrapper, old, true
+        return true
+    end
+    if type(getrawmetatable) ~= "function" or type(setreadonly) ~= "function" then
+        return false, "Xeno: __namecall hook API unavailable"
+    end
+    local ok, result = pcall(function()
+        local meta = getrawmetatable(game)
+        local old = meta.__namecall
+        local wrapper = newcclosure(function(object, ...)
+            local args = {...}
+            if not (type(checkcaller) == "function" and checkcaller()) then
+                pcall(Silent.redirect, object, getnamecallmethod(), args)
+            end
+            return old(object, (table.unpack or unpack)(args))
+        end)
+        setreadonly(meta, false)
+        meta.__namecall = wrapper
+        setreadonly(meta, true)
+        Silent.rawMeta, Silent.wrapper, Silent.old = meta, wrapper, old
+    end)
+    if not ok then return false, "__namecall installation failed: " .. tostring(result) end
+    Silent.installed = true
+    return true
+end
+function Silent.stop()
+    state.silentGun, state.silentKnife = false, false
+    -- Leave hook inert. Restoring a shared metatable would risk overwriting another script's hook.
+end
 
 local function addConnection(connection, bucket)
     bucket = bucket or connections
@@ -185,6 +316,28 @@ local function getRoot()
         return nil
     end
     return character:FindFirstChild("HumanoidRootPart")
+end
+
+--// Visual-only ghost. LocalTransparencyModifier does NOT replicate to other clients.
+local ghostSaved = setmetatable({}, {__mode = "k"})
+local function restoreLocalGhost()
+    for part, original in pairs(ghostSaved) do
+        if part and part.Parent then
+            pcall(function() part.LocalTransparencyModifier = original end)
+        end
+        ghostSaved[part] = nil
+    end
+end
+local function applyLocalGhost(character)
+    if not state.localGhost or not character then return end
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            if ghostSaved[part] == nil then
+                ghostSaved[part] = part.LocalTransparencyModifier
+            end
+            part.LocalTransparencyModifier = 1
+        end
+    end
 end
 
 local function stopRegularSpin()
@@ -283,7 +436,7 @@ local function create(className, properties, parent)
 end
 
 --// GUI
-local ScriptMM2 = create("ScreenGui", {
+UIRefs.ScriptMM2 = create("ScreenGui", {
     Name = "ModMenuFromZero",
     ResetOnSpawn = false,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -292,39 +445,39 @@ local ScriptMM2 = create("ScreenGui", {
 
 local Scale = create("UIScale", {
     Scale = 1,
-}, ScriptMM2)
+}, UIRefs.ScriptMM2)
 
-local Main = create("Frame", {
+UIRefs.Main = create("Frame", {
     Name = "Main",
     AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5),
     Size = UDim2.fromOffset(470, 570),
     BackgroundColor3 = Color3.fromRGB(22, 22, 27),
     BorderSizePixel = 0,
-}, ScriptMM2)
+}, UIRefs.ScriptMM2)
 
 create("UICorner", {
     CornerRadius = UDim.new(0, 12),
-}, Main)
+}, UIRefs.Main)
 
 create("UIStroke", {
     Color = Color3.fromRGB(70, 70, 80),
     Thickness = 1,
     Transparency = 0.2,
-}, Main)
+}, UIRefs.Main)
 
-local TopBar = create("Frame", {
+UIRefs.TopBar = create("Frame", {
     Name = "TopBar",
     Size = UDim2.new(1, 0, 0, 52),
     BackgroundColor3 = Color3.fromRGB(28, 28, 34),
     BorderSizePixel = 0,
-}, Main)
+}, UIRefs.Main)
 
 create("UICorner", {
     CornerRadius = UDim.new(0, 12),
-}, TopBar)
+}, UIRefs.TopBar)
 
-local Title = create("TextLabel", {
+UIRefs.Title = create("TextLabel", {
     Name = "Title",
     BackgroundTransparency = 1,
     Position = UDim2.fromOffset(16, 7),
@@ -334,21 +487,21 @@ local Title = create("TextLabel", {
     TextColor3 = Color3.fromRGB(240, 240, 245),
     TextSize = 18,
     TextXAlignment = Enum.TextXAlignment.Left,
-}, TopBar)
+}, UIRefs.TopBar)
 
-local Status = create("TextLabel", {
+UIRefs.Status = create("TextLabel", {
     Name = "Status",
     BackgroundTransparency = 1,
     Position = UDim2.fromOffset(17, 30),
     Size = UDim2.new(1, -120, 0, 16),
     Font = Enum.Font.Gotham,
-    Text = "F9 = hide/show • B = AimLock",
+    Text = "Mouse4 (G) = hide/show • B = AimLock",
     TextColor3 = Color3.fromRGB(145, 145, 155),
     TextSize = 11,
     TextXAlignment = Enum.TextXAlignment.Left,
-}, TopBar)
+}, UIRefs.TopBar)
 
-local Minimize = create("TextButton", {
+UIRefs.Minimize = create("TextButton", {
     Name = "Minimize",
     Position = UDim2.new(1, -76, 0, 9),
     Size = UDim2.fromOffset(30, 30),
@@ -359,13 +512,13 @@ local Minimize = create("TextButton", {
     TextColor3 = Color3.fromRGB(230, 230, 235),
     TextSize = 17,
     AutoButtonColor = false,
-}, TopBar)
+}, UIRefs.TopBar)
 
 create("UICorner", {
     CornerRadius = UDim.new(0, 7),
-}, Minimize)
+}, UIRefs.Minimize)
 
-local Close = create("TextButton", {
+UIRefs.Close = create("TextButton", {
     Name = "Close",
     Position = UDim2.new(1, -40, 0, 9),
     Size = UDim2.fromOffset(30, 30),
@@ -376,13 +529,13 @@ local Close = create("TextButton", {
     TextColor3 = Color3.fromRGB(255, 235, 235),
     TextSize = 14,
     AutoButtonColor = false,
-}, TopBar)
+}, UIRefs.TopBar)
 
 create("UICorner", {
     CornerRadius = UDim.new(0, 7),
-}, Close)
+}, UIRefs.Close)
 
-local Content = create("ScrollingFrame", {
+UIRefs.Content = create("ScrollingFrame", {
     Name = "Content",
     Position = UDim2.fromOffset(10, 62),
     Size = UDim2.new(1, -20, 1, -72),
@@ -392,21 +545,73 @@ local Content = create("ScrollingFrame", {
     ScrollBarImageTransparency = 0.35,
     AutomaticCanvasSize = Enum.AutomaticSize.Y,
     CanvasSize = UDim2.new(0, 0, 0, 0),
-}, Main)
+}, UIRefs.Main)
 
-local Layout = create("UIListLayout", {
+--// Two genuine pages, each with its own scrolling content.
+do
+    UIRefs.Content.Position = UDim2.fromOffset(10, 100)
+    UIRefs.Content.Size = UDim2.new(1, -20, 1, -110)
+    UIRefs.TabBar = create("Frame", {
+        Name = "TabBar", Position = UDim2.fromOffset(10, 58),
+        Size = UDim2.new(1, -20, 0, 36), BackgroundTransparency = 1,
+    }, UIRefs.Main)
+    UIRefs.mainTabButton = create("TextButton", {
+        Name = "MainTab", Position = UDim2.fromScale(0, 0),
+        Size = UDim2.new(0.5, -3, 1, 0), Text = "MAIN", LayoutOrder = 1,
+        Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
+        AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(38, 115, 72),
+        TextColor3 = Color3.fromRGB(240, 255, 245),
+    }, UIRefs.TabBar)
+    UIRefs.spectateTabButton = create("TextButton", {
+        Name = "SpectateTab", Position = UDim2.new(0.5, 3, 0, 0),
+        Size = UDim2.new(0.5, -3, 1, 0), Text = "SPECTATE", LayoutOrder = 2,
+        Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
+        AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+        TextColor3 = Color3.fromRGB(220, 220, 225),
+    }, UIRefs.TabBar)
+    create("UICorner", { CornerRadius = UDim.new(0, 7) }, UIRefs.mainTabButton)
+    create("UICorner", { CornerRadius = UDim.new(0, 7) }, UIRefs.spectateTabButton)
+    UIRefs.SpectateContent = create("ScrollingFrame", {
+        Name = "SpectateContent", Position = UDim2.fromOffset(10, 100),
+        Size = UDim2.new(1, -20, 1, -110), Visible = false,
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        ScrollBarThickness = 4, ScrollBarImageTransparency = 0.35,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+    }, UIRefs.Main)
+    create("UIListLayout", {
+        Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, UIRefs.SpectateContent)
+    create("UIPadding", {
+        PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5),
+        PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 6),
+    }, UIRefs.SpectateContent)
+    UIRefs.setPage = function(page)
+        if state.unloaded then return end
+        local showSpectate = page == "spectate"
+        UIRefs.Content.Visible = not showSpectate
+        UIRefs.SpectateContent.Visible = showSpectate
+        setButtonVisual(UIRefs.mainTabButton, not showSpectate)
+        setButtonVisual(UIRefs.spectateTabButton, showSpectate)
+        if showSpectate and UIRefs.rebuildSpectatorList then UIRefs.rebuildSpectatorList() end
+    end
+    addConnection(UIRefs.mainTabButton.MouseButton1Click:Connect(function() UIRefs.setPage("main") end))
+    addConnection(UIRefs.spectateTabButton.MouseButton1Click:Connect(function() UIRefs.setPage("spectate") end))
+end
+
+UIRefs.Layout = create("UIListLayout", {
     Padding = UDim.new(0, 7),
     SortOrder = Enum.SortOrder.LayoutOrder,
-}, Content)
+}, UIRefs.Content)
 
 local Padding = create("UIPadding", {
     PaddingLeft = UDim.new(0, 5),
     PaddingRight = UDim.new(0, 5),
     PaddingTop = UDim.new(0, 2),
     PaddingBottom = UDim.new(0, 6),
-}, Content)
+}, UIRefs.Content)
 
-local reopen = create("TextButton", {
+UIRefs.reopen = create("TextButton", {
     Name = "Reopen",
     AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5),
@@ -420,22 +625,22 @@ local reopen = create("TextButton", {
     Visible = false,
     Active = true,
     AutoButtonColor = false,
-}, ScriptMM2)
+}, UIRefs.ScriptMM2)
 
 create("UICorner", {
     CornerRadius = UDim.new(0, 10),
-}, reopen)
+}, UIRefs.reopen)
 
-local MobileFlyControls = create("Frame", {
+UIRefs.MobileFlyControls = create("Frame", {
     Name = "MobileFlyControls",
     AnchorPoint = Vector2.new(1, 1),
     Position = UDim2.new(1, -20, 1, -25),
     Size = UDim2.fromOffset(62, 132),
     BackgroundTransparency = 1,
     Visible = false,
-}, ScriptMM2)
+}, UIRefs.ScriptMM2)
 
-local FlyUpButton = create("TextButton", {
+UIRefs.FlyUpButton = create("TextButton", {
     Name = "FlyUp",
     Position = UDim2.fromOffset(0, 0),
     Size = UDim2.fromOffset(62, 58),
@@ -447,11 +652,11 @@ local FlyUpButton = create("TextButton", {
     TextColor3 = Color3.fromRGB(240, 255, 245),
     TextSize = 22,
     AutoButtonColor = false,
-}, MobileFlyControls)
+}, UIRefs.MobileFlyControls)
 
-create("UICorner", {CornerRadius = UDim.new(0, 12)}, FlyUpButton)
+create("UICorner", {CornerRadius = UDim.new(0, 12)}, UIRefs.FlyUpButton)
 
-local FlyDownButton = create("TextButton", {
+UIRefs.FlyDownButton = create("TextButton", {
     Name = "FlyDown",
     Position = UDim2.fromOffset(0, 68),
     Size = UDim2.fromOffset(62, 58),
@@ -463,17 +668,17 @@ local FlyDownButton = create("TextButton", {
     TextColor3 = Color3.fromRGB(240, 240, 245),
     TextSize = 22,
     AutoButtonColor = false,
-}, MobileFlyControls)
+}, UIRefs.MobileFlyControls)
 
-create("UICorner", {CornerRadius = UDim.new(0, 12)}, FlyDownButton)
+create("UICorner", {CornerRadius = UDim.new(0, 12)}, UIRefs.FlyDownButton)
 
-local dragHandle = create("Frame", {
+UIRefs.dragHandle = create("Frame", {
     Name = "DragHandle",
     Position = UDim2.fromOffset(0, 0),
     Size = UDim2.new(1, -116, 0, 52),
     BackgroundTransparency = 1,
     Active = true,
-}, TopBar)
+}, UIRefs.TopBar)
 
 local function addSection(text, order)
     return create("TextLabel", {
@@ -485,7 +690,7 @@ local function addSection(text, order)
         TextSize = 12,
         TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = order,
-    }, Content)
+    }, UIRefs.Content)
 end
 
 local function addToggle(name, order, callback)
@@ -500,7 +705,7 @@ local function addToggle(name, order, callback)
         TextSize = 13,
         AutoButtonColor = false,
         LayoutOrder = order,
-    }, Content)
+    }, UIRefs.Content)
 
     create("UICorner", {
         CornerRadius = UDim.new(0, 8),
@@ -528,7 +733,7 @@ local function addSlider(name, minValue, maxValue, defaultValue, order, callback
         BackgroundColor3 = Color3.fromRGB(31, 31, 37),
         BorderSizePixel = 0,
         LayoutOrder = order,
-    }, Content)
+    }, UIRefs.Content)
 
     create("UICorner", {
         CornerRadius = UDim.new(0, 8),
@@ -621,23 +826,26 @@ end
 
 addSection("MOVEMENT", 1)
 
-local speedButton
-local setSpeedToggle
-speedButton, setSpeedToggle = addToggle("Speed", 2, function(enabled)
+UIRefs.speedButton = nil
+UIRefs.setSpeedToggle = nil
+UIRefs.speedButton, UIRefs.setSpeedToggle = addToggle("Speed", 2, function(enabled)
     state.speed = enabled
     applyMovementSettings(getHumanoid())
 end)
 
-local jumpButton
-local setJumpToggle
-jumpButton, setJumpToggle = addToggle("JumpPower", 3, function(enabled)
+UIRefs.jumpButton = nil
+UIRefs.setJumpToggle = nil
+UIRefs.jumpButton, UIRefs.setJumpToggle = addToggle("JumpPower", 3, function(enabled)
     state.jump = enabled
     applyMovementSettings(getHumanoid())
 end)
 
-local noclipButton
-local setNoclipToggle
-noclipButton, setNoclipToggle = addToggle("Noclip", 4, function(enabled)
+UIRefs.noclipButton = nil
+UIRefs.setNoclipToggle = nil
+UIRefs.noclipButton, UIRefs.setNoclipToggle = addToggle("Noclip", 4, function(enabled)
+    if state.coinFarm and not enabled and not coinFarm.switching and UIRefs.setCoinFarmToggle then
+        UIRefs.setCoinFarmToggle(false)
+    end
     state.noclip = enabled
 
     if enabled then
@@ -647,60 +855,65 @@ noclipButton, setNoclipToggle = addToggle("Noclip", 4, function(enabled)
     end
 end)
 
-local flyButton
-local setFlyToggle
-flyButton, setFlyToggle = addToggle("Fly", 5, function(enabled)
+UIRefs.flyButton = nil
+UIRefs.setFlyToggle = nil
+UIRefs.flyButton, UIRefs.setFlyToggle = addToggle("Fly", 5, function(enabled)
+    if state.coinFarm and not enabled and not coinFarm.switching and UIRefs.setCoinFarmToggle then
+        UIRefs.setCoinFarmToggle(false)
+    end
     state.fly = enabled
-    MobileFlyControls.Visible = IsMobile and enabled
+    UIRefs.MobileFlyControls.Visible = IsMobile and enabled
 end)
 
-local infiniteButton
-local setInfiniteToggle
-infiniteButton, setInfiniteToggle = addToggle("Infinite Jump", 6, function(enabled)
+UIRefs.infiniteButton = nil
+UIRefs.setInfiniteToggle = nil
+UIRefs.infiniteButton, UIRefs.setInfiniteToggle = addToggle("Infinite Jump", 6, function(enabled)
     state.infiniteJump = enabled
 end)
 
-local bunnyButton
-local setBunnyToggle
-bunnyButton, setBunnyToggle = addToggle("Bunny Hop", 7, function(enabled)
+UIRefs.bunnyButton = nil
+UIRefs.setBunnyToggle = nil
+UIRefs.bunnyButton, UIRefs.setBunnyToggle = addToggle("Bunny Hop", 7, function(enabled)
     state.bunnyHop = enabled
 end)
 
-local strafeButton
-local setStrafeToggle
-strafeButton, setStrafeToggle = addToggle("Air Strafe", 8, function(enabled)
+UIRefs.strafeButton = nil
+UIRefs.setStrafeToggle = nil
+UIRefs.strafeButton, UIRefs.setStrafeToggle = addToggle("Air Strafe", 8, function(enabled)
     state.strafe = enabled
 end)
 
-local _, setWalkSpeedSliderValue = addSlider("WalkSpeed", CONFIG.MinWalkSpeed, CONFIG.MaxWalkSpeed, values.walkSpeed, 9, function(value)
+UIRefs._unused, UIRefs.setWalkSpeedSliderValue = addSlider("WalkSpeed", CONFIG.MinWalkSpeed, CONFIG.MaxWalkSpeed, values.walkSpeed, 9, function(value)
     values.walkSpeed = value
     applyMovementSettings(getHumanoid())
 end)
-setWalkSpeedSlider = setWalkSpeedSliderValue
+UIRefs.setWalkSpeedSlider = UIRefs.setWalkSpeedSliderValue
 
-local _, setJumpPowerSliderValue = addSlider("JumpPower", CONFIG.MinJumpPower, CONFIG.MaxJumpPower, values.jumpPower, 10, function(value)
+UIRefs._unused, UIRefs.setJumpPowerSliderValue = addSlider("JumpPower", CONFIG.MinJumpPower, CONFIG.MaxJumpPower, values.jumpPower, 10, function(value)
     values.jumpPower = value
     applyMovementSettings(getHumanoid())
 end)
-setJumpPowerSlider = setJumpPowerSliderValue
+UIRefs.setJumpPowerSlider = UIRefs.setJumpPowerSliderValue
 
-local _, setFlySpeedSliderValue = addSlider("FlySpeed", CONFIG.MinFlySpeed, CONFIG.MaxFlySpeed, values.flySpeed, 11, function(value)
+UIRefs._unused, UIRefs.setFlySpeedSliderValue = addSlider("FlySpeed", CONFIG.MinFlySpeed, CONFIG.MaxFlySpeed, values.flySpeed, 11, function(value)
     values.flySpeed = value
 end)
-setFlySpeedSlider = setFlySpeedSliderValue
+UIRefs.setFlySpeedSlider = UIRefs.setFlySpeedSliderValue
 
-local _, setStrafeSpeedSliderValue = addSlider("StrafeSpeed", CONFIG.MinStrafeSpeed, CONFIG.MaxStrafeSpeed, values.strafeSpeed, 12, function(value)
+UIRefs._unused, UIRefs.setStrafeSpeedSliderValue = addSlider("StrafeSpeed", CONFIG.MinStrafeSpeed, CONFIG.MaxStrafeSpeed, values.strafeSpeed, 12, function(value)
     values.strafeSpeed = value
 end)
-setStrafeSpeedSlider = setStrafeSpeedSliderValue
+UIRefs.setStrafeSpeedSlider = UIRefs.setStrafeSpeedSliderValue
 
 addSection("COMBAT", 13)
 
-local aimLockButton
-local setAimLockToggle
-aimLockButton, setAimLockToggle = addToggle("AimLock Murderer [B]", 14, function(enabled)
-    if enabled and state.silentAim and setSilentAimToggle then setSilentAimToggle(false) end
+UIRefs.aimLockButton = nil
+UIRefs.setAimLockToggle = nil
+UIRefs.aimLockButton, UIRefs.setAimLockToggle = addToggle("AimLock Murderer [B]", 14, function(enabled)
     state.aimLock = enabled
+    if enabled and state.smoothAim and UIRefs.setSmoothAimToggle then
+        UIRefs.setSmoothAimToggle(false)
+    end
     RunService:UnbindFromRenderStep(aimLockBindingName)
 
     if enabled and updateAimLock and not state.unloaded then
@@ -711,69 +924,372 @@ aimLockButton, setAimLockToggle = addToggle("AimLock Murderer [B]", 14, function
     end
 
     if not state.unloaded then
-        Status.Text = enabled and "AimLock: ON • B = OFF" or "AimLock: OFF • B = ON"
+        UIRefs.Status.Text = enabled and "AimLock: ON • B = OFF" or "AimLock: OFF • B = ON"
     end
 end)
 
-local flingMurdererButton = create("TextButton", {
+--// V0.9.11: camera-only smooth aim. No __namecall/hook API required.
+UIRefs.setSmoothAimToggle = nil
+UIRefs._unused, UIRefs.setSmoothAimToggle = addToggle("Smooth Aim (camera only)", 14.10, function(enabled)
+    state.smoothAim = enabled
+    RunService:UnbindFromRenderStep(smoothAimBindingName)
+    if not enabled and UIRefs.AimCircle then UIRefs.AimCircle.Visible = false end
+    if enabled and state.aimLock and UIRefs.setAimLockToggle then
+        UIRefs.setAimLockToggle(false)
+    end
+    if enabled and not state.unloaded then
+        RunService:BindToRenderStep(smoothAimBindingName, Enum.RenderPriority.Camera.Value + 2, updateSmoothAim)
+    end
+    if not state.unloaded then
+        UIRefs.Status.Text = enabled and "Smooth Aim: camera assistance ON (not Silent Aim)" or "Smooth Aim: OFF"
+    end
+end)
+
+--// V0.9.12: genuine attempt to redirect weapon arguments, NEVER camera movement.
+UIRefs.setSilentGunToggle = nil
+UIRefs._unused, UIRefs.setSilentGunToggle = addToggle("Silent Revolver (experimental)", 14.101, function(enabled)
+    if enabled then
+        local ok, why = Silent.install()
+        state.silentGun = ok
+        if not ok then UIRefs.setSilentGunToggle(false); UIRefs.Status.Text = "Silent Revolver OFF: " .. tostring(why); return end
+    else state.silentGun = false end
+    UIRefs.Status.Text = state.silentGun and "Silent Revolver armed • server hit unverified" or "Silent Revolver OFF"
+end)
+UIRefs.setSilentKnifeToggle = nil
+UIRefs._unused, UIRefs.setSilentKnifeToggle = addToggle("Silent Knife Throw (short lead)", 14.102, function(enabled)
+    if enabled then
+        local ok, why = Silent.install()
+        state.silentKnife = ok
+        if not ok then UIRefs.setSilentKnifeToggle(false); UIRefs.Status.Text = "Silent Knife OFF: " .. tostring(why); return end
+    else state.silentKnife = false end
+    UIRefs.Status.Text = state.silentKnife and "Silent Knife armed • no auto throw • server unverified" or "Silent Knife OFF"
+end)
+
+--// V0.9.14: hook-free fallback inspired by the submitted Prestige Xeno V4.
+--// The source's mouse.Button1Down assignment is invalid (RBXScriptSignal).
+--// Reuse the existing guarded X shot instead of adding a second weapon activation
+--// to the normal Mouse1 handler (which could double-fire).
+UIRefs.setXenoShotSnapToggle = nil
+UIRefs._unused, UIRefs.setXenoShotSnapToggle = addToggle("Xeno Shot Snap [J] (camera moves)", 14.105, function(enabled)
+    state.xenoShotSnap = enabled
+    if enabled and UIRefs.setSmoothAimToggle and state.smoothAim then UIRefs.setSmoothAimToggle(false) end
+    if enabled and UIRefs.setAimLockToggle and state.aimLock then UIRefs.setAimLockToggle(false) end
+    if not state.unloaded then
+        UIRefs.Status.Text = enabled and "Xeno Snap: ON • J = quick camera shot • NOT Silent Aim" or "Xeno Snap: OFF"
+    end
+end)
+
+UIRefs._unused, UIRefs.setAimRadius = addSlider("Aim circle radius (px)", 35, 350, values.aimRadius, 14.11, function(v)
+    values.aimRadius = v
+end)
+UIRefs._unused, UIRefs.setAimSmooth = addSlider("Aim tracking speed", 2, 30, values.aimSmooth, 14.12, function(v)
+    values.aimSmooth = v
+end)
+UIRefs._unused, UIRefs.setAimVisibleToggle = addToggle("Aim visibility check", 14.13, function(v)
+    state.aimVisibleOnly = v
+end)
+UIRefs._unused, UIRefs.setAimTeamToggle = addToggle("Aim team check", 14.14, function(v)
+    state.aimTeamCheck = v
+end)
+UIRefs._unused, UIRefs.setAimMurdererToggle = addToggle("Aim Murderer only (MM2)", 14.15, function(v)
+    state.aimMurdererOnly = v
+end)
+UIRefs._unused, UIRefs.setAimHeadToggle = addToggle("Aim at Head (OFF = body)", 14.16, function(v)
+    state.aimHead = v
+end)
+-- Set defaults after controls exist, without altering the callback contract.
+UIRefs.setAimVisibleToggle(true)
+UIRefs.setAimTeamToggle(true)
+UIRefs.setAimMurdererToggle(true)
+
+-- Separate overlay is not scaled with the menu's UIScale.
+UIRefs.AimCircleGui = create("ScreenGui", {
+    Name = "ScriptMM2AimOverlay", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 998, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, PlayerGui)
+UIRefs.AimCircle = create("Frame", {
+    Name = "AimFOV", AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(values.aimRadius * 2, values.aimRadius * 2),
+    BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
+}, UIRefs.AimCircleGui)
+create("UICorner", {CornerRadius = UDim.new(1, 0)}, UIRefs.AimCircle)
+create("UIStroke", {Thickness = 1, Transparency = 0.25, Color = Color3.fromRGB(70, 220, 130)}, UIRefs.AimCircle)
+
+UIRefs.flingMurdererButton = create("TextButton", {
     Name = "FlingMurderer",
     Size = UDim2.new(1, -4, 0, 38),
     BackgroundColor3 = Color3.fromRGB(95, 44, 48),
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
-    Text = "Fling Murderer",
+    Text = "Inside Fling Murderer",
     TextColor3 = Color3.fromRGB(255, 235, 235),
     TextSize = 13,
     AutoButtonColor = false,
     LayoutOrder = 15,
-}, Content)
-create("UICorner", {CornerRadius = UDim.new(0, 8)}, flingMurdererButton)
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.flingMurdererButton)
 
-local antiFlingButton
-local setAntiFlingToggle
-antiFlingButton, setAntiFlingToggle = addToggle("AntiFling", 16, function(enabled)
+UIRefs.flingSheriffButton = create("TextButton", {
+    Name = "FlingSheriff",
+    Size = UDim2.new(1, -4, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(42, 66, 100),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamSemibold,
+    Text = "Inside Fling Sheriff",
+    TextColor3 = Color3.fromRGB(235, 240, 255),
+    TextSize = 13,
+    AutoButtonColor = false,
+    LayoutOrder = 15.1,
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.flingSheriffButton)
+
+UIRefs.stopFlingButton = create("TextButton", {
+    Name = "StopFling",
+    Size = UDim2.new(1, -4, 0, 36),
+    BackgroundColor3 = Color3.fromRGB(53, 53, 58),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamSemibold,
+    Text = "Release Fling / Return",
+    TextColor3 = Color3.fromRGB(235, 235, 235),
+    TextSize = 13,
+    AutoButtonColor = false,
+    LayoutOrder = 15.2,
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.stopFlingButton)
+
+--// Spectate page: role shortcuts + selectable list of all other players.
+do
+    local function spectateButton(name, label, order)
+        local button = create("TextButton", {
+            Name = name, Size = UDim2.new(1, -4, 0, 38),
+            BackgroundColor3 = Color3.fromRGB(37, 37, 43), BorderSizePixel = 0,
+            Font = Enum.Font.GothamSemibold, Text = label, TextSize = 13,
+            TextColor3 = Color3.fromRGB(220, 220, 225), AutoButtonColor = false,
+            LayoutOrder = order,
+        }, UIRefs.SpectateContent)
+        create("UICorner", { CornerRadius = UDim.new(0, 8) }, button)
+        return button
+    end
+    create("TextLabel", {
+        Name = "SpectateTitle", Size = UDim2.new(1, -4, 0, 25),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = "WATCH A ROLE", TextColor3 = Color3.fromRGB(165, 165, 175),
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = 1,
+    }, UIRefs.SpectateContent)
+    UIRefs.spectateMurdererButton = spectateButton("SpectateMurderer", "Spectate Murderer [OFF]", 2)
+    UIRefs.spectateSheriffButton = spectateButton("SpectateSheriff", "Spectate Sheriff [OFF]", 3)
+    UIRefs.spectateReturnButton = spectateButton("SpectateReturn", "Return to My Camera", 4)
+    UIRefs.spectateStatus = create("TextLabel", {
+        Name = "SpectateStatus", Size = UDim2.new(1, -4, 0, 42),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+        Text = "Select Murderer, Sheriff, or a player below.",
+        TextColor3 = Color3.fromRGB(180, 185, 195), TextSize = 12,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = 5,
+    }, UIRefs.SpectateContent)
+    create("TextLabel", {
+        Name = "SpectateListTitle", Size = UDim2.new(1, -4, 0, 25),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = "PLAYERS (CLICK TO WATCH)", TextColor3 = Color3.fromRGB(165, 165, 175),
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = 6,
+    }, UIRefs.SpectateContent)
+    UIRefs.spectatePlayerList = create("Frame", {
+        Name = "SpectatePlayerList", Size = UDim2.new(1, -4, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+        LayoutOrder = 7,
+    }, UIRefs.SpectateContent)
+    create("UIListLayout", {
+        Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, UIRefs.spectatePlayerList)
+    create("TextLabel", {
+        Name = "TeleportListTitle", Size = UDim2.new(1, -4, 0, 25),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = "TELEPORT TO PLAYER", TextColor3 = Color3.fromRGB(165, 165, 175),
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = 8,
+    }, UIRefs.SpectateContent)
+    UIRefs.teleportPlayerList = create("Frame", {
+        Name = "TeleportPlayerList", Size = UDim2.new(1, -4, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+        LayoutOrder = 9,
+    }, UIRefs.SpectateContent)
+    create("UIListLayout", {
+        Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, UIRefs.teleportPlayerList)
+    create("TextLabel", {
+        Name = "BringTitle", Size = UDim2.new(1, -4, 0, 25),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = "BRING (LOCAL / SERVER UNVERIFIED)",
+        TextColor3 = Color3.fromRGB(165, 165, 175), TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 10,
+    }, UIRefs.SpectateContent)
+    UIRefs.bringAllButton = spectateButton("BringAll", "Bring All [OFF]", 11)
+    UIRefs.stopBringButton = spectateButton("StopBring", "Stop Bring / Restore Collision", 12)
+    UIRefs.bringStatus = create("TextLabel", {
+        Name = "BringStatus", Size = UDim2.new(1, -4, 0, 45),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+        Text = "Client-side positioning only. No confirmed server teleport or hit registration.",
+        TextColor3 = Color3.fromRGB(180, 185, 195), TextSize = 12,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 13,
+    }, UIRefs.SpectateContent)
+    UIRefs.bringPlayerList = create("Frame", {
+        Name = "BringPlayerList", Size = UDim2.new(1, -4, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+        LayoutOrder = 14,
+    }, UIRefs.SpectateContent)
+    create("UIListLayout", {
+        Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, UIRefs.bringPlayerList)
+    create("TextLabel", {
+        Name = "TargetAttackTitle", Size = UDim2.new(1, -4, 0, 25),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = "TARGET ATTACK (NORMAL WEAPON / SERVER CHECKS)",
+        TextColor3 = Color3.fromRGB(165, 165, 175), TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 15,
+    }, UIRefs.SpectateContent)
+    UIRefs.attackStatus = create("TextLabel", {
+        Name = "TargetAttackStatus", Size = UDim2.new(1, -4, 0, 45),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+        Text = "Select a player. No arbitrary instant kill or server bypass.",
+        TextColor3 = Color3.fromRGB(180, 185, 195), TextSize = 12,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 16,
+    }, UIRefs.SpectateContent)
+    UIRefs.attackButton = spectateButton("AttackSelected", "Attack Selected [K]", 17)
+    UIRefs.attackPlayerList = create("Frame", {
+        Name = "AttackPlayerList", Size = UDim2.new(1, -4, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+        LayoutOrder = 18,
+    }, UIRefs.SpectateContent)
+    create("UIListLayout", {
+        Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, UIRefs.attackPlayerList)
+end
+
+UIRefs.antiFlingButton = nil
+UIRefs.setAntiFlingToggle = nil
+UIRefs.antiFlingButton, UIRefs.setAntiFlingToggle = addToggle("AntiFling", 16, function(enabled)
     state.antiFling = enabled
     if not enabled and pauseAntiFling then pauseAntiFling() end
 end)
 
-local silentAimButton
-silentAimButton, setSilentAimToggle = addToggle("Silent Aim Murderer", 17, function(enabled)
-    if enabled then
-        local ok, reason = enableSilentAim()
-        if not ok then
-            setSilentAimToggle(false)
-            Status.Text = "Silent Aim: " .. tostring(reason)
-            if silentAimStatus then silentAimStatus.Text = Status.Text end
-            return
-        end
-        setAimLockToggle(false)
-        Status.Text = "Silent Aim: ON • equip revolver and shoot"
-    else
-        if disableSilentAim then disableSilentAim() end
-        if not state.unloaded then Status.Text = "Silent Aim: OFF" end
+--// Client-only effect. Presence of a remote named Stealth does not establish
+--// that the server allows arbitrary invisibility or reveal its arguments.
+local function ghostServerStatus()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local gameplay = remotes and remotes:FindFirstChild("Gameplay")
+    local stealth = gameplay and gameplay:FindFirstChild("Stealth")
+    if stealth and stealth:IsA("RemoteEvent") then
+        return "Server: UNVERIFIED (Stealth event exists; no request sent)"
     end
-end)
+    return "Server: UNAVAILABLE (no verified invisibility interface)"
+end
 
-silentAimStatus = create("TextLabel", {
-    Name = "SilentAimStatus",
-    Size = UDim2.new(1, -4, 0, 66),
-    AutomaticSize = Enum.AutomaticSize.Y,
+UIRefs.localGhostButton, UIRefs.setLocalGhostToggle = addToggle("Invisible (local view)", 16.5, function(enabled)
+    state.localGhost = enabled
+    if enabled then applyLocalGhost(getCharacter()) else restoreLocalGhost() end
+    if UIRefs.ghostServerLabel then UIRefs.ghostServerLabel.Text = ghostServerStatus() end
+    UIRefs.Status.Text = enabled
+        and "Invisible LOCAL: ON. Other players may still see you. " .. ghostServerStatus()
+        or "Invisible LOCAL: OFF. " .. ghostServerStatus()
+end)
+UIRefs.ghostServerLabel = create("TextLabel", {
+    Name = "GhostServerStatus",
+    Size = UDim2.new(1, -4, 0, 35),
     BackgroundTransparency = 1,
     Font = Enum.Font.Gotham,
-    Text = "Silent Aim: OFF",
+    Text = ghostServerStatus(),
     TextColor3 = Color3.fromRGB(180, 185, 195),
-    TextSize = 12,
+    TextSize = 11,
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Top,
-    LayoutOrder = 18,
-}, Content)
+    TextYAlignment = Enum.TextYAlignment.Center,
+    LayoutOrder = 16.6,
+}, UIRefs.Content)
+
+--// Read-only hit-position diagnostic. Uses replicated actual character roots.
+--// Never invokes remotes or applies damage.
+do
+    local diag = {elapsed = 0}
+    local function updateHitDiagnostic()
+        if not state.hitRegistrationDiagnostic or state.unloaded then return end
+        local ownChar = LocalPlayer.Character
+        local ownRoot = ownChar and ownChar:FindFirstChild("HumanoidRootPart")
+        local ownHum = ownChar and ownChar:FindFirstChildOfClass("Humanoid")
+        if not ownRoot or not ownHum or ownHum.Health <= 0 then
+            UIRefs.hitDiagStatus.Text = "Waiting for your living character..."
+            return
+        end
+        local results = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                local char = player.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if root and hum and hum.Health > 0 then
+                    local delta = root.Position - ownRoot.Position
+                    local dist = delta.Magnitude
+                    local params = RaycastParams.new()
+                    params.FilterType = Enum.RaycastFilterType.Exclude
+                    params.FilterDescendantsInstances = {ownChar}
+                    params.IgnoreWater = true
+                    local hit = dist > 0.01 and Workspace:Raycast(ownRoot.Position, delta, params) or nil
+                    local sight = (not hit or hit.Instance:IsDescendantOf(char)) and "CLEAR" or "BLOCKED"
+                    table.insert(results, {name = player.DisplayName, user = player.Name, dist = dist,
+                        height = math.abs(delta.Y), sight = sight})
+                end
+            end
+        end
+        table.sort(results, function(a, b)
+            if a.dist == b.dist then return a.user < b.user end
+            return a.dist < b.dist
+        end)
+        local lines = {"CLIENT OBSERVATION (not server hit confirmation)",
+            "Real replicated roots, not preview hitboxes:"}
+        for i = 1, math.min(6, #results) do
+            local entry = results[i]
+            local shortName = string.sub(entry.name, 1, 13)
+            table.insert(lines, string.format("%s (@%s): %.1f studs | height %.1f | LOS %s",
+                shortName, string.sub(entry.user, 1, 12), entry.dist, entry.height, entry.sight))
+        end
+        if #results == 0 then table.insert(lines, "No living player roots currently replicated.") end
+        table.insert(lines, "Server registration / damage: UNKNOWN (not observed)")
+        UIRefs.hitDiagStatus.Text = table.concat(lines, "\n")
+    end
+
+    UIRefs.hitDiagButton, UIRefs.setHitDiagToggle = addToggle(
+        "Hit Position Diagnostic (READ ONLY)", 16.975, function(enabled)
+            state.hitRegistrationDiagnostic = enabled
+            diag.elapsed = 0
+            if enabled then updateHitDiagnostic() else
+                UIRefs.hitDiagStatus.Text = "OFF: no tracking or hit requests."
+            end
+        end
+    )
+    UIRefs.hitDiagStatus = create("TextLabel", {
+        Name = "HitPositionDiagnostic", Size = UDim2.new(1, -4, 0, 170),
+        BackgroundTransparency = 1, Font = Enum.Font.Code,
+        Text = "OFF: observes replicated player positions only; no server hit confirmation.",
+        TextColor3 = Color3.fromRGB(185, 205, 220), TextSize = 10,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        LayoutOrder = 16.976,
+    }, UIRefs.Content)
+    addConnection(RunService.Heartbeat:Connect(function(dt)
+        if not state.hitRegistrationDiagnostic or state.unloaded then return end
+        diag.elapsed += dt
+        if diag.elapsed < 0.25 then return end
+        diag.elapsed = 0
+        updateHitDiagnostic()
+    end))
+end
 
 addSection("VISUALS", 20)
 
-local fullBrightButton
-local setFullBrightToggle
-fullBrightButton, setFullBrightToggle = addToggle("FullBright", 21, function(enabled)
+UIRefs.fullBrightButton = nil
+UIRefs.setFullBrightToggle = nil
+UIRefs.fullBrightButton, UIRefs.setFullBrightToggle = addToggle("FullBright", 21, function(enabled)
     state.fullBright = enabled
     if enabled then
         enableFullBright()
@@ -782,9 +1298,9 @@ fullBrightButton, setFullBrightToggle = addToggle("FullBright", 21, function(ena
     end
 end)
 
-local gravityButton
-local setGravityToggle
-gravityButton, setGravityToggle = addToggle("Low Gravity", 22, function(enabled)
+UIRefs.gravityButton = nil
+UIRefs.setGravityToggle = nil
+UIRefs.gravityButton, UIRefs.setGravityToggle = addToggle("Low Gravity", 22, function(enabled)
     if enabled and not state.lowGravity then savedGravity = Workspace.Gravity end
     if not enabled and state.lowGravity and savedGravity then
         Workspace.Gravity = savedGravity
@@ -794,44 +1310,44 @@ gravityButton, setGravityToggle = addToggle("Low Gravity", 22, function(enabled)
     if enabled then Workspace.Gravity = 60 end
 end)
 
-local spinButton
-local setSpinToggle
-spinButton, setSpinToggle = addToggle("Spin", 23, function(enabled)
+UIRefs.spinButton = nil
+UIRefs.setSpinToggle = nil
+UIRefs.spinButton, UIRefs.setSpinToggle = addToggle("Spin", 23, function(enabled)
     state.spin = enabled
     if not enabled then stopRegularSpin() end
 end)
 
-local espButton
-local setESPToggle
+UIRefs.espButton = nil
+UIRefs.setESPToggle = nil
 local function setESPState(key, enabled)
     state[key] = enabled
     if not (state.esp or state.roleESP or state.innocentESP) and clearESP then clearESP() end
 end
-espButton, setESPToggle = addToggle("ESP Players", 24, function(enabled)
+UIRefs.espButton, UIRefs.setESPToggle = addToggle("ESP Players", 24, function(enabled)
     setESPState("esp", enabled)
 end)
 
-local roleESPButton
-local setRoleESPToggle
-roleESPButton, setRoleESPToggle = addToggle("Role ESP", 25, function(enabled)
+UIRefs.roleESPButton = nil
+UIRefs.setRoleESPToggle = nil
+UIRefs.roleESPButton, UIRefs.setRoleESPToggle = addToggle("Role ESP", 25, function(enabled)
     setESPState("roleESP", enabled)
 end)
 
-local innocentESPButton
-local setInnocentESPToggle
-innocentESPButton, setInnocentESPToggle = addToggle("Innocent ESP", 26, function(enabled)
+UIRefs.innocentESPButton = nil
+UIRefs.setInnocentESPToggle = nil
+UIRefs.innocentESPButton, UIRefs.setInnocentESPToggle = addToggle("Innocent ESP", 26, function(enabled)
     setESPState("innocentESP", enabled)
 end)
 
-local espLinesButton
-local setESPLinesToggle
-espLinesButton, setESPLinesToggle = addToggle("ESP Lines", 27, function(enabled)
+UIRefs.espLinesButton = nil
+UIRefs.setESPLinesToggle = nil
+UIRefs.espLinesButton, UIRefs.setESPLinesToggle = addToggle("ESP Lines", 27, function(enabled)
     state.espLines = enabled
 end)
 
-local espNamesButton
-local setESPNamesToggle
-espNamesButton, setESPNamesToggle = addToggle("ESP Names", 28, function(enabled)
+UIRefs.espNamesButton = nil
+UIRefs.setESPNamesToggle = nil
+UIRefs.espNamesButton, UIRefs.setESPNamesToggle = addToggle("ESP Names", 28, function(enabled)
     state.espNames = enabled
     for _, object in pairs(espObjects) do
         if object.nameLabel and object.roleLabel then
@@ -841,12 +1357,12 @@ espNamesButton, setESPNamesToggle = addToggle("ESP Names", 28, function(enabled)
     end
 end)
 
-local _, setFOVSliderValue = addSlider("FOV", CONFIG.MinFOV, CONFIG.MaxFOV, values.fov, 29, function(value)
+UIRefs._unused, UIRefs.setFOVSliderValue = addSlider("FOV", CONFIG.MinFOV, CONFIG.MaxFOV, values.fov, 29, function(value)
     values.fov = value
     fovState.active = true
     applyCameraFOV()
 end)
-setFOVSlider = setFOVSliderValue
+UIRefs.setFOVSlider = UIRefs.setFOVSliderValue
 addConnection(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(applyCameraFOV))
 
 --// Drop detection must never select a gun carried by a player or an NPC.
@@ -959,6 +1475,7 @@ local function finishRevolverTrip()
 end
 
 local function teleportToRevolver()
+    if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
     if state.unloaded or teleportBusy or flingBusy then
         return
     end
@@ -968,11 +1485,11 @@ local function teleportToRevolver()
     local root = character and character:FindFirstChild("HumanoidRootPart")
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
     if not root or not humanoid or humanoid.Health <= 0 or root.Anchored then
-        Status.Text = "Pickup: character not ready"
+        UIRefs.Status.Text = "Pickup: character not ready"
         return
     end
     if findRevolver() then
-        Status.Text = "Pickup: you already have a revolver"
+        UIRefs.Status.Text = "Pickup: you already have a revolver"
         return
     end
 
@@ -982,7 +1499,7 @@ local function teleportToRevolver()
     local deadline = os.clock() + CONFIG.RevolverPickupTimeout
     local target = findRevolverInWorkspace(root.Position)
     if not target then
-        Status.Text = "Pickup: no dropped revolver found"
+        UIRefs.Status.Text = "Pickup: no dropped revolver found"
         return
     end
 
@@ -994,7 +1511,7 @@ local function teleportToRevolver()
     revolverTrip = trip
     teleportBusy = true
     local pickedUp = false
-    Status.Text = "Pickup: collecting revolver..."
+    UIRefs.Status.Text = "Pickup: collecting revolver..."
 
     local ok, err = pcall(function()
         if trip.flyVelocity and trip.flyVelocity.Parent then
@@ -1051,21 +1568,21 @@ local function teleportToRevolver()
         return
     end
     if not ok then
-        Status.Text = "Pickup error: " .. tostring(err)
+        UIRefs.Status.Text = "Pickup error: " .. tostring(err)
     elseif returnError then
-        Status.Text = "Return error: " .. tostring(returnError)
+        UIRefs.Status.Text = "Return error: " .. tostring(returnError)
     elseif not returned then
-        Status.Text = "Pickup cancelled: character changed/dead"
+        UIRefs.Status.Text = "Pickup cancelled: character changed/dead"
     elseif pickedUp then
-        Status.Text = "Revolver collected • returned to starting point"
+        UIRefs.Status.Text = "Revolver collected • returned to starting point"
     else
-        Status.Text = "Returned • server did not confirm the pickup"
+        UIRefs.Status.Text = "Returned • server did not confirm the pickup"
     end
 end
 
 addSection("UTILITY", 30)
 
-local refreshButton = create("TextButton", {
+UIRefs.refreshButton = create("TextButton", {
     Name = "RefreshRoles",
     Size = UDim2.new(1, -4, 0, 38),
     BackgroundColor3 = Color3.fromRGB(37, 37, 43),
@@ -1076,24 +1593,58 @@ local refreshButton = create("TextButton", {
     TextSize = 13,
     AutoButtonColor = false,
     LayoutOrder = 31,
-}, Content)
-create("UICorner", {CornerRadius = UDim.new(0, 8)}, refreshButton)
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.refreshButton)
 
-local teleportRevolverButton = create("TextButton", {
+UIRefs.teleportRevolverButton = create("TextButton", {
     Name = "TeleportRevolver",
     Size = UDim2.new(1, -4, 0, 38),
     BackgroundColor3 = Color3.fromRGB(37, 37, 43),
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
-    Text = IsMobile and "Grab Revolver & Return (~1s)" or "Grab Revolver & Return [G]",
+    Text = IsMobile and "Grab Revolver & Return (~1s)" or "Grab Revolver & Return [H]",
     TextColor3 = Color3.fromRGB(220, 220, 225),
     TextSize = 13,
     AutoButtonColor = false,
     LayoutOrder = 32,
-}, Content)
-create("UICorner", {CornerRadius = UDim.new(0, 8)}, teleportRevolverButton)
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.teleportRevolverButton)
 
-local resetButton = create("TextButton", {
+--// Round / lobby travel (client repositioning; the game server may correct it).
+local function makeTravelButton(name, label, order)
+    local button = create("TextButton", {
+        Name = name, Size = UDim2.new(1, -4, 0, 38),
+        BackgroundColor3 = Color3.fromRGB(37, 37, 43), BorderSizePixel = 0,
+        Font = Enum.Font.GothamSemibold, Text = label, TextSize = 13,
+        TextColor3 = Color3.fromRGB(220, 220, 225),
+        AutoButtonColor = false, LayoutOrder = order,
+    }, UIRefs.Content)
+    create("UICorner", {CornerRadius = UDim.new(0, 8)}, button)
+    return button
+end
+UIRefs.teleportMapButton = makeTravelButton("TeleportMap", "TP to Map", 32.1)
+UIRefs.teleportLobbyButton = makeTravelButton("TeleportLobby", "TP to Lobby", 32.2)
+
+UIRefs.coinFarmButton, UIRefs.setCoinFarmToggle = addToggle("Auto Coin Farm (Fly + NoClip)", 32.3, function(enabled)
+    if enabled then
+        if UIRefs.startCoinFarm then UIRefs.startCoinFarm() end
+    else
+        if UIRefs.stopCoinFarm then UIRefs.stopCoinFarm() end
+    end
+end)
+
+-- Separate from manual FlySpeed; live updates apply on the next simulation frame.
+UIRefs._unused, UIRefs.setCoinFarmSpeedSlider = addSlider(
+    "Coin Farm Speed", CONFIG.MinCoinFarmSpeed, CONFIG.MaxCoinFarmSpeed,
+    values.coinFarmSpeed, 32.35, function(value)
+        values.coinFarmSpeed = value
+        if state.coinFarm and not state.unloaded then
+            UIRefs.Status.Text = "Coin Farm: speed " .. value .. " studs/s"
+        end
+    end
+)
+
+UIRefs.resetButton = create("TextButton", {
     Name = "ResetAll",
     Size = UDim2.new(1, -4, 0, 38),
     BackgroundColor3 = Color3.fromRGB(56, 47, 35),
@@ -1104,10 +1655,10 @@ local resetButton = create("TextButton", {
     TextSize = 13,
     AutoButtonColor = false,
     LayoutOrder = 33,
-}, Content)
-create("UICorner", {CornerRadius = UDim.new(0, 8)}, resetButton)
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.resetButton)
 
-local unloadButton = create("TextButton", {
+UIRefs.unloadButton = create("TextButton", {
     Name = "Unload",
     Size = UDim2.new(1, -4, 0, 38),
     BackgroundColor3 = Color3.fromRGB(95, 44, 48),
@@ -1118,125 +1669,125 @@ local unloadButton = create("TextButton", {
     TextSize = 13,
     AutoButtonColor = false,
     LayoutOrder = 34,
-}, Content)
-create("UICorner", {CornerRadius = UDim.new(0, 8)}, unloadButton)
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.unloadButton)
 
-local dragStart = nil
-local startPosition = nil
-local draggingMain = false
-local mainDragInput = nil
+UIRefs.dragStart = nil
+UIRefs.startPosition = nil
+UIRefs.draggingMain = false
+UIRefs.mainDragInput = nil
 
 local function beginDrag(input)
     if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
         return
     end
-    if mainDragInput then return end
-    mainDragInput = input
-    draggingMain = true
-    dragStart = input.Position
-    startPosition = Main.Position
+    if UIRefs.mainDragInput then return end
+    UIRefs.mainDragInput = input
+    UIRefs.draggingMain = true
+    UIRefs.dragStart = input.Position
+    UIRefs.startPosition = UIRefs.Main.Position
 end
 
 local function updateDrag(input)
-    if not draggingMain then
+    if not UIRefs.draggingMain then
         return
     end
-    if not isPointerMove(input, mainDragInput) then return end
+    if not isPointerMove(input, UIRefs.mainDragInput) then return end
 
-    local delta = (input.Position - dragStart) / Scale.Scale
-    Main.Position = UDim2.new(
-        startPosition.X.Scale,
-        startPosition.X.Offset + delta.X,
-        startPosition.Y.Scale,
-        startPosition.Y.Offset + delta.Y
+    local delta = (input.Position - UIRefs.dragStart) / Scale.Scale
+    UIRefs.Main.Position = UDim2.new(
+        UIRefs.startPosition.X.Scale,
+        UIRefs.startPosition.X.Offset + delta.X,
+        UIRefs.startPosition.Y.Scale,
+        UIRefs.startPosition.Y.Offset + delta.Y
     )
 end
 
-addConnection(dragHandle.InputBegan:Connect(beginDrag))
+addConnection(UIRefs.dragHandle.InputBegan:Connect(beginDrag))
 addConnection(UIS.InputChanged:Connect(updateDrag))
 addConnection(UIS.InputEnded:Connect(function(input)
-    if isPointerEnd(input, mainDragInput) then
-        draggingMain = false
-        mainDragInput = nil
+    if isPointerEnd(input, UIRefs.mainDragInput) then
+        UIRefs.draggingMain = false
+        UIRefs.mainDragInput = nil
     end
 end))
 
 --// Mobile floating MOD drag
-local draggingReopen = false
-local reopenDragStart = nil
-local reopenStartPosition = nil
-local reopenDragInput = nil
+UIRefs.draggingReopen = false
+UIRefs.reopenDragStart = nil
+UIRefs.reopenStartPosition = nil
+UIRefs.reopenDragInput = nil
 
-addConnection(reopen.InputBegan:Connect(function(input)
+addConnection(UIRefs.reopen.InputBegan:Connect(function(input)
     if not IsMobile then
         return
     end
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        if reopenDragInput then return end
-        reopenDragInput = input
-        draggingReopen = true
-        reopenDragStart = input.Position
-        reopenStartPosition = reopen.Position
+        if UIRefs.reopenDragInput then return end
+        UIRefs.reopenDragInput = input
+        UIRefs.draggingReopen = true
+        UIRefs.reopenDragStart = input.Position
+        UIRefs.reopenStartPosition = UIRefs.reopen.Position
     end
 end))
 
 addConnection(UIS.InputChanged:Connect(function(input)
-    if not draggingReopen or not IsMobile then
+    if not UIRefs.draggingReopen or not IsMobile then
         return
     end
-    if not isPointerMove(input, reopenDragInput) then return end
+    if not isPointerMove(input, UIRefs.reopenDragInput) then return end
 
     local camera = Workspace.CurrentCamera
     if not camera then
         return
     end
 
-    local delta = (input.Position - reopenDragStart) / Scale.Scale
+    local delta = (input.Position - UIRefs.reopenDragStart) / Scale.Scale
     local viewport = camera.ViewportSize / Scale.Scale
-    local halfX = reopen.AbsoluteSize.X * 0.5 / Scale.Scale
-    local halfY = reopen.AbsoluteSize.Y * 0.5 / Scale.Scale
+    local halfX = UIRefs.reopen.AbsoluteSize.X * 0.5 / Scale.Scale
+    local halfY = UIRefs.reopen.AbsoluteSize.Y * 0.5 / Scale.Scale
 
-    local newX = reopenStartPosition.X.Offset + delta.X
-    local newY = reopenStartPosition.Y.Offset + delta.Y
+    local newX = UIRefs.reopenStartPosition.X.Offset + delta.X
+    local newY = UIRefs.reopenStartPosition.Y.Offset + delta.Y
     newX = math.clamp(newX, -viewport.X * 0.5 + halfX + 6, viewport.X * 0.5 - halfX - 6)
     newY = math.clamp(newY, -viewport.Y * 0.5 + halfY + 6, viewport.Y * 0.5 - halfY - 6)
 
-    reopen.Position = UDim2.new(0.5, newX, 0.5, newY)
+    UIRefs.reopen.Position = UDim2.new(0.5, newX, 0.5, newY)
 end))
 
 addConnection(UIS.InputEnded:Connect(function(input)
-    if isPointerEnd(input, reopenDragInput) then
-        draggingReopen = false
-        reopenDragInput = nil
+    if isPointerEnd(input, UIRefs.reopenDragInput) then
+        UIRefs.draggingReopen = false
+        UIRefs.reopenDragInput = nil
     end
 end))
 
 --// Mobile fly vertical controls
-local flyUpInput, flyDownInput = nil, nil
-addConnection(FlyUpButton.InputBegan:Connect(function(input)
+UIRefs.flyUpInput, UIRefs.flyDownInput = nil, nil
+addConnection(UIRefs.FlyUpButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        flyUpInput = input
+        UIRefs.flyUpInput = input
         flyObjects.up = true
     end
 end))
 
 addConnection(UIS.InputEnded:Connect(function(input)
-    if isPointerEnd(input, flyUpInput) then
-        flyUpInput = nil
+    if isPointerEnd(input, UIRefs.flyUpInput) then
+        UIRefs.flyUpInput = nil
         flyObjects.up = false
     end
 end))
 
-addConnection(FlyDownButton.InputBegan:Connect(function(input)
+addConnection(UIRefs.FlyDownButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        flyDownInput = input
+        UIRefs.flyDownInput = input
         flyObjects.down = true
     end
 end))
 
 addConnection(UIS.InputEnded:Connect(function(input)
-    if isPointerEnd(input, flyDownInput) then
-        flyDownInput = nil
+    if isPointerEnd(input, UIRefs.flyDownInput) then
+        UIRefs.flyDownInput = nil
         flyObjects.down = false
     end
 end))
@@ -1244,9 +1795,9 @@ end))
 addConnection(UIS.WindowFocusReleased:Connect(function()
     windowFocused = false
     flyObjects.up, flyObjects.down = false, false
-    flyUpInput, flyDownInput = nil, nil
-    draggingMain, draggingReopen = false, false
-    mainDragInput, reopenDragInput = nil, nil
+    UIRefs.flyUpInput, UIRefs.flyDownInput = nil, nil
+    UIRefs.draggingMain, UIRefs.draggingReopen = false, false
+    UIRefs.mainDragInput, UIRefs.reopenDragInput = nil, nil
 end))
 addConnection(UIS.WindowFocused:Connect(function() windowFocused = true end))
 
@@ -1284,7 +1835,7 @@ local function stopFly()
     end
     flyObjects.humanoid = nil
 
-    MobileFlyControls.Visible = false
+    UIRefs.MobileFlyControls.Visible = false
 end
 
 local function startFly()
@@ -1326,7 +1877,7 @@ local function startFly()
     humanoid.PlatformStand = true
     humanoid.AutoRotate = false
 
-    MobileFlyControls.Visible = IsMobile and state.fly
+    UIRefs.MobileFlyControls.Visible = IsMobile and state.fly
 end
 
 applyNoclip = function()
@@ -1356,6 +1907,140 @@ restoreNoclip = function()
             object.CanCollide = canCollide
         end
         originalCollisions[object] = nil
+    end
+end
+
+
+--// Coin farm uses the existing Fly/NoClip controllers. No remote spam or instant TP.
+--// Actual pickup must still be accepted by the game server.
+do
+    local function coinPart(obj)
+        if not obj or not obj.Parent or not obj:IsDescendantOf(Workspace) then return nil end
+        local n = obj.Name:lower():gsub("[^%w]", "")
+        if n ~= "coin" and n ~= "coinserver" and n ~= "coinpickup" and n ~= "goldcoin" then return nil end
+        -- Don't farm decorative lobby coins or player-owned models/tools.
+        local ancestor = obj.Parent
+        while ancestor and ancestor ~= Workspace do
+            local an = ancestor.Name:lower():gsub("[^%w]", "")
+            if an == "lobby" or an == "mainlobby" or an == "lobbymap" or ancestor:IsA("Tool") then return nil end
+            if ancestor:IsA("Model") and Players:GetPlayerFromCharacter(ancestor) then return nil end
+            ancestor = ancestor.Parent
+        end
+        if obj:IsA("BasePart") then
+            -- The visible Coin inside Coin_Server is not a second target.
+            if obj.Parent and obj.Parent:IsA("Model") and obj.Parent.Name:lower():gsub("[^%w]", "") == "coinserver" then
+                return nil
+            end
+            return obj
+        end
+        if obj:IsA("Model") then return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true) end
+        return nil
+    end
+
+    local function scanCoins()
+        coinFarm.targets = {}
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if coinPart(obj) then coinFarm.targets[#coinFarm.targets + 1] = obj end
+        end
+        coinFarm.lastScan = os.clock()
+    end
+
+    local function nextCoin(root)
+        local now = os.clock()
+        local closest, shortest = nil, math.huge
+        for _, obj in ipairs(coinFarm.targets) do
+            local part = coinPart(obj)
+            if part and (coinFarm.skipped[obj] or 0) <= now then
+                local d = (part.Position - root.Position).Magnitude
+                if d < shortest then closest, shortest = obj, d end
+            end
+        end
+        return closest, shortest
+    end
+
+    UIRefs.stopCoinFarm = function()
+        if not state.coinFarm then return end
+        state.coinFarm = false
+        coinFarm.target = nil
+        coinFarm.targets = {}
+        coinFarm.switching = true
+        if UIRefs.setFlyToggle then UIRefs.setFlyToggle(coinFarm.savedFly) end
+        if UIRefs.setNoclipToggle then UIRefs.setNoclipToggle(coinFarm.savedNoclip) end
+        coinFarm.switching = false
+        if flyObjects.flyVelocity then flyObjects.flyVelocity.Velocity = Vector3.zero end
+        if not state.unloaded then UIRefs.Status.Text = "Coin Farm: OFF • Fly/NoClip restored" end
+    end
+
+    UIRefs.startCoinFarm = function()
+        if state.coinFarm then return end
+        local char, root, hum = getCharacter(), getRoot(), getHumanoid()
+        if state.unloaded or teleportBusy or flingBusy or shootMurdererBusy
+            or not char or not root or not hum or hum.Health <= 0 or root.Anchored or hum.Sit then
+            UIRefs.Status.Text = "Coin Farm: wait for an alive character / stop Fling or TP"
+            task.defer(function()
+                if UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+            end)
+            return
+        end
+        coinFarm.savedFly, coinFarm.savedNoclip = state.fly, state.noclip
+        coinFarm.switching = true
+        UIRefs.setFlyToggle(true)
+        UIRefs.setNoclipToggle(true)
+        coinFarm.switching = false
+        state.coinFarm = true
+        coinFarm.target = nil
+        coinFarm.lastScan = 0
+        coinFarm.progressAt = os.clock()
+        coinFarm.lastDistance = math.huge
+        scanCoins()
+        UIRefs.Status.Text = "Coin Farm: ON • " .. values.coinFarmSpeed .. " studs/s"
+    end
+
+    UIRefs.coinFarmVelocity = function(root)
+        if not state.coinFarm then return nil end
+        local now = os.clock()
+        if now - coinFarm.lastScan >= CONFIG.CoinFarmScanInterval then scanCoins() end
+
+        -- Retarget in the same simulation frame. Never brake while approaching a coin.
+        -- A collected/removed coin may vanish before the scheduled network scan.
+        for attempt = 1, 3 do
+            local previousTarget = coinFarm.target
+            local part = coinPart(previousTarget)
+            if not part then
+                -- Force a fresh scan only if an assigned coin just disappeared.
+                if previousTarget then scanCoins() end
+                coinFarm.target = nextCoin(root)
+                part = coinPart(coinFarm.target)
+                coinFarm.progressAt, coinFarm.lastDistance = now, math.huge
+            end
+
+            if not part then
+                UIRefs.Status.Text = "Coin Farm: no collectible coins visible • waiting"
+                return Vector3.zero
+            end
+
+            local delta = part.Position - root.Position
+            local dist = delta.Magnitude
+            if dist < coinFarm.lastDistance - 0.2 then
+                coinFarm.progressAt, coinFarm.lastDistance = now, dist
+            end
+
+            if dist <= CONFIG.CoinFarmReach then
+                -- Already at the pickup: choose another coin without pausing here.
+                coinFarm.skipped[coinFarm.target] = now + CONFIG.CoinFarmRetryDelay
+                coinFarm.target = nil
+            elseif now - coinFarm.progressAt > 4.0 then
+                -- A stuck/blocked target should not stall the whole route.
+                coinFarm.skipped[coinFarm.target] = now + CONFIG.CoinFarmRetryDelay
+                coinFarm.target = nil
+            else
+                -- Constant travel speed, even close to the target.
+                return delta.Unit * values.coinFarmSpeed
+            end
+        end
+
+        -- All nearby targets may have been reached/skipped; rescan next frame.
+        return Vector3.zero
     end
 end
 
@@ -1420,7 +2105,7 @@ local function refreshRoles()
     local remote = findGetPlayerData()
     if not remote then
         clearRoles()
-        Status.Text = "Role ESP: GetPlayerData not found"
+        UIRefs.Status.Text = "Role ESP: GetPlayerData not found"
         return false
     end
 
@@ -1436,7 +2121,7 @@ local function refreshRoles()
 
     if not success or type(result) ~= "table" then
         clearRoles()
-        Status.Text = "Role ESP: failed to read roles"
+        UIRefs.Status.Text = "Role ESP: failed to read roles"
         return false
     end
 
@@ -1459,20 +2144,260 @@ local function refreshRoles()
         end
     end
 
-    if teleportBusy or flingBusy or shootMurdererBusy then return true end
+    if teleportBusy or flingBusy or shootMurdererBusy or state.spectateMurderer then return true end
     if LocalPlayer.Name == Murder then
-        Status.Text = "Role: Murderer"
+        UIRefs.Status.Text = "Role: Murderer"
     elseif LocalPlayer.Name == Sheriff then
-        Status.Text = "Role: Sheriff"
+        UIRefs.Status.Text = "Role: Sheriff"
     elseif LocalPlayer.Name == Hero then
-        Status.Text = "Role: Hero"
+        UIRefs.Status.Text = "Role: Hero"
     else
-        Status.Text = "Role: Innocent / unknown"
+        UIRefs.Status.Text = "Role: Innocent / unknown"
     end
 
     return true
 end
 
+
+--// Camera-only spectate: role targets and manually selected players.
+--// The compatibility flag state.spectateMurderer means any spectate mode is active.
+do
+    local spectate = {
+        mode = nil, player = nil, camera = nil, savedType = nil,
+        savedSubject = nil, target = nil, targetPlayer = nil,
+        previousRoleName = nil,
+    }
+    local function setSpectateStatus(message)
+        if UIRefs.spectateStatus then UIRefs.spectateStatus.Text = message end
+        if not state.unloaded and UIRefs.Status then UIRefs.Status.Text = message end
+    end
+    local function paintSpectateButtons()
+        local murder = spectate.mode == "Murderer"
+        local sheriff = spectate.mode == "Sheriff"
+        UIRefs.spectateMurdererButton.Text = "Spectate Murderer " .. (murder and "[ON]" or "[OFF]")
+        UIRefs.spectateSheriffButton.Text = "Spectate Sheriff " .. (sheriff and "[ON]" or "[OFF]")
+        setButtonVisual(UIRefs.spectateMurdererButton, murder)
+        setButtonVisual(UIRefs.spectateSheriffButton, sheriff)
+        if UIRefs.spectatePlayerButtons then
+            for player, button in pairs(UIRefs.spectatePlayerButtons) do
+                if button and button.Parent then
+                    local active = spectate.mode == "Player" and spectate.player == player
+                    setButtonVisual(button, active)
+                    button.Text = player.DisplayName .. "  (@" .. player.Name .. ")" .. (active and "  [WATCHING]" or "")
+                end
+            end
+        end
+    end
+    stopSpectateMurderer = function(reason)
+        if not state.spectateMurderer then return end
+        state.spectateMurderer = false
+        local camera = Workspace.CurrentCamera
+        -- Restore the local camera, including when the previous target despawned.
+        if camera and (camera == spectate.camera) and
+            (camera.CameraSubject == spectate.target or not spectate.target or
+                not spectate.target.Parent) then
+            pcall(function()
+                local ownHumanoid = getHumanoid()
+                camera.CameraType = (spectate.savedType == Enum.CameraType.Scriptable)
+                    and Enum.CameraType.Custom or (spectate.savedType or Enum.CameraType.Custom)
+                camera.CameraSubject = (ownHumanoid and ownHumanoid.Parent and ownHumanoid)
+                    or (spectate.savedSubject and spectate.savedSubject.Parent and spectate.savedSubject)
+                    or camera.CameraSubject
+            end)
+        end
+        spectate.mode, spectate.player, spectate.targetPlayer = nil, nil, nil
+        spectate.camera, spectate.savedType, spectate.savedSubject = nil, nil, nil
+        spectate.target, spectate.previousRoleName = nil, nil
+        paintSpectateButtons()
+        if reason then setSpectateStatus(reason) end
+    end
+    local function startSpectate(mode, player)
+        if state.unloaded or shootMurdererBusy or teleportBusy then
+            setSpectateStatus("Spectate: finish current camera action first")
+            return
+        end
+        if mode == "Player" and (not player or player == LocalPlayer or player.Parent ~= Players) then
+            setSpectateStatus("Spectate: choose another player")
+            return
+        end
+        if state.spectateMurderer and spectate.mode == mode and spectate.player == player then
+            stopSpectateMurderer("Spectate OFF • own camera")
+            return
+        end
+        if state.spectateMurderer then stopSpectateMurderer() end
+        local camera = Workspace.CurrentCamera
+        if not camera or camera.CameraType == Enum.CameraType.Scriptable then
+            setSpectateStatus("Spectate: camera is busy")
+            return
+        end
+        spectate.mode, spectate.player = mode, player
+        spectate.camera, spectate.savedType, spectate.savedSubject = camera, camera.CameraType, camera.CameraSubject
+        spectate.target, spectate.targetPlayer = nil, nil
+        spectate.previousRoleName = nil
+        state.spectateMurderer = true
+        if mode ~= "Player" then rolesAvailable = false end
+        paintSpectateButtons()
+        setSpectateStatus("Spectate: waiting for " .. (player and player.DisplayName or mode) .. "...")
+    end
+    toggleSpectateMurderer = function() startSpectate("Murderer") end
+    UIRefs.toggleSpectateSheriff = function() startSpectate("Sheriff") end
+    UIRefs.selectSpectatePlayer = function(player) startSpectate("Player", player) end
+    UIRefs.stopSpectate = function() stopSpectateMurderer("Spectate OFF • own camera") end
+
+    -- Recreate buttons only on join/leave/page open; transient buttons own their click links.
+    UIRefs.rebuildSpectatorList = function()
+        if state.unloaded or not UIRefs.spectatePlayerList then return end
+        if UIRefs.spectatePlayerButtons then
+            for _, button in pairs(UIRefs.spectatePlayerButtons) do button:Destroy() end
+        end
+        UIRefs.spectatePlayerButtons = {}
+        if UIRefs.teleportPlayerButtons then
+            for _, button in pairs(UIRefs.teleportPlayerButtons) do button:Destroy() end
+        end
+        UIRefs.teleportPlayerButtons = {}
+        if UIRefs.bringPlayerButtons then
+            for _, button in pairs(UIRefs.bringPlayerButtons) do button:Destroy() end
+        end
+        UIRefs.bringPlayerButtons = {}
+        if UIRefs.attackPlayerButtons then
+            for _, button in pairs(UIRefs.attackPlayerButtons) do button:Destroy() end
+        end
+        UIRefs.attackPlayerButtons = {}
+        if UIRefs.selectedAttackPlayer and UIRefs.selectedAttackPlayer.Parent ~= Players then
+            UIRefs.selectedAttackPlayer = nil
+            UIRefs.attackStatus.Text = "Selected player left. Choose another player."
+        end
+        local players = Players:GetPlayers()
+        table.sort(players, function(a, b) return a.Name:lower() < b.Name:lower() end)
+        local order = 0
+        for _, player in ipairs(players) do
+            if player ~= LocalPlayer then
+                order += 1
+                local button = create("TextButton", {
+                    Name = "Watch_" .. tostring(player.UserId),
+                    Size = UDim2.new(1, -4, 0, 38),
+                    BackgroundColor3 = Color3.fromRGB(37, 37, 43), BorderSizePixel = 0,
+                    Font = Enum.Font.GothamSemibold,
+                    Text = player.DisplayName .. "  (@" .. player.Name .. ")",
+                    TextColor3 = Color3.fromRGB(220, 220, 225), TextSize = 13,
+                    TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false,
+                    LayoutOrder = order,
+                }, UIRefs.spectatePlayerList)
+                create("UICorner", { CornerRadius = UDim.new(0, 8) }, button)
+                UIRefs.spectatePlayerButtons[player] = button
+                button.MouseButton1Click:Connect(function() UIRefs.selectSpectatePlayer(player) end)
+                local tpButton = create("TextButton", {
+                    Name = "TP_" .. tostring(player.UserId),
+                    Size = UDim2.new(1, -4, 0, 38),
+                    BackgroundColor3 = Color3.fromRGB(42, 66, 100), BorderSizePixel = 0,
+                    Font = Enum.Font.GothamSemibold,
+                    Text = "TP → " .. player.DisplayName .. "  (@" .. player.Name .. ")",
+                    TextColor3 = Color3.fromRGB(235, 240, 255), TextSize = 13,
+                    TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false,
+                    LayoutOrder = order,
+                }, UIRefs.teleportPlayerList)
+                create("UICorner", { CornerRadius = UDim.new(0, 8) }, tpButton)
+                UIRefs.teleportPlayerButtons[player] = tpButton
+                tpButton.MouseButton1Click:Connect(function()
+                    if UIRefs.teleportToPlayer then task.spawn(UIRefs.teleportToPlayer, player) end
+                end)
+                local bringButton = create("TextButton", {
+                    Name = "Bring_" .. tostring(player.UserId),
+                    Size = UDim2.new(1, -4, 0, 38),
+                    BackgroundColor3 = Color3.fromRGB(78, 59, 106), BorderSizePixel = 0,
+                    Font = Enum.Font.GothamSemibold,
+                    Text = "Bring → " .. player.DisplayName .. " (@" .. player.Name .. ")",
+                    TextColor3 = Color3.fromRGB(245, 235, 255), TextSize = 13,
+                    TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false,
+                    LayoutOrder = order,
+                }, UIRefs.bringPlayerList)
+                create("UICorner", { CornerRadius = UDim.new(0, 8) }, bringButton)
+                UIRefs.bringPlayerButtons[player] = bringButton
+                bringButton.MouseButton1Click:Connect(function()
+                    if UIRefs.startBring then UIRefs.startBring(player) end
+                end)
+                local attackButton = create("TextButton", {
+                    Name = "AttackSelect_" .. tostring(player.UserId),
+                    Size = UDim2.new(1, -4, 0, 38),
+                    BackgroundColor3 = Color3.fromRGB(65, 45, 49), BorderSizePixel = 0,
+                    Font = Enum.Font.GothamSemibold,
+                    Text = "Select → " .. player.DisplayName .. " (@" .. player.Name .. ")",
+                    TextColor3 = Color3.fromRGB(245, 225, 225), TextSize = 13,
+                    TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false,
+                    LayoutOrder = order,
+                }, UIRefs.attackPlayerList)
+                create("UICorner", { CornerRadius = UDim.new(0, 8) }, attackButton)
+                UIRefs.attackPlayerButtons[player] = attackButton
+                attackButton.MouseButton1Click:Connect(function()
+                    UIRefs.selectedAttackPlayer = player
+                    UIRefs.attackStatus.Text = "Selected: " .. player.DisplayName
+                        .. " • Attack Selected or K (normal weapon attempt)"
+                    if UIRefs.paintAttackSelection then UIRefs.paintAttackSelection() end
+                end)
+            end
+        end
+        paintSpectateButtons()
+        if UIRefs.paintAttackSelection then UIRefs.paintAttackSelection() end
+    end
+
+    local checkTimer = 0
+    addConnection(RunService.Heartbeat:Connect(function(dt)
+        if state.unloaded or not state.spectateMurderer then return end
+        checkTimer += dt
+        if checkTimer < 0.2 then return end
+        checkTimer = 0
+        if shootMurdererBusy then
+            stopSpectateMurderer("Spectate stopped: shot camera in use")
+            return
+        end
+        local player
+        if spectate.mode == "Player" then
+            player = spectate.player
+            if not player or player.Parent ~= Players then
+                stopSpectateMurderer("Spectate stopped: player left")
+                return
+            end
+        else
+            if not rolesAvailable then return end
+            local roleName = (spectate.mode == "Murderer") and Murder or Sheriff
+            if roleName == "" then
+                if spectate.target then stopSpectateMurderer("Spectate stopped: round ended") end
+                return
+            end
+            if spectate.previousRoleName and spectate.previousRoleName ~= roleName then
+                stopSpectateMurderer("Spectate stopped: role changed")
+                return
+            end
+            player = Players:FindFirstChild(roleName)
+            spectate.previousRoleName = roleName
+        end
+        local character = player and player.Character
+        local targetHumanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if not player or player == LocalPlayer or not targetHumanoid or targetHumanoid.Health <= 0 then
+            if spectate.target or spectate.mode == "Player" then
+                stopSpectateMurderer("Spectate stopped: target unavailable / eliminated")
+            end
+            return
+        end
+        local camera = Workspace.CurrentCamera
+        if not camera or camera.CameraType == Enum.CameraType.Scriptable then return end
+        if spectate.target and spectate.target ~= targetHumanoid then
+            stopSpectateMurderer("Spectate stopped: target respawned")
+            return
+        end
+        spectate.target = targetHumanoid
+        spectate.targetPlayer = player
+        if camera ~= spectate.camera then
+            spectate.camera = camera
+        end
+        if camera.CameraSubject ~= targetHumanoid then camera.CameraSubject = targetHumanoid end
+        if camera.CameraType ~= Enum.CameraType.Custom then camera.CameraType = Enum.CameraType.Custom end
+        if UIRefs.spectateStatus then
+            UIRefs.spectateStatus.Text = "Watching " .. player.DisplayName .. " (@" .. player.Name .. ")"
+                .. (spectate.mode == "Player" and "" or (" • " .. spectate.mode))
+        end
+    end))
+end
 
 --// X = shoot murderer with revolver.
 
@@ -1532,8 +2457,9 @@ end
 
 local function shootMurderer()
     if state.unloaded or shootMurdererBusy or os.clock() < shootCooldownUntil then return end
+    if state.spectateMurderer then stopSpectateMurderer("Spectate stopped for shot") end
     if teleportBusy or flingBusy then
-        Status.Text = "Shoot: finish pickup / stop Fling first"
+        UIRefs.Status.Text = "Shoot: finish pickup / stop Fling first"
         return
     end
     local character, humanoid = getCharacter(), getHumanoid()
@@ -1548,8 +2474,10 @@ local function shootMurderer()
         local murderer = Murder ~= "" and Players:FindFirstChild(Murder) or nil
         if not murderer or not roleAlive(Murder) then outcome = "Shoot: no living murderer"; return end
         local targetCharacter = murderer.Character
-        local targetPart = targetCharacter and (targetCharacter:FindFirstChild("Head")
-            or targetCharacter:FindFirstChild("HumanoidRootPart"))
+        local targetPart = targetCharacter and (targetCharacter:FindFirstChild("UpperTorso")
+            or targetCharacter:FindFirstChild("Torso")
+            or targetCharacter:FindFirstChild("HumanoidRootPart")
+            or targetCharacter:FindFirstChild("LowerTorso"))
         if not targetPart then outcome = "Shoot: no target part"; return end
         local tool = findRevolver()
         if not tool then outcome = "Shoot: revolver not found"; return end
@@ -1564,30 +2492,22 @@ local function shootMurderer()
         if trip.finished or state.unloaded or LocalPlayer.Character ~= character or humanoid.Health <= 0
             or tool.Parent ~= character or Murder ~= murderer.Name or murderer.Character ~= targetCharacter
             or not targetPart.Parent or not roleAlive(Murder) then return end
-        if state.silentAim then
-            if not silentAimHook.mouseInstalled and not getSilentAimRemote(tool) then
-                outcome = "Silent Aim: gun interface not supported"; return
-            end
-            updateSilentAim()
-            if not getSilentAimPosition(tool) then outcome = "Silent Aim: no clear shot"; return end
-        else
-            local camera = Workspace.CurrentCamera
-            if not camera then outcome = "Shoot: camera unavailable"; return end
-            trip.camera, trip.cameraType, trip.cameraCFrame = camera, camera.CameraType, camera.CFrame
-            trip.cameraChanged = true
-            camera.CameraType = Enum.CameraType.Scriptable
-            camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetPart.Position)
-        end
+        local camera = Workspace.CurrentCamera
+        if not camera then outcome = "Shoot: camera unavailable"; return end
+        trip.camera, trip.cameraType, trip.cameraCFrame = camera, camera.CameraType, camera.CFrame
+        trip.cameraChanged = true
+        camera.CameraType = Enum.CameraType.Scriptable
+        camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetPart.Position)
         trip.activated = true
         tool:Activate()
         task.wait(0.05)
         if not trip.finished and not state.unloaded then
-            outcome = (state.silentAim and "Shoot: requested at " or "Shoot: fired at ") .. murderer.DisplayName
+            outcome = "Shoot: fired at " .. murderer.DisplayName
         end
     end)
     if trip.finished then return end
     finishMurdererShot()
-    if not state.unloaded then Status.Text = ok and outcome or ("Shoot error: " .. tostring(err)) end
+    if not state.unloaded then UIRefs.Status.Text = ok and outcome or ("Shoot error: " .. tostring(err)) end
 end
 
 local ESPColors = {
@@ -1630,6 +2550,99 @@ roleAlive = function(playerName)
     return isAliveCharacter(player)
 end
 
+--// V0.9.15: player-picked normal weapon attempt; no arbitrary server damage.
+do
+    local attackBusy, attackCooldownUntil = false, 0
+    UIRefs.paintAttackSelection = function()
+        for player, button in pairs(UIRefs.attackPlayerButtons or {}) do
+            if button and button.Parent then
+                setButtonVisual(button, player == UIRefs.selectedAttackPlayer)
+            end
+        end
+    end
+    UIRefs.clearAttackSelection = function()
+        UIRefs.selectedAttackPlayer = nil
+        if UIRefs.attackStatus then UIRefs.attackStatus.Text = "Select a player. Normal weapon only." end
+        UIRefs.paintAttackSelection()
+    end
+    UIRefs.attackSelected = function()
+        if state.unloaded or attackBusy or os.clock() < attackCooldownUntil then return end
+        local target = UIRefs.selectedAttackPlayer
+        local function status(message)
+            if state.unloaded then return end
+            UIRefs.attackStatus.Text = message
+            UIRefs.Status.Text = message
+        end
+        if not target or target.Parent ~= Players or target == LocalPlayer then
+            status("Attack: select an available player first") return
+        end
+        if state.bringActive then
+            status("Attack: stop client-only Bring first; it cannot confirm server distance") return
+        end
+        if teleportBusy or flingBusy or shootMurdererBusy or state.coinFarm then
+            status("Attack: finish TP / Fling / Shot / Coin Farm first") return
+        end
+        attackBusy = true
+        attackCooldownUntil = os.clock() + 0.35
+        local ok, err = pcall(function()
+            if not refreshRoles() then status("Attack: roles unavailable") return end
+            if not roleAlive(target.Name) then status("Attack: selected player is unavailable/dead") return end
+            local myRole = getRoleName(LocalPlayer.Name)
+            if myRole == "Sheriff" or myRole == "Hero" then
+                if target.Name ~= Murder then
+                    status("Attack: revolver may only target the current Murderer") return
+                end
+                status("Attack: attempting regular revolver shot at " .. target.DisplayName)
+                shootMurderer()
+                return
+            end
+            if myRole ~= "Murderer" then
+                status("Attack: you need a knife (Murderer) or revolver (Sheriff/Hero)") return
+            end
+            local char, hum, root = getCharacter(), getHumanoid(), getRoot()
+            local targetChar = target.Character
+            local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+            if not char or not hum or hum.Health <= 0 or not root or not targetRoot then
+                status("Attack: character/target part unavailable") return
+            end
+            -- Only attempt when positions are nearby in the replicated view; this is not server validation.
+            local distance = (root.Position - targetRoot.Position).Magnitude
+            if distance > 7 then
+                status(string.format("Attack: %.1f studs away; move within 7 studs", distance)) return
+            end
+            local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+            local knife
+            for _, holder in ipairs({char, backpack}) do
+                if holder then
+                    for _, item in ipairs(holder:GetChildren()) do
+                        if item:IsA("Tool") and item.Name:lower():find("knife", 1, true) then
+                            knife = item break
+                        end
+                    end
+                end
+                if knife then break end
+            end
+            if not knife then status("Attack: knife not found") return end
+            if knife.Parent ~= char then
+                hum:EquipTool(knife)
+                task.wait(0.05)
+            end
+            if state.unloaded or LocalPlayer.Character ~= char or hum.Health <= 0
+                or target.Character ~= targetChar or not roleAlive(target.Name) or knife.Parent ~= char then
+                status("Attack: cancelled (weapon/target changed)") return
+            end
+            knife:Activate()
+            status("Attack attempt: " .. target.DisplayName .. " • server damage unverified")
+            task.delay(0.1, function() pcall(function() knife:Deactivate() end) end)
+        end)
+        attackBusy = false
+        if not ok then status("Attack error: " .. tostring(err)) end
+    end
+    addConnection(UIRefs.attackButton.MouseButton1Click:Connect(function()
+        task.spawn(UIRefs.attackSelected)
+    end))
+end
+
 --// AimLock tracks only the living murderer from the shared role data.
 local function getMurdererAimPart()
     if not rolesAvailable or Murder == "" or Murder == LocalPlayer.Name then
@@ -1642,17 +2655,18 @@ local function getMurdererAimPart()
     end
 
     local character = murderer.Character
-    local head = character and character:FindFirstChild("Head")
-    if head and head:IsA("BasePart") then
-        return head
+    -- Body-only target: R15 UpperTorso, R6 Torso, then central body fallback.
+    for _, name in ipairs({"UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso"}) do
+        local part = character and character:FindFirstChild(name)
+        if part and part:IsA("BasePart") then
+            return part
+        end
     end
-
-    local root = character and character:FindFirstChild("HumanoidRootPart")
-    return root and root:IsA("BasePart") and root or nil
+    return nil
 end
 
 updateAimLock = function()
-    if state.unloaded or flingBusy or not state.aimLock or UIS:GetFocusedTextBox() then
+    if state.unloaded or state.spectateMurderer or flingBusy or not state.aimLock or UIS:GetFocusedTextBox() then
         return
     end
 
@@ -1679,219 +2693,68 @@ updateAimLock = function()
     end
 end
 
---// Feed the native weapon's mouse input, with a checked CreateBeam adapter
---// for weapons that send that known request. Cache targeting outside hooks:
---// property/method hooks must not yield or recursively query Roblox methods.
---// Counters show client activity, never server acceptance or confirmed damage.
-do
-    silentAimHook = {
-        installed = false, restores = {}, sample = nil, mouseReads = 0,
-        requestsSeen = 0, redirects = 0, lastRequest = "waiting for a shot",
-        message = "OFF",
-    }
-
-    getSilentAimRemote = function(tool)
-        local character = getCharacter()
-        if not character or not tool or tool.Parent ~= character then return nil end
-        local beam = tool:FindFirstChild("CreateBeam", true)
-        local remote = beam and beam:FindFirstChild("RemoteFunction")
-        return remote and remote:IsA("RemoteFunction") and remote or nil
+--// Camera-only FOV aim with LOS and team filters; only observed replicated character positions.
+updateSmoothAim = function(dt)
+    local circle = UIRefs.AimCircle
+    if circle then
+        circle.Visible = state.smoothAim and not state.unloaded and not state.spectateMurderer
+        circle.Size = UDim2.fromOffset(values.aimRadius * 2, values.aimRadius * 2)
     end
+    if not state.smoothAim or state.unloaded or state.spectateMurderer or flingBusy
+        or UIS:GetFocusedTextBox() then return end
+    local camera = Workspace.CurrentCamera
+    local myCharacter = LocalPlayer.Character
+    local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+    if not camera or camera.CameraType == Enum.CameraType.Scriptable or not myHumanoid
+        or myHumanoid.Health <= 0 then return end
+    if state.aimMurdererOnly and (not rolesAvailable or Murder == "") then return end
 
-    getSilentAimPosition = function(tool)
-        local character, humanoid = getCharacter(), getHumanoid()
-        if not character or not humanoid or humanoid.Health <= 0 then return nil, nil, "character unavailable" end
-        if not tool or tool.Parent ~= character then return nil, nil, "equip revolver" end
-        if not rolesAvailable then return nil, nil, "waiting for roles" end
-        if os.clock() - rolesUpdatedAt > CONFIG.SilentAimRoleMaxAge then return nil, nil, "role data stale" end
-        local target = getMurdererAimPart()
-        if not target then return nil, nil, "no living murderer" end
-        local muzzle = tool:FindFirstChild("Muzzle", true)
-        local handle = tool:FindFirstChild("Handle")
-        local root = getRoot()
-        local origin = muzzle and muzzle:IsA("Attachment") and muzzle.WorldPosition
-            or handle and handle:IsA("BasePart") and handle.Position
-            or root and root.Position
-        if not origin then return nil, nil, "weapon origin unavailable" end
-        local destination = target.Position
-        local direction = destination - origin
-        if direction.Magnitude < 0.001 or direction.Magnitude > CONFIG.SilentAimMaxRange then
-            return nil, nil, "target out of range"
-        end
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = {character}
-        params.IgnoreWater = true
-        params.RespectCanCollide = true
-        local hit = Workspace:Raycast(origin, direction, params)
-        if hit and (not hit.Instance or not hit.Instance:IsDescendantOf(target.Parent)) then
-            return nil, nil, "target obstructed"
-        end
-        return destination, target
-    end
-
-    local function paintSilentAimStatus()
-        if not silentAimStatus or state.unloaded then return end
-        if not state.silentAim then
-            silentAimStatus.Text = "Silent Aim: " .. silentAimHook.message
-            return
-        end
-        silentAimStatus.Text = "Silent Aim: " .. silentAimHook.message
-            .. "\nAim reads: " .. silentAimHook.mouseReads .. " • Requests: " .. silentAimHook.requestsSeen
-            .. " • Redirected: " .. silentAimHook.redirects
-            .. "\nLast: " .. silentAimHook.lastRequest
-    end
-
-    updateSilentAim = function()
-        silentAimHook.sample = nil
-        if not state.silentAim or state.unloaded then return end
-        local ok, err = pcall(function()
-            if not windowFocused or UIS:GetFocusedTextBox() then silentAimHook.message = "paused for input"; return end
-            if teleportBusy or flingBusy then silentAimHook.message = "paused for pickup / Fling"; return end
-            local tool = findRevolver()
-            local position, target, reason = getSilentAimPosition(tool)
-            if not position then silentAimHook.message = reason; return end
-            local targetCharacter = target.Parent
-            local remotes = {}
-            for _, item in ipairs(tool:GetDescendants()) do
-                if item:IsA("RemoteFunction") or item:IsA("RemoteEvent") then remotes[item] = true end
-            end
-            silentAimHook.sample = {
-                time = os.clock(), tool = tool, character = getCharacter(), humanoid = getHumanoid(),
-                position = position, hit = CFrame.new(position), target = target, targetCharacter = targetCharacter,
-                targetHumanoid = targetCharacter:FindFirstChildOfClass("Humanoid"),
-                murderer = Players:FindFirstChild(Murder), murdererName = Murder,
-                remote = getSilentAimRemote(tool), remotes = remotes,
-            }
-            silentAimHook.message = "ready • " .. Murder
-        end)
-        if not ok then silentAimHook.message = "target check failed: " .. tostring(err) end
-        paintSilentAimStatus()
-    end
-
-    local function getSilentAimSample()
-        local sample = silentAimHook.sample
-        if not sample or not state.silentAim or state.unloaded or teleportBusy or flingBusy or not windowFocused
-            or not rolesAvailable or os.clock() - rolesUpdatedAt > CONFIG.SilentAimRoleMaxAge
-            or os.clock() - sample.time > CONFIG.SilentAimSampleMaxAge
-            or Murder ~= sample.murdererName or LocalPlayer.Character ~= sample.character
-            or sample.tool.Parent ~= sample.character or not sample.humanoid or sample.humanoid.Health <= 0
-            or not sample.murderer or sample.murderer.Character ~= sample.targetCharacter
-            or sample.target.Parent ~= sample.targetCharacter or not sample.targetCharacter.Parent
-            or not sample.targetHumanoid or sample.targetHumanoid.Health <= 0 then return nil end
-        local data = roles[Murder]
-        if type(data) ~= "table" or data.Role ~= "Murderer" or data.Dead or data.Killed then return nil end
-        return sample
-    end
-
-    enableSilentAim = function()
-        if state.unloaded then return false, "menu unloaded" end
-        local installer = hookmetamethod
-        if type(installer) ~= "function" then
-            silentAimHook.message = "hook support unavailable"
-            paintSilentAimStatus()
-            return false, silentAimHook.message
-        end
-        if not silentAimHook.installed then
-            local restores = {}
-            local function install(method, makeHandler)
-                local original
-                local closure = makeHandler(function(...) return original(...) end)
-                if type(newcclosure) == "function" then
-                    local ok, wrapped = pcall(newcclosure, closure)
-                    if not ok or type(wrapped) ~= "function" then return false end
-                    closure = wrapped
+    local screenCenter = camera.ViewportSize * 0.5
+    local selected, closest = nil, values.aimRadius
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and (not state.aimMurdererOnly or player.Name == Murder)
+            and (not state.aimTeamCheck or not LocalPlayer.Team or not player.Team or LocalPlayer.Team ~= player.Team) then
+            local character = player.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            local part
+            if character then
+                if state.aimHead then
+                    part = character:FindFirstChild("Head")
+                else
+                    part = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
+                        or character:FindFirstChild("HumanoidRootPart")
                 end
-                local ok, previous = pcall(installer, game, method, closure)
-                if not ok or type(previous) ~= "function" then return false end
-                original = previous
-                table.insert(restores, {method = method, handler = closure, original = previous})
-                return true
             end
-            local isExecutorCall = checkcaller
-            silentAimHook.mouseInstalled = install("__index", function(original)
-                return function(self, key)
-                    if key ~= "Hit" and key ~= "Target" and key ~= "UnitRay" then return original(self, key) end
-                    local sample = getSilentAimSample()
-                    if not sample or typeof(self) ~= "Instance"
-                        or (type(isExecutorCall) == "function" and isExecutorCall()) then return original(self, key) end
-                    -- ToolMouse inherits Mouse. Dot notation avoids __namecall.
-                    if not self.IsA(self, "Mouse") then return original(self, key) end
-                    if key == "UnitRay" then
-                        local ray = original(self, key)
-                        if typeof(ray) ~= "Ray" then return ray end
-                        local direction = sample.position - ray.Origin
-                        if direction.Magnitude < 0.001 then return ray end
-                        silentAimHook.mouseReads += 1
-                        return Ray.new(ray.Origin, direction.Unit)
-                    end
-                    silentAimHook.mouseReads += 1
-                    return key == "Hit" and sample.hit or sample.target
-                end
-            end)
-            local getMethod = getnamecallmethod
-            if type(getMethod) == "function" then
-                silentAimHook.namecallInstalled = install("__namecall", function(original)
-                    return function(self, ...)
-                        if not state.silentAim or state.unloaded then return original(self, ...) end
-                        local method = getMethod()
-                        if method ~= "InvokeServer" and method ~= "FireServer" then return original(self, ...) end
-                        local sample = getSilentAimSample()
-                        if not sample or not sample.remotes[self] then return original(self, ...) end
-                        local args = table.pack(...)
-                        silentAimHook.requestsSeen += 1
-                        local types = {}
-                        for i = 1, math.min(args.n, 4) do types[i] = typeof(args[i]) end
-                        silentAimHook.lastRequest = method .. "(" .. table.concat(types, ", ") .. ")"
-                        if self == sample.remote and method == "InvokeServer" and args.n >= 2
-                            and args[1] == 1 and typeof(args[2]) == "Vector3" then
-                            args[2] = sample.position
-                            silentAimHook.redirects += 1
-                            return original(self, table.unpack(args, 1, args.n))
+            if humanoid and humanoid.Health > 0 and part and part:IsA("BasePart") then
+                local screenPos, onScreen = camera:WorldToViewportPoint(part.Position)
+                if onScreen and screenPos.Z > 0 then
+                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+                    if dist < closest then
+                        local visible = true
+                        if state.aimVisibleOnly then
+                            local rayParams = RaycastParams.new()
+                            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+                            rayParams.FilterDescendantsInstances = {myCharacter, character}
+                            rayParams.IgnoreWater = true
+                            local direction = part.Position - camera.CFrame.Position
+                            visible = Workspace:Raycast(camera.CFrame.Position, direction, rayParams) == nil
                         end
-                        -- Unknown contracts use the native mouse input. Never
-                        -- guess argument positions or forge new network requests.
-                        return original(self, ...)
+                        if visible then
+                            selected, closest = part, dist
+                        end
                     end
-                end)
-            end
-            if not silentAimHook.mouseInstalled and not silentAimHook.namecallInstalled then
-                silentAimHook.message = "could not install aim hooks"
-                paintSilentAimStatus()
-                return false, silentAimHook.message
-            end
-            silentAimHook.restores = restores
-            silentAimHook.installed = true
-            local getRaw = getrawmetatable
-            silentAimHook.restore = function()
-                if type(getRaw) ~= "function" then return end
-                local mt = getRaw(game)
-                for i = #restores, 1, -1 do
-                    local entry = restores[i]
-                    if mt and mt[entry.method] == entry.handler then installer(game, entry.method, entry.original) end
                 end
             end
         end
-        state.silentAim = true
-        rolesAvailable = false
-        silentAimHook.mouseReads, silentAimHook.requestsSeen, silentAimHook.redirects = 0, 0, 0
-        silentAimHook.lastRequest = "waiting for a shot"
-        silentAimHook.message = "waiting for roles"
-        silentAimHook.sample = nil
-        paintSilentAimStatus()
-        return true
     end
-
-    disableSilentAim = function()
-        state.silentAim = false
-        silentAimHook.sample = nil
-        silentAimHook.message = "OFF"
-        paintSilentAimStatus()
-    end
-
-    shutdownSilentAim = function()
-        disableSilentAim()
-        if silentAimHook.restore then pcall(silentAimHook.restore) end
+    if selected then
+        local cameraPos = camera.CFrame.Position
+        local direction = selected.Position - cameraPos
+        if direction.Magnitude > 0.001 then
+            local goal = CFrame.lookAt(cameraPos, selected.Position)
+            local alpha = 1 - math.exp(-values.aimSmooth * math.clamp(dt or 0.016, 0, 0.1))
+            camera.CFrame = camera.CFrame:Lerp(goal, alpha)
+        end
     end
 end
 
@@ -2012,9 +2875,9 @@ local function isOutsideFlingMap(bounds, position)
         or position.Z < bounds.low.Z - margin or position.Z > bounds.high.Z + margin
 end
 
---// Murderer fling: spin inside the target until the user presses Stop Fling.
---// Server collision rules/network ownership can prevent the target moving.
-stopMurdererFling = function()
+--// Role-based Inside Fling: local spin at target center until user release.
+--// Only the server can decide whether another player is displaced.
+stopRoleFling = function(releaseBurst)
     local trip = flingTrip
     if not trip or trip.finished then
         return
@@ -2023,8 +2886,39 @@ stopMurdererFling = function()
     if trip.stepConnection then
         trip.stepConnection:Disconnect()
     end
-    if trip.contactConnection then
-        trip.contactConnection:Disconnect()
+    -- On an intentional button release, make one final bounded contact attempt
+    -- before resetting our own character. This cannot set another player's
+    -- authoritative velocity; the server decides whether a collision moves them.
+    if releaseBurst and trip.active and not state.unloaded
+        and LocalPlayer.Character == trip.character and trip.root.Parent
+        and trip.humanoid.Health > 0 and trip.targetRoot and trip.targetRoot.Parent
+        and trip.targetCharacter and trip.targetRoot:IsDescendantOf(trip.targetCharacter)
+        and not trip.targetRoot.Anchored and trip.releaseDirection then
+        local releaseOK, releaseErr = pcall(function()
+            UIRefs.Status.Text = "Fling: final contact burst • returning shortly"
+            local dir = trip.releaseDirection
+            local targetPosition = trip.targetRoot.Position
+            -- Position once near the contact edge, not repeatedly inside the target.
+            local offset = math.max(1.3, math.min(2.0,
+                (trip.targetRoot.Size.X + trip.root.Size.X) * 0.45))
+            local rootToPivot = trip.root.CFrame:ToObjectSpace(trip.character:GetPivot())
+            local contact = CFrame.new(targetPosition - dir * offset) * trip.root.CFrame.Rotation
+            trip.character:PivotTo(contact * rootToPivot)
+            local finalVelocity = dir * CONFIG.FlingReleaseSpeed
+                + Vector3.new(0, CONFIG.FlingReleaseSpeed * 0.08, 0)
+            if trip.launchConstraint and trip.launchConstraint.Parent then
+                trip.launchConstraint.VectorVelocity = finalVelocity
+            end
+            trip.root.AssemblyLinearVelocity = finalVelocity
+            -- Allow at least a few normal physics steps before restoring position.
+            local untilTime = os.clock() + CONFIG.FlingReleaseTime
+            repeat
+                RunService.Heartbeat:Wait()
+            until os.clock() >= untilTime or state.unloaded
+                or LocalPlayer.Character ~= trip.character or not trip.root.Parent
+            print("[ScriptMM2 FLING] Release contact attempted; server displacement not verified")
+        end)
+        if not releaseOK then warn("[ScriptMM2 FLING] Release burst: " .. tostring(releaseErr)) end
     end
     if trip.spinConstraint then
         pcall(function() trip.spinConstraint:Destroy() end)
@@ -2095,28 +2989,30 @@ stopMurdererFling = function()
     flingBusy = false
     if state.noclip then applyNoclip() else restoreNoclip() end
     if not state.unloaded then
-        flingMurdererButton.Text = "Fling Murderer"
-        setButtonVisual(flingMurdererButton, false)
+        UIRefs.flingMurdererButton.Text = "Inside Fling Murderer"
+        UIRefs.flingSheriffButton.Text = "Inside Fling Sheriff"
+        setButtonVisual(UIRefs.flingMurdererButton, false)
+        setButtonVisual(UIRefs.flingSheriffButton, false)
     end
     return returned, returnError
 end
 
-local function flingMurderer()
+local function flingRole(roleName)
+    local isMurderer = roleName == "Murderer"
     if state.unloaded then return end
     if flingBusy then
-        local trip = flingTrip
-        local returned, returnError = stopMurdererFling()
-        if returnError then
-            Status.Text = "Fling return error: " .. tostring(returnError)
-        elseif trip and trip.active and not returned then
-            Status.Text = "Fling stopped: character changed/dead"
+        if flingTrip and flingTrip.roleName == roleName then
+            local returned, returnError = stopRoleFling(true)
+            UIRefs.Status.Text = returnError and ("Fling return error: " .. tostring(returnError))
+                or (returned and "Fling stopped • returned" or "Fling stopped")
         else
-            Status.Text = returned and "Fling stopped • returned" or "Fling stopped"
+            UIRefs.Status.Text = "Fling: stop current target before switching roles"
         end
         return
     end
+    if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
     if teleportBusy then
-        Status.Text = "Fling: wait for the revolver pickup to finish"
+        UIRefs.Status.Text = "Fling: wait for the revolver pickup to finish"
         return
     end
     if pauseAntiFling then pauseAntiFling() end
@@ -2126,7 +3022,7 @@ local function flingMurderer()
     local humanoid = getHumanoid()
     if not character or not root or not humanoid or humanoid.Health <= 0
         or root.Anchored or humanoid.Sit then
-        Status.Text = "Fling: character not ready / leave the seat first"
+        UIRefs.Status.Text = "Fling: character not ready / leave the seat first"
         return
     end
 
@@ -2135,33 +3031,54 @@ local function flingMurderer()
         returnPivot = character:GetPivot(), rootCFrame = root.CFrame,
         platformStand = humanoid.PlatformStand, autoRotate = humanoid.AutoRotate,
         startedFlying = state.fly, collisions = {}, physics = {}, active = false, finished = false,
+        roleName = roleName,
         flyVelocity = flyObjects.flyVelocity, flyGyro = flyObjects.flyGyro,
     }
     flingTrip = trip
     flingBusy = true
-    flingMurdererButton.Text = "Stop Fling [ON]"
-    setButtonVisual(flingMurdererButton, true)
-    Status.Text = "Fling: checking murderer..."
+    local activeButton = isMurderer and UIRefs.flingMurdererButton or UIRefs.flingSheriffButton
+    activeButton.Text = "Release " .. roleName .. " Inside Fling [ON]"
+    setButtonVisual(activeButton, true)
+    UIRefs.Status.Text = "Fling: checking " .. roleName .. "..."
 
     local outcome = "Fling stopped • returned"
     local ok, err = pcall(function()
-        if not refreshRoles() then
-            outcome = "Fling: roles unavailable"
-            return
-        end
-        if trip.finished or state.unloaded then
-            return
-        end
-        local murderer = Murder ~= "" and Players:FindFirstChild(Murder) or nil
-        if not murderer or murderer == LocalPlayer or not roleAlive(Murder) then
-            outcome = "Fling: no living murderer found"
+        -- Role data may arrive after the round starts. Never activate physics
+        -- until a living target is confirmed, and keep the wait cancellable.
+        local target, targetName
+        local roleDeadline = os.clock() + CONFIG.FlingRoleWait
+        repeat
+            if trip.finished or state.unloaded or LocalPlayer.Character ~= character then return end
+            refreshRoles()
+            targetName = isMurderer and Murder or Sheriff
+            target = targetName ~= "" and Players:FindFirstChild(targetName) or nil
+            if target and target ~= LocalPlayer and roleAlive(target.Name) then break end
+            UIRefs.Status.Text = "Fling: waiting for living " .. roleName .. " / round..."
+            task.wait(0.35)
+        until os.clock() >= roleDeadline
+        if not target or target == LocalPlayer or not roleAlive(target.Name) then
+            outcome = "Fling: no living " .. roleName .. " after role wait"
             return
         end
 
-        local targetCharacter = murderer.Character
-        local targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
-        if not targetRoot or targetRoot.Anchored then
-            outcome = "Fling: target is unavailable / anchored"
+        -- Character parts and the role snapshot can arrive on different frames.
+        -- Wait briefly rather than treating a still-streaming target as a failed fling.
+        local targetCharacter, targetRoot
+        local readyDeadline = os.clock() + CONFIG.FlingTargetWait
+        repeat
+            if trip.finished or state.unloaded or LocalPlayer.Character ~= character then return end
+            if (isMurderer and Murder or Sheriff) ~= target.Name then
+                outcome = "Fling: role changed while waiting for target"
+                return
+            end
+            targetCharacter = target.Character
+            targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
+            if targetRoot and targetRoot.Parent and not targetRoot.Anchored and roleAlive(target.Name) then break end
+            UIRefs.Status.Text = "Fling: waiting for " .. roleName .. " character..."
+            RunService.Heartbeat:Wait()
+        until os.clock() >= readyDeadline
+        if not targetRoot or not targetRoot.Parent or targetRoot.Anchored or not roleAlive(target.Name) then
+            outcome = "Fling: target not ready / alive (retry after round starts)"
             return
         end
         if LocalPlayer.Character ~= character or not root.Parent or humanoid.Health <= 0 then
@@ -2184,17 +3101,27 @@ local function flingMurderer()
         local boundsRefreshTime = os.clock()
         local outsideSince = nil
         local outsideConfirmed = false
-        local runningStatus = "Fling: contact attempt • Stop = return"
+        local runningStatus = "Inside Fling: spinning inside target • Release = burst / return"
         local attemptStarted = os.clock()
         local collisionCheckTime = -math.huge
         local collisionAllowed = false
+        local collisionProbeOK = true
+        local noContactSince = nil
+        local lastResponseAt = os.clock()
+        local previousTargetPosition = targetRoot.Position
+        local lastAlignment = -math.huge
+        local initialTargetPosition = targetRoot.Position
+        local bestOutwardTravel = 0
         -- Role lookup can yield while the user changes Fly. Capture the current
         -- controllers immediately before pausing them, not before that request.
         trip.flyVelocity, trip.flyGyro = flyObjects.flyVelocity, flyObjects.flyGyro
         trip.startedFlying = state.fly
         trip.platformStand, trip.autoRotate = humanoid.PlatformStand, humanoid.AutoRotate
+        trip.targetCharacter = targetCharacter
+        trip.targetRoot = targetRoot
+        trip.releaseDirection = direction
         trip.active = true
-        Status.Text = runningStatus
+        UIRefs.Status.Text = runningStatus
 
         for _, part in ipairs(character:GetChildren()) do
             if part:IsA("BasePart") then
@@ -2257,17 +3184,31 @@ local function flingMurderer()
         trip.launchConstraint.Parent = root
 
         local function hasCollisionPair()
-            for _, part in ipairs(targetCharacter:GetChildren()) do
-                if part:IsA("BasePart") and part.CanCollide and root:CanCollideWith(part) then
-                    local blocked = false
-                    for _, constraint in ipairs(root:GetNoCollisionConstraints()) do
-                        if constraint.Enabled and ((constraint.Part0 == root and constraint.Part1 == part)
-                            or (constraint.Part1 == root and constraint.Part0 == part)) then
-                            blocked = true
-                            break
+            -- HumanoidRootPart is sometimes non-collidable even when torso/limbs
+            -- can transmit a real contact. Check all of our actual body parts.
+            for _, ownPart in ipairs(character:GetChildren()) do
+                if ownPart:IsA("BasePart") and ownPart.CanCollide then
+                    for _, targetPart in ipairs(targetCharacter:GetChildren()) do
+                        if targetPart:IsA("BasePart") and targetPart.CanCollide
+                            and ownPart:CanCollideWith(targetPart) then
+                            local blocked = false
+                            -- Some clients do not expose this optional inspection method.
+                            -- A failed diagnostic must not terminate the physics loop.
+                            local constraintsOK, constraints = pcall(function()
+                                return ownPart:GetNoCollisionConstraints()
+                            end)
+                            if constraintsOK and type(constraints) == "table" then
+                                for _, constraint in ipairs(constraints) do
+                                    if constraint.Enabled and ((constraint.Part0 == ownPart and constraint.Part1 == targetPart)
+                                        or (constraint.Part1 == ownPart and constraint.Part0 == targetPart)) then
+                                        blocked = true
+                                        break
+                                    end
+                                end
+                            end
+                            if not blocked then return true end
                         end
                     end
-                    if not blocked then return true end
                 end
             end
             return false
@@ -2275,60 +3216,61 @@ local function flingMurderer()
 
         local function canMaintainContact()
             return not trip.finished and not trip.error and not state.unloaded
-                and LocalPlayer.Character == character and murderer.Character == targetCharacter
+                and LocalPlayer.Character == character and target.Character == targetCharacter
                 and root.Parent and targetRoot.Parent and humanoid.Health > 0
                 and not targetRoot.Anchored and rolesAvailable
-                and Murder == murderer.Name and roleAlive(murderer.Name)
+                and (isMurderer and Murder or Sheriff) == target.Name and roleAlive(target.Name)
         end
-        local function alignWithMurderer()
-            -- Stay inside the body at the same height, slightly behind the
-            -- launch direction so the overlap has a consistent outward side.
-            local inset = math.min(0.25, targetRoot.Size.X * 0.2, targetRoot.Size.Z * 0.2)
-            local contact = CFrame.new(targetRoot.Position - direction * inset) * root.CFrame.Rotation
-            character:PivotTo(contact * rootToPivot)
+        local function alignWithTarget()
+            -- Inside mode: place OUR pivot at the target root rather than orbiting
+            -- around its perimeter. Only realign at bounded intervals/drift;
+            -- never teleport in PostSimulation, which erases collision impulses.
+            local center = targetRoot.Position
+            local inside = CFrame.new(center) * root.CFrame.Rotation
+            character:PivotTo(inside * rootToPivot)
         end
+        alignWithTarget()
+        lastAlignment = os.clock()
 
         trip.stepConnection = RunService.PreSimulation:Connect(function(deltaTime)
             if not canMaintainContact() then return end
             local stepOK, stepError = pcall(function()
                 if os.clock() - collisionCheckTime >= 0.25 then
-                    collisionAllowed = hasCollisionPair()
+                    -- Optional physics APIs may not be implemented by every client.
+                    -- Record a diagnostic instead of crashing the connection.
+                    local probeOK, allowed = pcall(hasCollisionPair)
+                    collisionProbeOK = probeOK
+                    collisionAllowed = probeOK and allowed or false
                     collisionCheckTime = os.clock()
                 end
-                local aboveRoof = not bounds or targetRoot.Position.Y > bounds.high.Y + CONFIG.FlingRoofMargin
                 local targetVelocity = targetRoot.AssemblyLinearVelocity
-                local horizontal = Vector3.new(targetVelocity.X, 0, targetVelocity.Z)
-                local stepTime = math.clamp(deltaTime or 1 / 60, 1 / 240, 0.1)
-                local contactWidth = math.max(0.5, math.min(root.Size.X, root.Size.Z,
-                    targetRoot.Size.X, targetRoot.Size.Z) * 0.75)
-                -- Build the first contact at a speed that does not cross the
-                -- whole body between solver updates. Boost once the target
-                -- actually starts moving outward; our own speed is not proof.
-                local speed = math.min(CONFIG.FlingContactSpeed, contactWidth * 4 / stepTime)
-                if horizontal:Dot(direction) >= CONFIG.FlingResponseSpeed then
-                    speed = CONFIG.FlingSpeed
+                local outwardSpeed = targetVelocity:Dot(direction)
+                -- Collision impulses must run for a full simulation step. Do NOT
+                -- teleport us again in PostSimulation: that cancelled the solver.
+                local now = os.clock()
+                local displacement = targetRoot.Position - root.Position
+                local distance = displacement.Magnitude
+                -- Follow the target's center instead of driving toward a map edge.
+                -- The high angular velocity supplies the rotational contact.
+                -- Translational correction is bounded to avoid tunneling.
+                if distance > CONFIG.FlingInsideMaxDrift
+                    or now - lastAlignment >= CONFIG.FlingInsideRealignInterval then
+                    alignWithTarget()
+                    lastAlignment = now
+                    displacement = targetRoot.Position - root.Position
+                    distance = displacement.Magnitude
                 end
-                local launch = collisionAllowed and (direction * speed
-                    + Vector3.new(0, speed * (aboveRoof and 0.08 or 0.3), 0)) or Vector3.zero
-                -- Follow a moving target without letting reported velocity make
-                -- the contact speed grow indefinitely after repeated hits.
+                local follow = distance > 0.08
+                    and displacement.Unit * math.min(CONFIG.FlingInsideFollowSpeed, distance * 35)
+                    or Vector3.zero
                 local carry = targetVelocity
-                if carry.Magnitude > 2000 then carry = carry.Unit * 2000 end
+                if carry.Magnitude > 180 then carry = carry.Unit * 180 end
                 humanoid:Move(Vector3.zero, false)
-                alignWithMurderer()
-                trip.launchConstraint.VectorVelocity = launch + carry
+                trip.launchConstraint.VectorVelocity = carry + follow
                 root.AssemblyLinearVelocity = trip.launchConstraint.VectorVelocity
                 root.AssemblyAngularVelocity = spinVelocity
             end)
             if not stepOK then trip.error = stepError end
-        end)
-        trip.contactConnection = RunService.PostSimulation:Connect(function()
-            if not canMaintainContact() then return end
-            local contactOK, contactError = pcall(function()
-                -- Correct upward drift after physics without resetting rotation.
-                alignWithMurderer()
-            end)
-            if not contactOK then trip.error = contactError end
         end)
 
         repeat
@@ -2337,11 +3279,11 @@ local function flingMurderer()
                 outcome = "Fling cancelled: character changed/dead"
                 break
             end
-            if not rolesAvailable or Murder ~= murderer.Name then
-                outcome = "Fling: murderer role changed / roles unavailable"
+            if not rolesAvailable or (isMurderer and Murder or Sheriff) ~= target.Name then
+                outcome = "Fling: " .. roleName .. " role changed / roles unavailable"
                 break
             end
-            if murderer.Character ~= targetCharacter or not targetRoot.Parent or not roleAlive(murderer.Name) then
+            if target.Character ~= targetCharacter or not targetRoot.Parent or not roleAlive(target.Name) then
                 outcome = "Fling: target left / died"
                 break
             end
@@ -2350,6 +3292,21 @@ local function flingMurderer()
                 break
             end
             local currentTime = os.clock()
+            -- A client-side position reading is not proof of a server fling.
+            -- Abort a futile attempt rather than leaving the player spinning forever.
+            if not collisionAllowed then
+                noContactSince = noContactSince or currentTime
+            else
+                noContactSince = nil
+            end
+            local targetDelta = (targetRoot.Position - previousTargetPosition).Magnitude
+            previousTargetPosition = targetRoot.Position
+            if collisionAllowed and (targetDelta > 0.35
+                or targetRoot.AssemblyLinearVelocity.Magnitude >= CONFIG.FlingResponseSpeed) then
+                lastResponseAt = currentTime
+            end
+            -- No-response is diagnostic only. The ON state remains controlled by
+            -- the user; a stationary target must not silently stop the fling.
             if bounds and bounds.refresh and currentTime - boundsRefreshTime >= 0.15 then
                 bounds.refresh()
                 boundsRefreshTime = currentTime
@@ -2358,27 +3315,28 @@ local function flingMurderer()
                 outsideSince = outsideSince or currentTime
                 if not outsideConfirmed and currentTime - outsideSince >= CONFIG.FlingExitConfirmTime then
                     outsideConfirmed = true
-                    Status.Text = bounds.estimated and "Fling: outside estimated map bounds • Stop Fling = return"
-                        or "Fling: target outside map bounds • Stop Fling = return"
+                    UIRefs.Status.Text = bounds.estimated and "Inside Fling: target outside estimated bounds • Release = return"
+                        or "Inside Fling: target outside bounds • Release = return"
                 end
             else
                 outsideSince = nil
                 if outsideConfirmed then
                     outsideConfirmed = false
-                    Status.Text = runningStatus
+                    UIRefs.Status.Text = runningStatus
                 end
             end
             if not outsideConfirmed then
-                local velocity = targetRoot.AssemblyLinearVelocity
-                local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+                local traveled = (targetRoot.Position - initialTargetPosition):Dot(direction)
+                bestOutwardTravel = math.max(bestOutwardTravel, traveled)
+                local outwardSpeed = targetRoot.AssemblyLinearVelocity:Dot(direction)
                 if not collisionAllowed and currentTime - attemptStarted >= 0.25 then
-                    Status.Text = "Fling: collisions blocked • Stop = return"
-                elseif horizontalSpeed >= CONFIG.FlingResponseSpeed then
-                    Status.Text = "Fling: target moving • Stop = return"
+                    UIRefs.Status.Text = "Inside Fling: checking collision pairs • server response unverified"
+                elseif bestOutwardTravel >= 8 and outwardSpeed >= CONFIG.FlingResponseSpeed then
+                    UIRefs.Status.Text = "Inside Fling: target displacement observed (client) • Release = burst"
                 elseif currentTime - attemptStarted >= CONFIG.FlingResponseGrace then
-                    Status.Text = "Fling: no knockback detected • Stop = return"
+                    UIRefs.Status.Text = "Inside Fling: target stationary locally • Release = burst / return"
                 else
-                    Status.Text = runningStatus
+                    UIRefs.Status.Text = runningStatus
                 end
             end
             RunService.Heartbeat:Wait()
@@ -2387,16 +3345,16 @@ local function flingMurderer()
     end)
 
     if trip.finished then return end
-    local returned, returnError = stopMurdererFling()
+    local returned, returnError = stopRoleFling()
     if state.unloaded then return end
     if not ok then
-        Status.Text = "Fling error: " .. tostring(err)
+        UIRefs.Status.Text = "Fling error: " .. tostring(err)
     elseif returnError then
-        Status.Text = "Fling return error: " .. tostring(returnError)
+        UIRefs.Status.Text = "Fling return error: " .. tostring(returnError)
     elseif trip.active and not returned then
-        Status.Text = "Fling cancelled: character changed/dead"
+        UIRefs.Status.Text = "Fling cancelled: character changed/dead"
     else
-        Status.Text = outcome
+        UIRefs.Status.Text = outcome
     end
 end
 
@@ -2871,28 +3829,10 @@ updateAntiFling = function()
         refreshAntiFlingPairs(character)
         antiFlingGuard.scanTime = os.clock()
     end
-    acceptAntiFlingTeleport()
-    local movementState = humanoid:GetState()
-    local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
-    local idle = humanoid.MoveDirection.Magnitude <= 0.05
-    local canHold = idle and not humanoid.Jump and os.clock() >= antiFlingGuard.jumpUntil
-        and os.clock() >= antiFlingGuard.teleportUntil
-        and (antiFlingGuard.holding or (grounded and (movementState == Enum.HumanoidStateType.Running
-            or movementState == Enum.HumanoidStateType.RunningNoPhysics
-            or movementState == Enum.HumanoidStateType.Landed
-            or movementState == Enum.HumanoidStateType.GettingUp)))
-    if canHold then
-        if not antiFlingGuard.holding then
-            antiFlingGuard.idlePivot = character:GetPivot()
-            antiFlingGuard.holding = true
-        end
-        -- Keep the root unanchored so the game's normal movement/round
-        -- teleport path can move it. Hold only the ordinary idle simulation.
-        character:PivotTo(antiFlingGuard.idlePivot)
-        root.AssemblyLinearVelocity, root.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
-    else
-        releaseAntiFlingHold()
-    end
+    -- A saved-pivot idle lock used to undo normal server round teleports.
+    -- Never PivotTo an old position as part of AntiFling. Contact protection
+    -- stays active and the character remains under the game's movement code.
+    antiFlingGuard.safePivot = character:GetPivot()
 end
 
 guardAntiFling = function()
@@ -2900,28 +3840,26 @@ guardAntiFling = function()
     if not state.antiFling or state.unloaded or teleportBusy or flingBusy or state.fly
         or not guard.character or LocalPlayer.Character ~= guard.character
         or not guard.root.Parent or guard.humanoid.Health <= 0 then return end
-    if guard.root.Anchored or guard.humanoid.Sit then releaseAntiFlingHold(true); return end
-    if acceptAntiFlingTeleport() then return end
-    if guard.holding then
-        guard.character:PivotTo(guard.idlePivot)
-        guard.root.AssemblyLinearVelocity, guard.root.AssemblyAngularVelocity = Vector3.zero, Vector3.zero
-        guard.safePivot = guard.idlePivot
+    if guard.root.Anchored or guard.humanoid.Sit then return end
+
+    -- Detect relocation rather than fighting it. Even high-velocity server
+    -- teleports must not be snapped back to the previous spawn/lobby point.
+    local current = guard.character:GetPivot()
+    local previous = guard.safePivot
+    guard.safePivot = current
+    if previous and (current.Position - previous.Position).Magnitude >= CONFIG.AntiFlingTeleportDistance then
+        guard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
         return
     end
-    local velocity = guard.root.AssemblyLinearVelocity
-    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
-    local speedLimit = math.max(80, guard.humanoid.WalkSpeed * 2,
-        state.strafe and values.strafeSpeed * 1.5 or 0)
-    local jumpSpeed = guard.humanoid.UseJumpPower and guard.humanoid.JumpPower
-        or math.sqrt(2 * math.max(0, Workspace.Gravity) * guard.humanoid.JumpHeight)
-    if horizontal.Magnitude > speedLimit or velocity.Y > math.max(100, jumpSpeed * 2)
-        or guard.root.AssemblyAngularVelocity.Magnitude > 80 then
-        if guard.safePivot then guard.character:PivotTo(guard.safePivot) end
-        local movement = guard.humanoid.MoveDirection * guard.humanoid.WalkSpeed
-        guard.root.AssemblyLinearVelocity = Vector3.new(movement.X, math.min(velocity.Y, jumpSpeed), movement.Z)
-        guard.root.AssemblyAngularVelocity = state.spin and Vector3.new(0, 12, 0) or Vector3.zero
+    if os.clock() < guard.teleportUntil then return end
+
+    -- Collision constraints above are the primary protection. Only dampen
+    -- clearly abnormal spin; do not write CFrame/PivotTo or zero out normal
+    -- linear motion, as round transitions and scripted game movement need it.
+    local angular = guard.root.AssemblyAngularVelocity
+    if angular.Magnitude > 160 then
+        guard.root.AssemblyAngularVelocity = angular.Unit * 40
     end
-    guard.safePivot = guard.character:GetPivot()
 end
 
 --// Air steering preserves vertical motion and existing momentum above the cap.
@@ -2945,6 +3883,12 @@ end
 
 --// Physics movement runs after input, before the simulation.
 local function updateMovement(deltaTime)
+    if state.coinFarm then
+        local farmHum, farmRoot = getHumanoid(), getRoot()
+        if not farmHum or farmHum.Health <= 0 or not farmRoot or farmRoot.Anchored then
+            if UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+        end
+    end
     if state.unloaded or teleportBusy or (flingTrip and flingTrip.active) then
         return
     end
@@ -3050,6 +3994,9 @@ local function updateMovement(deltaTime)
                 movement = Vector3.zero
             end
 
+            if state.coinFarm and UIRefs.coinFarmVelocity then
+                movement = UIRefs.coinFarmVelocity(currentRoot)
+            end
             flyVelocity.Velocity = movement
 
             if look.Magnitude > 0.001 then
@@ -3066,16 +4013,16 @@ end
 addConnection(RunService.PreSimulation:Connect(function(deltaTime)
     local ok, err = pcall(updateAntiFling)
     if not ok then
-        setAntiFlingToggle(false)
-        Status.Text = "AntiFling error: " .. tostring(err)
+        UIRefs.setAntiFlingToggle(false)
+        UIRefs.Status.Text = "AntiFling error: " .. tostring(err)
     end
     updateMovement(deltaTime)
 end))
 addConnection(RunService.PostSimulation:Connect(function()
     local ok, err = pcall(guardAntiFling)
     if not ok then
-        setAntiFlingToggle(false)
-        Status.Text = "AntiFling error: " .. tostring(err)
+        UIRefs.setAntiFlingToggle(false)
+        UIRefs.Status.Text = "AntiFling error: " .. tostring(err)
     end
 end))
 
@@ -3106,9 +4053,11 @@ end))
 local function onCharacterAdded(character)
     if state.unloaded or not character or LocalPlayer.Character ~= character then return end
     disconnectBucket(characterConnections)
+    if UIRefs.stopBring then UIRefs.stopBring("Bring stopped: respawn") end
     finishMurdererShot()
     finishRevolverTrip()
-    stopMurdererFling()
+    if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+    stopRoleFling()
     stopRegularSpin()
     stopFly()
     pauseAntiFling()
@@ -3119,8 +4068,9 @@ local function onCharacterAdded(character)
     if not humanoid or not root or state.unloaded or LocalPlayer.Character ~= character then
         return
     end
-
+    stopSpectateMurderer()
     setCharacterMovement()
+    if state.localGhost then applyLocalGhost(character) end
 
     if state.fly and not teleportBusy and not flingBusy then
         startFly()
@@ -3140,11 +4090,18 @@ if LocalPlayer.Character then
     end)
 end
 
---// Role refresh and ESP update
-addConnection(RunService.Heartbeat:Connect(function()
-    if state.silentAim and not state.unloaded then updateSilentAim() end
+--// Refresh ghost periodically for newly equipped accessories, not each frame.
+local ghostRefresh = 0
+addConnection(RunService.Heartbeat:Connect(function(dt)
+    if not state.localGhost or state.unloaded then return end
+    ghostRefresh += dt
+    if ghostRefresh >= 0.3 then
+        ghostRefresh = 0
+        applyLocalGhost(getCharacter())
+    end
 end))
 
+--// Role refresh and ESP update
 local roleTimer = 0
 local roleRefreshPending = false
 addConnection(RunService.Heartbeat:Connect(function(deltaTime)
@@ -3158,7 +4115,7 @@ addConnection(RunService.Heartbeat:Connect(function(deltaTime)
     end
     roleTimer = 0
 
-    if (state.roleESP or state.innocentESP or state.aimLock or state.silentAim or flingBusy) and not roleRefreshPending then
+    if (state.roleESP or state.innocentESP or state.aimLock or state.spectateMurderer or flingBusy) and not roleRefreshPending then
         -- Network requests must not run inside the camera callback or overlap
         -- on every Heartbeat while a previous role request is still waiting.
         roleRefreshPending = true
@@ -3173,10 +4130,12 @@ addConnection(RunService.Heartbeat:Connect(function(deltaTime)
 end))
 
 addConnection(Players.PlayerRemoving:Connect(function(player)
+    if UIRefs.rebuildSpectatorList then task.defer(UIRefs.rebuildSpectatorList) end
     destroyESPForPlayer(player)
 end))
 
 addConnection(Players.PlayerAdded:Connect(function(player)
+    if UIRefs.rebuildSpectatorList then task.defer(UIRefs.rebuildSpectatorList) end
     if state.esp or state.roleESP or state.innocentESP then
         task.delay(0.5, function()
             if not state.unloaded then
@@ -3204,17 +4163,23 @@ addConnection(RunService.RenderStepped:Connect(function(deltaTime)
     end
 end))
 
---// Combat binds: X = Shoot Murderer, B = AimLock, G = pickup (Mouse4 via remap).
+--// Combat binds: X = Shoot Murderer, B = AimLock, H = pickup.
 addConnection(UIS.InputBegan:Connect(function(input, processed)
     if processed or state.unloaded or UIS:GetFocusedTextBox() then
         return
     end
 
     if input.KeyCode == CONFIG.AimLockKey then
-        setAimLockToggle(not state.aimLock)
+        UIRefs.setAimLockToggle(not state.aimLock)
     elseif input.KeyCode == CONFIG.RevolverPickupKey then
         teleportToRevolver()
     elseif input.KeyCode == Enum.KeyCode.X and not IsMobile then
+        shootMurderer()
+    elseif input.KeyCode == Enum.KeyCode.K and not IsMobile then
+        if UIRefs.attackSelected then task.spawn(UIRefs.attackSelected) end
+    elseif input.KeyCode == Enum.KeyCode.J and not IsMobile and state.xenoShotSnap then
+        -- Existing X-shot implementation: checks live Murderer, equips revolver,
+        -- briefly aims camera, activates once, and restores camera/tool.
         shootMurderer()
     end
 end))
@@ -3222,12 +4187,12 @@ end))
 --// UI actions
 local function setMainVisible(visible)
     state.uiVisible = visible
-    Main.Visible = visible
-    reopen.Visible = IsMobile and not visible
+    UIRefs.Main.Visible = visible
+    UIRefs.reopen.Visible = IsMobile and not visible
     if IsMobile then
-        MobileFlyControls.Visible = state.fly
+        UIRefs.MobileFlyControls.Visible = state.fly
     else
-        MobileFlyControls.Visible = false
+        UIRefs.MobileFlyControls.Visible = false
     end
 end
 
@@ -3237,65 +4202,157 @@ addConnection(UIS.InputBegan:Connect(function(input, processed)
     end
 
     if input.KeyCode == CONFIG.UIKey then
-        -- F9 is also a core Roblox shortcut; it may arrive as processed input.
-        if processed and input.KeyCode ~= Enum.KeyCode.F9 then
-            return
-        end
+        if processed then return end
         setMainVisible(not state.uiVisible)
-        if input.KeyCode == Enum.KeyCode.F9 then
-            task.defer(function()
-                if not state.unloaded then
-                    pcall(function()
-                        game:GetService("StarterGui"):SetCore("DevConsoleVisible", false)
-                    end)
-                end
-            end)
-        end
     end
 end))
 
-addConnection(reopen.MouseButton1Click:Connect(function()
+addConnection(UIRefs.reopen.MouseButton1Click:Connect(function()
     setMainVisible(true)
 end))
 
-addConnection(Minimize.MouseButton1Click:Connect(function()
+addConnection(UIRefs.Minimize.MouseButton1Click:Connect(function()
     setMainVisible(false)
 end))
+
+--// Bring adaptation: attempt to position ORIGINAL replicated models locally.
+--// This does not create server hitboxes, take server ownership, or confirm replication.
+do
+    local bring = { target = nil, all = false,
+        savedCollision = setmetatable({}, {__mode = "k"}) }
+    local function setBringStatus(message)
+        if UIRefs.bringStatus then UIRefs.bringStatus.Text = message end
+        if not state.unloaded and UIRefs.Status then UIRefs.Status.Text = message end
+    end
+    local function restoreBringCollision()
+        for part, wasCollidable in pairs(bring.savedCollision) do
+            if part and part.Parent then
+                pcall(function() part.CanCollide = wasCollidable end)
+            end
+            bring.savedCollision[part] = nil
+        end
+    end
+    UIRefs.stopBring = function(reason)
+        state.bringActive = false
+        bring.target, bring.all = nil, false
+        restoreBringCollision()
+        if UIRefs.bringAllButton then UIRefs.bringAllButton.Text = "Bring All [OFF]" end
+        setBringStatus(reason or "Bring OFF • local collision restored")
+    end
+    UIRefs.startBring = function(player)
+        if state.unloaded then return end
+        if teleportBusy or flingBusy or shootMurdererBusy or state.coinFarm then
+            setBringStatus("Bring: stop TP / Fling / Coin Farm first")
+            return
+        end
+        local me, root, hum = getCharacter(), getRoot(), getHumanoid()
+        if not me or not root or not hum or hum.Health <= 0 then
+            setBringStatus("Bring: your character is not ready")
+            return
+        end
+        if player and (player == LocalPlayer or player.Parent ~= Players) then
+            setBringStatus("Bring: target unavailable")
+            return
+        end
+        if state.bringActive then UIRefs.stopBring() end
+        state.bringActive = true
+        bring.target, bring.all = player, player == nil
+        UIRefs.bringAllButton.Text = bring.all and "Bring All [ON]" or "Bring All [OFF]"
+        setBringStatus((bring.all and "Bring All" or ("Bring " .. player.DisplayName))
+            .. " • LOCAL attempt; server/hits unverified")
+    end
+    addConnection(UIRefs.bringAllButton.MouseButton1Click:Connect(function()
+        if state.bringActive and bring.all then
+            UIRefs.stopBring()
+        else
+            UIRefs.startBring(nil)
+        end
+    end))
+    addConnection(UIRefs.stopBringButton.MouseButton1Click:Connect(function()
+        UIRefs.stopBring()
+    end))
+    addConnection(RunService.Heartbeat:Connect(function()
+        if not state.bringActive or state.unloaded then return end
+        if teleportBusy or flingBusy or shootMurdererBusy or state.coinFarm then
+            UIRefs.stopBring("Bring stopped: conflicting movement action")
+            return
+        end
+        local me, myRoot, hum = getCharacter(), getRoot(), getHumanoid()
+        if not me or not myRoot or not hum or hum.Health <= 0 then
+            UIRefs.stopBring("Bring stopped: character unavailable")
+            return
+        end
+        if bring.target and bring.target.Parent ~= Players then
+            UIRefs.stopBring("Bring stopped: target left")
+            return
+        end
+        local destination = CFrame.new((myRoot.CFrame * CFrame.new(0, 0, -3)).Position)
+        local targets = bring.all and Players:GetPlayers() or {bring.target}
+        for _, player in ipairs(targets) do
+            if player and player ~= LocalPlayer then
+                local character = player.Character
+                local otherRoot = character and (character:FindFirstChild("HumanoidRootPart")
+                    or character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso"))
+                local otherHum = character and character:FindFirstChildOfClass("Humanoid")
+                if otherRoot and otherRoot:IsA("BasePart") and otherHum and otherHum.Health > 0 then
+                    for _, part in ipairs(character:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            if bring.savedCollision[part] == nil then
+                                bring.savedCollision[part] = part.CanCollide
+                            end
+                            part.CanCollide = false
+                        end
+                    end
+                    otherRoot.CFrame = destination
+                end
+            end
+        end
+    end))
+end
 
 local function unload()
     if state.unloaded then
         return
     end
+    if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+    if UIRefs.stopBring then UIRefs.stopBring() end
+    if UIRefs.clearAttackSelection then UIRefs.clearAttackSelection() end
     state.unloaded = true
+    Silent.stop()
     finishMurdererShot()
     finishRevolverTrip()
-    stopMurdererFling()
+    stopRoleFling()
+    stopSpectateMurderer()
 
-    setSpeedToggle(false)
-    setJumpToggle(false)
-    setNoclipToggle(false)
-    setFlyToggle(false)
-    setInfiniteToggle(false)
-    setFullBrightToggle(false)
-    setGravityToggle(false)
-    setSpinToggle(false)
-    setBunnyToggle(false)
-    setStrafeToggle(false)
-    setESPToggle(false)
-    setRoleESPToggle(false)
-    setInnocentESPToggle(false)
-    setESPLinesToggle(false)
-    setESPNamesToggle(false)
-    setAimLockToggle(false)
-    setAntiFlingToggle(false)
-    setSilentAimToggle(false)
-    shutdownSilentAim()
+    UIRefs.setSpeedToggle(false)
+    UIRefs.setJumpToggle(false)
+    UIRefs.setNoclipToggle(false)
+    UIRefs.setFlyToggle(false)
+    UIRefs.setInfiniteToggle(false)
+    UIRefs.setFullBrightToggle(false)
+    UIRefs.setGravityToggle(false)
+    UIRefs.setSpinToggle(false)
+    UIRefs.setBunnyToggle(false)
+    UIRefs.setStrafeToggle(false)
+    UIRefs.setESPToggle(false)
+    UIRefs.setRoleESPToggle(false)
+    UIRefs.setInnocentESPToggle(false)
+    UIRefs.setESPLinesToggle(false)
+    UIRefs.setESPNamesToggle(false)
+    UIRefs.setAimLockToggle(false)
+    if UIRefs.setSmoothAimToggle then UIRefs.setSmoothAimToggle(false) end
+    if UIRefs.setXenoShotSnapToggle then UIRefs.setXenoShotSnapToggle(false) end
+    UIRefs.setAntiFlingToggle(false)
+    UIRefs.setLocalGhostToggle(false)
+    UIRefs.setHitDiagToggle(false)
 
     stopFly()
     restoreNoclip()
     clearESP()
     disableFullBright()
     restoreCameraFOV()
+    RunService:UnbindFromRenderStep(smoothAimBindingName)
+    if UIRefs.AimCircleGui then UIRefs.AimCircleGui:Destroy() end
 
     disconnectBucket(characterConnections)
     disconnectBucket(connections)
@@ -3306,95 +4363,323 @@ local function unload()
         end)
     end
 
-    if ScriptMM2 then
+    if UIRefs.ScriptMM2 then
         pcall(function()
-            ScriptMM2:Destroy()
+            UIRefs.ScriptMM2:Destroy()
         end)
     end
 end
 
-addConnection(teleportRevolverButton.MouseButton1Click:Connect(function()
+--// Travel locations: use verified replicated landmarks/players, never fixed map coordinates.
+do
+    local function lobbySpawn()
+        -- A direct Lobby model/folder is safer than taking an arbitrary SpawnLocation
+        -- from an active map (where it could send the player back into the round).
+        local function normalized(name)
+            return string.lower(name):gsub("[^%w]", "")
+        end
+        local lobby = nil
+        for _, child in ipairs(Workspace:GetChildren()) do
+            local name = normalized(child.Name)
+            if (child:IsA("Model") or child:IsA("Folder")) and
+                (name == "lobby" or name == "mainlobby" or name == "lobbymap") then
+                lobby = child
+                break
+            end
+        end
+        if lobby then
+            local best = nil
+            for _, part in ipairs(lobby:GetDescendants()) do
+                if part:IsA("SpawnLocation") then return part end
+                if part:IsA("BasePart") then
+                    local name = normalized(part.Name)
+                    if name:find("spawn", 1, true) then best = best or part end
+                end
+            end
+            if best then return best end
+            -- Some MM2 lobby revisions use an ordinary floor with no Spawn part.
+            -- Prefer a broad anchored floor within the explicitly named Lobby model.
+            local floor, area = nil, 0
+            for _, part in ipairs(lobby:GetDescendants()) do
+                if part:IsA("BasePart") and part.Anchored and part.CanCollide
+                    and part.Size.Y <= 16 then
+                    local horizontal = part.Size.X * part.Size.Z
+                    if horizontal > area and horizontal >= 100 then
+                        floor, area = part, horizontal
+                    end
+                end
+            end
+            if floor then return floor end
+        end
+        for _, part in ipairs(Workspace:GetDescendants()) do
+            if part:IsA("BasePart") then
+                local name = normalized(part.Name)
+                if name == "lobbyspawn" or name == "lobbyspawnpoint" or name == "spawnlobby" then
+                    return part
+                end
+            end
+        end
+        return nil
+    end
+
+    local function mapPlayer()
+        -- Refresh role information to avoid using stale data from the prior round.
+        if not refreshRoles() or not rolesAvailable or Murder == "" then return nil end
+        local names = {Murder, Sheriff, Hero}
+        -- If all unique role holders are our own character, look for another
+        -- alive player with current round data (including Innocent).
+        for playerName, data in pairs(roles) do
+            if type(data) == "table" and data.Role and data.Role ~= "Spectator" then
+                table.insert(names, playerName)
+            end
+        end
+        for _, name in ipairs(names) do
+            if type(name) == "string" and name ~= "" and roleAlive(name) then
+                local player = Players:FindFirstChild(name)
+                local char = player and player.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                if root and not root.Anchored then return root end
+            end
+        end
+        return nil
+    end
+
+    local function travel(kind)
+        if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+        if state.unloaded then return end
+        if teleportBusy or flingBusy or shootMurdererBusy then
+            UIRefs.Status.Text = "TP: stop Fling / finish weapon action first"
+            return
+        end
+        local char, root, hum = getCharacter(), getRoot(), getHumanoid()
+        if not char or not root or not hum or hum.Health <= 0 or root.Anchored or hum.Sit then
+            UIRefs.Status.Text = "TP: living character required"
+            return
+        end
+        teleportBusy = true
+        local ok, err = pcall(function()
+            local target = kind == "map" and mapPlayer() or lobbySpawn()
+            if not target or not target.Parent then
+                UIRefs.Status.Text = kind == "map" and "TP Map: active round / player not found"
+                    or "TP Lobby: lobby spawn not replicated"
+                return
+            end
+            if state.unloaded or LocalPlayer.Character ~= char or hum.Health <= 0 then return end
+            local destination
+            if kind == "map" then
+                -- A small horizontal separation prevents spawning inside a player.
+                local proposed = target.Position + Vector3.new(5, 3, 0)
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = {char, target.Parent}
+                params.IgnoreWater = true
+                local ground = Workspace:Raycast(proposed + Vector3.new(0, 15, 0), Vector3.new(0, -55, 0), params)
+                if not ground or not ground.Instance.CanCollide then
+                    UIRefs.Status.Text = "TP Map: safe floor not found"
+                    return
+                end
+                destination = Vector3.new(proposed.X, ground.Position.Y + hum.HipHeight + root.Size.Y + 1.5, proposed.Z)
+            else
+                destination = target.Position + Vector3.new(0, target.Size.Y * 0.5 + hum.HipHeight + root.Size.Y + 1, 0)
+            end
+            local rootToPivot = root.CFrame:ToObjectSpace(char:GetPivot())
+            local desiredRoot = CFrame.new(destination) * root.CFrame.Rotation
+            pauseAntiFling()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            char:PivotTo(desiredRoot * rootToPivot)
+            UIRefs.Status.Text = kind == "map" and "TP Map: moved near round player" or "TP Lobby: moved to lobby spawn"
+        end)
+        teleportBusy = false
+        if not ok then
+            UIRefs.Status.Text = "TP " .. kind .. " error: " .. tostring(err)
+            warn("[ScriptMM2 TP] " .. tostring(err))
+        end
+    end
+    -- One-shot client reposition near a selected live player. No server hitbox changes.
+    UIRefs.teleportToPlayer = function(player)
+        if state.unloaded then return end
+        if teleportBusy or flingBusy or shootMurdererBusy then
+            UIRefs.Status.Text = "TP Player: stop Fling / finish weapon action first"
+            return
+        end
+        if not player or player == LocalPlayer or player.Parent ~= Players then
+            UIRefs.Status.Text = "TP Player: player unavailable"
+            return
+        end
+        local character, root, humanoid = getCharacter(), getRoot(), getHumanoid()
+        local targetCharacter = player.Character
+        local targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
+        local targetHumanoid = targetCharacter and targetCharacter:FindFirstChildOfClass("Humanoid")
+        if not character or not root or not humanoid or humanoid.Health <= 0 or humanoid.Sit or root.Anchored then
+            UIRefs.Status.Text = "TP Player: your character is not ready"
+            return
+        end
+        if not targetRoot or not targetRoot:IsA("BasePart") or not targetHumanoid or targetHumanoid.Health <= 0 then
+            UIRefs.Status.Text = "TP Player: target is not alive / loaded"
+            return
+        end
+        teleportBusy = true
+        local ok, err = pcall(function()
+            if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+            local offset = targetRoot.CFrame.RightVector * 5
+            local proposed = targetRoot.Position + offset
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = {character, targetCharacter}
+            params.IgnoreWater = true
+            local hit = Workspace:Raycast(proposed + Vector3.new(0, 15, 0), Vector3.new(0, -55, 0), params)
+            if not hit or not hit.Instance or not hit.Instance.CanCollide then
+                UIRefs.Status.Text = "TP Player: safe ground not found near " .. player.Name
+                return
+            end
+            if state.unloaded or player.Parent ~= Players or targetRoot.Parent ~= targetCharacter
+                or targetHumanoid.Health <= 0 or LocalPlayer.Character ~= character or humanoid.Health <= 0 then
+                UIRefs.Status.Text = "TP Player: character changed; cancelled"
+                return
+            end
+            local destination = Vector3.new(proposed.X, hit.Position.Y + humanoid.HipHeight + root.Size.Y + 1.5, proposed.Z)
+            local rootToPivot = root.CFrame:ToObjectSpace(character:GetPivot())
+            pauseAntiFling()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            character:PivotTo((CFrame.new(destination) * root.CFrame.Rotation) * rootToPivot)
+            UIRefs.Status.Text = "TP Player: moved near " .. player.DisplayName
+        end)
+        teleportBusy = false
+        if not ok then
+            UIRefs.Status.Text = "TP Player error: " .. tostring(err)
+            warn("[ScriptMM2 TP Player] " .. tostring(err))
+        end
+    end
+    addConnection(UIRefs.teleportMapButton.MouseButton1Click:Connect(function()
+        task.spawn(travel, "map")
+    end))
+    addConnection(UIRefs.teleportLobbyButton.MouseButton1Click:Connect(function()
+        task.spawn(travel, "lobby")
+    end))
+end
+
+addConnection(UIRefs.teleportRevolverButton.MouseButton1Click:Connect(function()
     teleportToRevolver()
 end))
 
-addConnection(flingMurdererButton.MouseButton1Click:Connect(flingMurderer))
+addConnection(UIRefs.flingMurdererButton.MouseButton1Click:Connect(function()
+    task.spawn(flingRole, "Murderer")
+end))
+addConnection(UIRefs.flingSheriffButton.MouseButton1Click:Connect(function()
+    task.spawn(flingRole, "Sheriff")
+end))
+addConnection(UIRefs.spectateMurdererButton.MouseButton1Click:Connect(toggleSpectateMurderer))
+addConnection(UIRefs.spectateSheriffButton.MouseButton1Click:Connect(UIRefs.toggleSpectateSheriff))
+addConnection(UIRefs.spectateReturnButton.MouseButton1Click:Connect(UIRefs.stopSpectate))
+UIRefs.rebuildSpectatorList()
 
-addConnection(refreshButton.MouseButton1Click:Connect(function()
+addConnection(UIRefs.stopFlingButton.MouseButton1Click:Connect(function()
+    if not flingBusy then
+        UIRefs.Status.Text = "Fling: already stopped"
+        return
+    end
+    local returned, err = stopRoleFling(true)
+    UIRefs.Status.Text = err and ("Fling return error: " .. tostring(err))
+        or (returned and "Fling stopped • returned" or "Fling stopped")
+end))
+
+addConnection(UIRefs.refreshButton.MouseButton1Click:Connect(function()
     if refreshRoles() then
-        Status.Text = "Roles refreshed"
+        UIRefs.Status.Text = "Roles refreshed"
         task.delay(1.5, function()
             if not state.unloaded then
                 if LocalPlayer.Name == Murder then
-                    Status.Text = "Role: Murderer"
+                    UIRefs.Status.Text = "Role: Murderer"
                 elseif LocalPlayer.Name == Sheriff then
-                    Status.Text = "Role: Sheriff"
+                    UIRefs.Status.Text = "Role: Sheriff"
                 else
-                    Status.Text = "Roles refreshed"
+                    UIRefs.Status.Text = "Roles refreshed"
                 end
             end
         end)
     end
 end))
 
-addConnection(resetButton.MouseButton1Click:Connect(function()
+addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
+    if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+    if UIRefs.stopBring then UIRefs.stopBring() end
+    if UIRefs.clearAttackSelection then UIRefs.clearAttackSelection() end
+    Silent.stop()
+    if UIRefs.setSilentGunToggle then UIRefs.setSilentGunToggle(false) end
+    if UIRefs.setSilentKnifeToggle then UIRefs.setSilentKnifeToggle(false) end
     finishMurdererShot()
     finishRevolverTrip()
-    stopMurdererFling()
-    setSpeedToggle(false)
-    setJumpToggle(false)
-    setNoclipToggle(false)
-    setFlyToggle(false)
-    setInfiniteToggle(false)
-    setFullBrightToggle(false)
-    setGravityToggle(false)
-    setSpinToggle(false)
-    setBunnyToggle(false)
-    setStrafeToggle(false)
-    setESPToggle(false)
-    setRoleESPToggle(false)
-    setInnocentESPToggle(false)
-    setESPLinesToggle(false)
-    setESPNamesToggle(true)
-    setAimLockToggle(false)
-    setAntiFlingToggle(false)
-    setSilentAimToggle(false)
+    stopRoleFling()
+    UIRefs.setSpeedToggle(false)
+    UIRefs.setJumpToggle(false)
+    UIRefs.setNoclipToggle(false)
+    UIRefs.setFlyToggle(false)
+    UIRefs.setInfiniteToggle(false)
+    UIRefs.setFullBrightToggle(false)
+    UIRefs.setGravityToggle(false)
+    UIRefs.setSpinToggle(false)
+    UIRefs.setBunnyToggle(false)
+    UIRefs.setStrafeToggle(false)
+    UIRefs.setESPToggle(false)
+    UIRefs.setRoleESPToggle(false)
+    UIRefs.setInnocentESPToggle(false)
+    UIRefs.setESPLinesToggle(false)
+    UIRefs.setESPNamesToggle(true)
+    UIRefs.setAimLockToggle(false)
+    if UIRefs.setSmoothAimToggle then UIRefs.setSmoothAimToggle(false) end
+    if UIRefs.setXenoShotSnapToggle then UIRefs.setXenoShotSnapToggle(false) end
+    UIRefs.setAntiFlingToggle(false)
+    UIRefs.setLocalGhostToggle(false)
+    UIRefs.setHitDiagToggle(false)
     restoreCameraFOV()
 
     values.walkSpeed = CONFIG.DefaultWalkSpeed
     values.jumpPower = CONFIG.DefaultJumpPower
     values.flySpeed = CONFIG.DefaultFlySpeed
+    values.coinFarmSpeed = CONFIG.CoinFarmSpeed
     values.strafeSpeed = CONFIG.DefaultStrafeSpeed
     values.fov = CONFIG.DefaultFOV
+    values.aimRadius = 115
+    values.aimSmooth = 9
+    if UIRefs.setAimRadius then UIRefs.setAimRadius(115) end
+    if UIRefs.setAimSmooth then UIRefs.setAimSmooth(9) end
+    if UIRefs.setAimVisibleToggle then UIRefs.setAimVisibleToggle(true) end
+    if UIRefs.setAimTeamToggle then UIRefs.setAimTeamToggle(true) end
+    if UIRefs.setAimMurdererToggle then UIRefs.setAimMurdererToggle(true) end
+    if UIRefs.setAimHeadToggle then UIRefs.setAimHeadToggle(false) end
 
-    if setWalkSpeedSlider then setWalkSpeedSlider(CONFIG.DefaultWalkSpeed) end
-    if setJumpPowerSlider then setJumpPowerSlider(CONFIG.DefaultJumpPower) end
-    if setFlySpeedSlider then setFlySpeedSlider(CONFIG.DefaultFlySpeed) end
-    if setStrafeSpeedSlider then setStrafeSpeedSlider(CONFIG.DefaultStrafeSpeed) end
-    if setFOVSlider then setFOVSlider(CONFIG.DefaultFOV, true) end
+    if UIRefs.setWalkSpeedSlider then UIRefs.setWalkSpeedSlider(CONFIG.DefaultWalkSpeed) end
+    if UIRefs.setJumpPowerSlider then UIRefs.setJumpPowerSlider(CONFIG.DefaultJumpPower) end
+    if UIRefs.setFlySpeedSlider then UIRefs.setFlySpeedSlider(CONFIG.DefaultFlySpeed) end
+    if UIRefs.setCoinFarmSpeedSlider then UIRefs.setCoinFarmSpeedSlider(CONFIG.CoinFarmSpeed) end
+    if UIRefs.setStrafeSpeedSlider then UIRefs.setStrafeSpeedSlider(CONFIG.DefaultStrafeSpeed) end
+    if UIRefs.setFOVSlider then UIRefs.setFOVSlider(CONFIG.DefaultFOV, true) end
     setCharacterMovement()
 
     clearESP()
-    Status.Text = "Settings reset"
+    UIRefs.Status.Text = "Settings reset"
 end))
 
-addConnection(Close.MouseButton1Click:Connect(unload))
-addConnection(unloadButton.MouseButton1Click:Connect(unload))
+addConnection(UIRefs.Close.MouseButton1Click:Connect(unload))
+addConnection(UIRefs.unloadButton.MouseButton1Click:Connect(unload))
 
 --// Device-specific UI
 if IsMobile then
-    Title.Text = "ScriptMM2 | Mobile  •  " .. VERSION
-    Status.Text = "Tap MOD to reopen • drag MOD to move"
+    UIRefs.Title.Text = "ScriptMM2 | Mobile  •  " .. VERSION
+    UIRefs.Status.Text = "Tap MOD to reopen • drag MOD to move"
     Scale.Scale = 0.9
-    reopen.Visible = false
+    UIRefs.reopen.Visible = false
 else
-    Title.Text = "ScriptMM2 | PC  •  " .. VERSION
-    Status.Text = "F9 = menu • B = AimLock • G = grab"
-    reopen.Visible = false
-    MobileFlyControls.Visible = false
+    UIRefs.Title.Text = "ScriptMM2 | PC  •  " .. VERSION
+    UIRefs.Status.Text = "Mouse4/G = menu • B = AimLock • H = grab"
+    UIRefs.reopen.Visible = false
+    UIRefs.MobileFlyControls.Visible = false
 end
 
 --// Apply enabled overrides without changing the game's untouched defaults.
 setCharacterMovement()
 refreshRoles()
 
-print("[ScriptMM2] " .. VERSION .. " loaded successfully. F9 = show/hide, B = AimLock, G = Grab Revolver (Mouse4 via remap).")
+print("[ScriptMM2] " .. VERSION .. " loaded successfully. Mouse4/G = menu, B = AimLock, H = Grab Revolver, X = camera shot, J = optional Xeno Shot Snap, K = attack selected.")
