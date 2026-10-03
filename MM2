@@ -5,15 +5,117 @@
 --// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
 --// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
 
-local VERSION = "V0.9.47"
+local VERSION = "V1.0"
 local UIRefs = {}
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+
+--// V1.0 UI audio. The GitHub URLs return MP3 bytes (they are NOT Roblox SoundIds).
+--// Xeno needs writefile and getcustomasset/getsynasset for local playback.
+--// Downloads and audio loading are asynchronous; unsupported executors keep the UI functional.
+local SoundService = game:GetService("SoundService")
+local ContentProvider = game:GetService("ContentProvider")
+local MenuAudio = {
+    ready = {},
+    playing = {},
+    urls = {
+        open = "https://raw.githubusercontent.com/JornyZipper/myscripts/main/sounds/sounds_VKL%20%28mp3cut.net%29%281%29.mp3",
+        close = "https://raw.githubusercontent.com/JornyZipper/myscripts/main/sounds/VIKL.mp3",
+        toggleOn = "https://raw.githubusercontent.com/JornyZipper/myscripts/main/sounds/onfunction.mp3",
+        toggleOff = "https://raw.githubusercontent.com/JornyZipper/myscripts/main/sounds/ui-sound-off%282%29%20%28mp3cut.net%29.mp3",
+        tab = "https://raw.githubusercontent.com/JornyZipper/myscripts/main/sounds/tabsclick.mp3",
+    },
+    files = {
+        open = "ScriptMM2_UI_V1_VKL_cut1.mp3",
+        close = "ScriptMM2_UI_V1_VIKL.mp3",
+        toggleOn = "ScriptMM2_UI_V1_onfunction.mp3",
+        toggleOff = "ScriptMM2_toggle_off_cut2_final.mp3",",
+        tab = "ScriptMM2_UI_V1_tabsclick.mp3",
+    },
+    volumes = {open=0.48, close=0.48, toggleOn=0.38, toggleOff=1.00, tab=0.32},
+    volumeFactor = 1,
+}
+
+local function playMenuSound(which)
+    local sound = MenuAudio.ready[which]
+    -- Never queue a late sound after the window's animation has finished.
+    if not sound or not sound.Parent or not sound.IsLoaded then return end
+    pcall(function()
+        sound:Stop()
+        sound.TimePosition = 0
+        sound:Play()
+    end)
+end
+
+local function setupMenuAudio()
+    local assetFn = type(getcustomasset) == "function" and getcustomasset
+        or type(getsynasset) == "function" and getsynasset or nil
+    if type(writefile) ~= "function" or not assetFn then
+        warn("[ScriptMM2 AUDIO] Local MP3 unavailable: requires writefile + getcustomasset/getsynasset; menu remains functional")
+        return
+    end
+    for which, url in pairs(MenuAudio.urls) do
+        task.spawn(function()
+            if MenuAudio.unloaded then return end
+            local filename = MenuAudio.files[which]
+            local cached = false
+            if type(isfile) == "function" then
+                local ok, exists = pcall(isfile, filename)
+                cached = ok and exists == true
+            end
+            if not cached then
+                local ok, body = pcall(function() return game:HttpGet(url) end)
+                if not ok or type(body) ~= "string" or #body < 128
+                    or (body:sub(1, 3) ~= "ID3" and body:byte(1) ~= 255) then
+                    warn("[ScriptMM2 AUDIO] Download failed: " .. which .. " (" .. tostring(body) .. ")")
+                    return
+                end
+                local saved, err = pcall(writefile, filename, body)
+                if not saved then
+                    warn("[ScriptMM2 AUDIO] Cache write failed: " .. which .. " (" .. tostring(err) .. ")")
+                    return
+                end
+            end
+            local ok, assetId = pcall(assetFn, filename)
+            if not ok or type(assetId) ~= "string" or assetId == "" then
+                warn("[ScriptMM2 AUDIO] Local asset unavailable: " .. which .. " (" .. tostring(assetId) .. ")")
+                return
+            end
+            if MenuAudio.unloaded then return end
+            local sound = Instance.new("Sound")
+            sound.Name = "ScriptMM2_UI_" .. which
+            sound.SoundId = assetId
+            sound.Volume = (MenuAudio.volumes[which] or 0.4) * MenuAudio.volumeFactor
+            sound.Looped = false
+            sound.Parent = SoundService
+            -- Preload before publishing it to button handlers: on first click
+            -- a not-yet-loaded MP3 must be skipped, not played after the tween.
+            local preloadOK, preloadErr = pcall(function()
+                ContentProvider:PreloadAsync({sound})
+            end)
+            if MenuAudio.unloaded then
+                sound:Destroy()
+                return
+            end
+            if not preloadOK or not sound.IsLoaded then
+                warn("[ScriptMM2 AUDIO] Not preloaded: " .. which .. " (" .. tostring(preloadErr) .. ")")
+                sound:Destroy()
+                return
+            end
+            MenuAudio.ready[which] = sound
+            print("[ScriptMM2 AUDIO] Preloaded: " .. which)
+        end)
+    end
+end
+
+task.spawn(setupMenuAudio)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -26,10 +128,10 @@ local CONFIG = {
     CoinFarmSpeed = 18, -- default auto-collect travel speed
     MinCoinFarmSpeed = 10,
     MaxCoinFarmSpeed = 250,
-    CoinFarmReach = 0.80, -- approach the pickup closely; do not stop outside touch range
-    CoinFarmScanInterval = 8.0, -- full map fallback only; new coins are indexed by DescendantAdded
-    CoinFarmMinFreshCoins = 2, -- require genuinely new round pickups, not old decorative/stale coins
-    CoinFarmSpawnConfirm = 0.85, -- prevent one-frame false start while the map loads
+    CoinFarmReach = 1.65, -- V0.9.3: switch immediately at coin proximity, without braking
+    CoinFarmScanInterval = 45.0, -- rare fallback; spawned coins are indexed by DescendantAdded
+    CoinFarmMinFreshCoins = 1, -- start flying when the FIRST available round coin is visible
+    CoinFarmSpawnConfirm = 0.25, -- short confirmation once an actual coin is indexed
     CoinFarmRetryDelay = 4.0, -- unconfirmed coins are retried, never permanently counted as collected
     CoinFarmRoundLimit = 40, -- stop flight when observed bag reaches 40; conservative pickup fallback
     DefaultStrafeSpeed = 60,
@@ -108,6 +210,7 @@ local state = {
     innocentESP = false,
     espLines = false,
     espNames = true,
+    espInfoCards = true, -- controls ESP name/role/distance billboard independently of highlights
     aimLock = false,
     smoothAim = false,
     fovIndicator = false, -- read-only FOV target preview, never alters camera or shot
@@ -119,7 +222,6 @@ local state = {
     aimMurdererOnly = true,
     aimHead = false,
     antiFling = false,
-    localGhost = false, -- visual-only; does not replicate to other players
     hitRegistrationDiagnostic = false, -- read-only client position/LOS diagnostics
     bringActive = false, -- local attempt only; server replication is not guaranteed
     coinFarm = false,
@@ -154,7 +256,11 @@ local coinFarm = {targets = {}, skipped = setmetatable({}, {__mode="k"}), target
     freshSince = nil, allowExistingCoins = false, collected = 0, pendingPickups = {}, visited = setmetatable({}, {__mode = "k"}), limitReached = false,
     deathLock = false, deathEmptySince = nil, limitEmptySince = nil,
     targetSet = setmetatable({}, {__mode = "k"}), lastHudRead = -1, cachedBagCount = nil,
-    lastRefresh = 0, coinLikeSample = nil, lastDiagnostic = 0}
+    lastRefresh = 0, coinLikeSample = nil, lastDiagnostic = 0,
+    scanGeneration = 0, scanRunning = false, baselineScan = false, roundEnded = false,
+    roundEndKnown = setmetatable({}, {__mode = "k"}), lastNearestCheck = 0,
+    partCache = setmetatable({}, {__mode = "k"}), bagLabels = nil, lastBagIndex = -math.huge,
+    lastMovementStatus = -math.huge}
 local flyObjects = {
     active = false,
     up = false,
@@ -502,28 +608,6 @@ local function getRoot()
     return character:FindFirstChild("HumanoidRootPart")
 end
 
---// Visual-only ghost. LocalTransparencyModifier does NOT replicate to other clients.
-local ghostSaved = setmetatable({}, {__mode = "k"})
-local function restoreLocalGhost()
-    for part, original in pairs(ghostSaved) do
-        if part and part.Parent then
-            pcall(function() part.LocalTransparencyModifier = original end)
-        end
-        ghostSaved[part] = nil
-    end
-end
-local function applyLocalGhost(character)
-    if not state.localGhost or not character then return end
-    for _, part in ipairs(character:GetDescendants()) do
-        if part:IsA("BasePart") then
-            if ghostSaved[part] == nil then
-                ghostSaved[part] = part.LocalTransparencyModifier
-            end
-            part.LocalTransparencyModifier = 1
-        end
-    end
-end
-
 local function stopRegularSpin()
     if spinState.root and spinState.root.Parent and not flingBusy then
         pcall(function() spinState.root.AssemblyAngularVelocity = spinState.velocity end)
@@ -600,14 +684,23 @@ local function isPointerEnd(input, source)
             and input.UserInputType == Enum.UserInputType.MouseButton1))
 end
 
+-- V1.0: restrained graphite / mint design; common style for toggles and selected tabs.
+local UITheme = {
+    panel = Color3.fromRGB(13, 19, 29), surface = Color3.fromRGB(22, 31, 44),
+    item = Color3.fromRGB(28, 40, 54), active = Color3.fromRGB(25, 93, 85),
+    accent = Color3.fromRGB(78, 224, 187), text = Color3.fromRGB(230, 240, 247),
+    muted = Color3.fromRGB(142, 162, 177), border = Color3.fromRGB(51, 71, 87),
+}
+local UIStyling = {
+    colors = setmetatable({}, {__mode = "k"}),
+    buttons = setmetatable({}, {__mode = "k"}),
+    userScale = 1,
+}
 local function setButtonVisual(button, enabled)
-    if enabled then
-        button.TextColor3 = Color3.fromRGB(220, 255, 235)
-        button.BackgroundColor3 = Color3.fromRGB(38, 115, 72)
-    else
-        button.TextColor3 = Color3.fromRGB(220, 220, 225)
-        button.BackgroundColor3 = Color3.fromRGB(37, 37, 43)
-    end
+    if not button or not button.Parent then return end
+    UIStyling.buttons[button] = enabled
+    button.TextColor3 = enabled and UITheme.accent or UITheme.text
+    button.BackgroundColor3 = enabled and UITheme.active or UITheme.item
 end
 
 --// V0.9.36: live four-language UI. English source strings remain authoritative.
@@ -723,6 +816,8 @@ local TEXT_TRANSLATIONS = {
     ["Fling Selected: choose a player in SPECTATE first"] = {ru="Флинг: сначала выбери игрока в НАБЛЮДЕНИИ", uk="Флінг: спершу обери гравця у СПОСТЕРЕЖЕННІ", de="Fling: Wähle zuerst einen Spieler unter ZUSCHAUEN"},
     ["Fling Selected: attempt finished; server result unverified."] = {ru="Флинг: попытка закончена; результат сервера неизвестен.", uk="Флінг: спробу завершено; результат сервера невідомий.", de="Fling: Versuch abgeschlossen; Serverergebnis unbestätigt."},
     ["Fling Selected: stopped • returned"] = {ru="Флинг остановлен • возврат выполнен", uk="Флінг зупинено • повернення виконано", de="Fling gestoppt • zurückgekehrt"},
+    ["Coin Farm: ON • round ended; waiting for next coins"] = {ru="Фарм монет: раунд окончен • ждём новые монеты", uk="Фарм монет: раунд завершено • чекаємо нові монети", de="Münzfarm: Runde beendet • warte auf neue Münzen"},
+    ["Coin Farm: new round • waiting for coin spawn"] = {ru="Фарм монет: новый раунд • ждём появления монет", uk="Фарм монет: новий раунд • чекаємо появи монет", de="Münzfarm: neue Runde • warte auf Münzen"},
     ["Coin Farm: ON • defeated; waiting for next round"] = {ru="Фарм монет: ВКЛ • погиб; ожидание следующего раунда", uk="Фарм монет: УВІМК • загинув; очікування наступного раунду", de="Münzfarm: AN • besiegt; warte auf nächste Runde"},
     ["Coin Farm: 40/40 • Fly OFF; waiting for next round"] = {ru="Фарм монет: 40/40 • полёт выключен; ожидание следующего раунда", uk="Фарм монет: 40/40 • політ вимкнено; очікування наступного раунду", de="Münzfarm: 40/40 • Flug AUS; warte auf nächste Runde"},
     ["Coin Farm: OFF • Fly/NoClip restored"] = {ru="Фарм монет: ВЫКЛ • полёт/коллизии восстановлены", uk="Фарм монет: ВИМК • політ/зіткнення відновлено", de="Münzfarm: AUS • Flug/Noclip zurückgesetzt"},
@@ -789,7 +884,6 @@ local TEXT_TRANSLATIONS = {
     [" retries"] = {ru=" повторов", uk=" повторів", de=" Wiederholungen"},
     [" hidden"] = {ru=" скрытых", uk=" прихованих", de=" ausgeblendet"},
     ["target outside estimated bounds"] = {ru="цель вне предполагаемых границ", uk="ціль поза передбачуваними межами", de="Ziel außerhalb geschätzter Grenzen"},
-    ["Invisible (local view)"] = {ru="Невидимость (локально)", uk="Невидимість (локально)", de="Unsichtbar (nur lokal)"},
     ["FullBright"] = {ru="Полная яркость", uk="Повна яскравість", de="Volle Helligkeit"},
     ["Low Gravity"] = {ru="Низкая гравитация", uk="Низька гравітація", de="Niedrige Schwerkraft"},
     ["Spin"] = {ru="Вращение", uk="Обертання", de="Drehen"},
@@ -798,6 +892,7 @@ local TEXT_TRANSLATIONS = {
     ["Innocent ESP"] = {ru="ESP мирных", uk="ESP мирних", de="Unschuldigen-ESP"},
     ["ESP Lines"] = {ru="Линии ESP", uk="Лінії ESP", de="ESP-Linien"},
     ["ESP Names"] = {ru="Имена ESP", uk="Імена ESP", de="ESP-Namen"},
+    ["ESP Info Cards"] = {ru="Таблички ESP", uk="Таблички ESP", de="ESP-Infokarten"},
     ["FOV"] = {ru="Поле зрения", uk="Поле зору", de="Sichtfeld"},
     ["Hit Position Diagnostic (READ ONLY)"] = {ru="Диагностика попаданий (ТОЛЬКО ЧТЕНИЕ)", uk="Діагностика влучань (ЛИШЕ ЧИТАННЯ)", de="Trefferdiagnose (NUR LESEN)"},
     ["Coin Farm: ON • defeated; waiting for round end"] = {ru="Фарм монет: ВКЛ • погиб; ожидание конца раунда", uk="Фарм монет: УВІМК • загинув; очікування завершення раунду", de="Münzfarm: AN • besiegt; warte auf Rundenende"},
@@ -939,6 +1034,21 @@ local function create(className, properties, parent)
         object[property] = value
     end
     object.Parent = parent
+    -- The creation-time mapping lets existing frames, strokes and slider fills
+    -- follow the selected accent without modifying role/ESP or FOV colors.
+    local bindings = nil
+    for property, value in pairs(properties) do
+        if property == "BackgroundColor3" or property == "TextColor3" or property == "Color" then
+            for key, color in pairs(UITheme) do
+                if value == color then
+                    bindings = bindings or {}
+                    bindings[property] = key
+                    break
+                end
+            end
+        end
+    end
+    if bindings then UIStyling.colors[object] = bindings end
     Localization.track(object)
     return object
 end
@@ -959,61 +1069,94 @@ UIRefs.Main = create("Frame", {
     Name = "Main",
     AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5),
-    Size = UDim2.fromOffset(470, 570),
-    BackgroundColor3 = Color3.fromRGB(22, 22, 27),
+    Size = UDim2.fromOffset(580, 610),
+    BackgroundColor3 = UITheme.panel,
     BorderSizePixel = 0,
 }, UIRefs.ScriptMM2)
 
+-- One per-window scale permits a springy open/close without modifying the
+-- device/viewport UIScale used by all overlays and draggable controls.
+UIRefs.WindowScale = create("UIScale", {Scale = 1}, UIRefs.Main)
+
 create("UICorner", {
-    CornerRadius = UDim.new(0, 12),
+    CornerRadius = UDim.new(0, 16),
 }, UIRefs.Main)
 
 create("UIStroke", {
-    Color = Color3.fromRGB(70, 70, 80),
-    Thickness = 1,
-    Transparency = 0.2,
+    Color = UITheme.border, Thickness = 1, Transparency = 0.05,
 }, UIRefs.Main)
 
 UIRefs.TopBar = create("Frame", {
     Name = "TopBar",
-    Size = UDim2.new(1, 0, 0, 52),
-    BackgroundColor3 = Color3.fromRGB(28, 28, 34),
+    Size = UDim2.new(1, 0, 0, 70),
+    BackgroundColor3 = UITheme.surface,
     BorderSizePixel = 0,
 }, UIRefs.Main)
 
 create("UICorner", {
-    CornerRadius = UDim.new(0, 12),
+    CornerRadius = UDim.new(0, 16),
 }, UIRefs.TopBar)
+-- Brand mark without a top accent line.
+local BrandTile = create("Frame", {Name="BrandTile", Position=UDim2.fromOffset(14, 15),
+    Size=UDim2.fromOffset(38, 38), BackgroundColor3=UITheme.active, BorderSizePixel=0}, UIRefs.TopBar)
+create("UICorner", {CornerRadius=UDim.new(0, 11)}, BrandTile)
+-- Player avatar: use Roblox's native thumbnail API, no GitHub/local image dependency.
+-- Retry briefly while Roblox prepares the thumbnail instead of keeping the S forever.
+local BrandGlyph = create("TextLabel", {Name="BrandGlyph", Size=UDim2.fromScale(1, 1), BackgroundTransparency=1,
+    Text="S", TextColor3=UITheme.accent, Font=Enum.Font.GothamBlack, TextSize=23}, BrandTile)
+local BrandAvatar = create("ImageLabel", {
+    Name="ScripterAvatar", Size=UDim2.fromScale(1, 1), BackgroundTransparency=1,
+    Image="", ScaleType=Enum.ScaleType.Crop, Visible=false, BorderSizePixel=0,
+}, BrandTile)
+create("UICorner", {CornerRadius=UDim.new(0, 11)}, BrandAvatar)
+task.spawn(function()
+    for attempt = 1, 8 do
+        if state.unloaded or not BrandAvatar.Parent then return end
+        local ok, thumbnail, isReady = pcall(function()
+            return Players:GetUserThumbnailAsync(LocalPlayer.UserId,
+                Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+        end)
+        if ok and isReady and type(thumbnail) == "string" and thumbnail ~= "" then
+            if state.unloaded or not BrandAvatar.Parent then return end
+            BrandAvatar.Image = thumbnail
+            BrandAvatar.Visible = true
+            BrandGlyph.Visible = false
+            return
+        end
+        task.wait(0.75)
+    end
+    warn("[ScriptMM2 AVATAR] Roblox thumbnail not ready; displaying fallback")
+end)
 
 UIRefs.Title = create("TextLabel", {
     Name = "Title",
     BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(16, 7),
-    Size = UDim2.new(1, -120, 0, 24),
+    Position = UDim2.fromOffset(63, 12),
+    Size = UDim2.new(1, -162, 0, 24),
     Font = Enum.Font.GothamBold,
-    Text = "ScriptMM2 | PC  •  " .. VERSION,
-    TextColor3 = Color3.fromRGB(240, 240, 245),
-    TextSize = 18,
+    Text = "SCRIPTMM2   /   " .. VERSION,
+    TextColor3 = UITheme.text,
+    TextSize = 19,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, UIRefs.TopBar)
 
 UIRefs.Status = create("TextLabel", {
     Name = "Status",
     BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(17, 30),
-    Size = UDim2.new(1, -120, 0, 16),
+    Position = UDim2.fromOffset(64, 39),
+    Size = UDim2.new(1, -165, 0, 20),
     Font = Enum.Font.Gotham,
     Text = "Mouse4 (G) = hide/show • B = AimLock",
-    TextColor3 = Color3.fromRGB(145, 145, 155),
+    TextColor3 = UITheme.muted,
     TextSize = 11,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, UIRefs.TopBar)
 
 UIRefs.Minimize = create("TextButton", {
     Name = "Minimize",
-    Position = UDim2.new(1, -76, 0, 9),
+    Position = UDim2.new(1, -83, 0, 18),
     Size = UDim2.fromOffset(30, 30),
-    BackgroundColor3 = Color3.fromRGB(42, 42, 49),
+    BackgroundColor3 = UITheme.item,
     BorderSizePixel = 0,
     Font = Enum.Font.GothamBold,
     Text = "—",
@@ -1028,9 +1171,9 @@ create("UICorner", {
 
 UIRefs.Close = create("TextButton", {
     Name = "Close",
-    Position = UDim2.new(1, -40, 0, 9),
+    Position = UDim2.new(1, -45, 0, 18),
     Size = UDim2.fromOffset(30, 30),
-    BackgroundColor3 = Color3.fromRGB(95, 44, 48),
+    BackgroundColor3 = Color3.fromRGB(99, 50, 62),
     BorderSizePixel = 0,
     Font = Enum.Font.GothamBold,
     Text = "X",
@@ -1057,14 +1200,26 @@ UIRefs.Content = create("ScrollingFrame", {
 
 --// V0.9.38: six category pages; each keeps its own scroll position.
 do
-    local contentY, contentBottom = 140, 150
-    UIRefs.Content.Position = UDim2.fromOffset(10, contentY)
-    UIRefs.Content.Size = UDim2.new(1, -20, 1, -contentBottom)
+    -- Persistent left navigation; content pages keep their original callbacks,
+    -- scroll positions and categories. No duplicate UI trees are constructed.
+    local contentX, contentY, contentRight, contentBottom = 153, 84, 167, 99
+    UIRefs.Content.Position = UDim2.fromOffset(contentX, contentY)
+    UIRefs.Content.Size = UDim2.new(1, -contentRight, 1, -contentBottom)
     UIRefs.Content.Name = "PlayerContent"
     UIRefs.TabBar = create("Frame", {
-        Name = "TabBar", Position = UDim2.fromOffset(10, 58),
-        Size = UDim2.new(1, -20, 0, 76), BackgroundTransparency = 1,
+        Name = "TabBar", Position = UDim2.fromOffset(12, 84),
+        Size = UDim2.fromOffset(128, 506), BackgroundColor3 = UITheme.surface,
+        BorderSizePixel = 0,
     }, UIRefs.Main)
+    create("UICorner", {CornerRadius=UDim.new(0, 12)}, UIRefs.TabBar)
+    create("UIStroke", {Color=UITheme.border, Thickness=1, Transparency=0.42}, UIRefs.TabBar)
+    create("TextLabel", {Name="NavigationCaption", Position=UDim2.fromOffset(12, 13),
+        Size=UDim2.new(1, -24, 0, 21), BackgroundTransparency=1,
+        Text="NAVIGATION", Font=Enum.Font.GothamBold, TextSize=10,
+        TextColor3=UITheme.muted, TextXAlignment=Enum.TextXAlignment.Left}, UIRefs.TabBar)
+    create("Frame", {Name="NavDivider", Position=UDim2.fromOffset(12, 42),
+        Size=UDim2.new(1, -24, 0, 1), BackgroundColor3=UITheme.border,
+        BorderSizePixel=0}, UIRefs.TabBar)
     local tabSpecs = {
         {"player", "PLAYER", "PlayerTab"},
         {"visuals", "VISUALS", "VisualsTab"},
@@ -1072,13 +1227,14 @@ do
         {"utilities", "UTILITIES", "UtilitiesTab"},
         {"spectate", "SPECTATE", "SpectateTab"},
         {"language", "LANGUAGE", "LanguageTab"},
+        {"settings", "SETTINGS", "SettingsTab"},
     }
     UIRefs.CategoryTabs = {}
     UIRefs.CategoryPages = {player = UIRefs.Content}
     local function categoryContent(name)
         local page = create("ScrollingFrame", {
-            Name = name .. "Content", Position = UDim2.fromOffset(10, contentY),
-            Size = UDim2.new(1, -20, 1, -contentBottom), Visible = false,
+            Name = name .. "Content", Position = UDim2.fromOffset(contentX, contentY),
+            Size = UDim2.new(1, -contentRight, 1, -contentBottom), Visible = false,
             BackgroundTransparency = 1, BorderSizePixel = 0,
             ScrollBarThickness = 4, ScrollBarImageTransparency = 0.35,
             AutomaticCanvasSize = Enum.AutomaticSize.Y,
@@ -1098,21 +1254,27 @@ do
     UIRefs.CategoryPages.utilities = categoryContent("Utilities")
     UIRefs.SpectateContent = categoryContent("Spectate")
     UIRefs.LanguageContent = categoryContent("Language")
+    UIRefs.SettingsContent = categoryContent("Settings")
     UIRefs.CategoryPages.spectate = UIRefs.SpectateContent
     UIRefs.CategoryPages.language = UIRefs.LanguageContent
+    UIRefs.CategoryPages.settings = UIRefs.SettingsContent
     for index, spec in ipairs(tabSpecs) do
-        local row = math.floor((index - 1) / 3)
-        local column = (index - 1) % 3
         local button = create("TextButton", {
-            Name = spec[3], Position = UDim2.new(column / 3, column == 0 and 0 or 2, 0, row * 40),
-            Size = UDim2.new(1 / 3, -4, 0, 36), Text = spec[2], LayoutOrder = index,
+            Name = spec[3], Position = UDim2.fromOffset(8, 55 + (index - 1) * 47),
+            Size = UDim2.new(1, -16, 0, 39), Text = "  " .. spec[2], LayoutOrder = index,
             Font = Enum.Font.GothamBold, TextSize = 12, BorderSizePixel = 0,
-            AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(37, 37, 43),
-            TextColor3 = Color3.fromRGB(220, 220, 225),
+            TextXAlignment = Enum.TextXAlignment.Left,
+            AutoButtonColor = false, BackgroundColor3 = UITheme.item,
+            TextColor3 = UITheme.text,
         }, UIRefs.TabBar)
-        create("UICorner", {CornerRadius = UDim.new(0, 7)}, button)
+        create("UICorner", {CornerRadius = UDim.new(0, 10)}, button)
         UIRefs.CategoryTabs[spec[1]] = button
-        addConnection(button.MouseButton1Click:Connect(function() UIRefs.setPage(spec[1]) end))
+        addConnection(button.MouseButton1Click:Connect(function()
+            if UIRefs.activePage ~= spec[1] then
+                playMenuSound("tab")
+                UIRefs.setPage(spec[1])
+            end
+        end))
     end
     UIRefs.mainTabButton = UIRefs.CategoryTabs.player
     UIRefs.spectateTabButton = UIRefs.CategoryTabs.spectate
@@ -1121,6 +1283,7 @@ do
         if state.unloaded then return end
         if page == "main" then page = "player" end -- Legacy callers continue to work.
         if not UIRefs.CategoryPages[page] then page = "player" end
+        UIRefs.activePage = page
         for key, content in pairs(UIRefs.CategoryPages) do
             content.Visible = key == page
         end
@@ -1168,15 +1331,165 @@ do
         local code, name = option[1], option[2]
         local button = create("TextButton", {
             Name = "Language_" .. code, LayoutOrder = 2 + index,
-            Size = UDim2.new(1, -4, 0, 44), BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+            Size = UDim2.new(1, -4, 0, 44), BackgroundColor3 = UITheme.item,
             BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamSemibold,
-            TextSize = 14, TextColor3 = Color3.fromRGB(220, 220, 225), Text = name,
+            TextSize = 14, TextColor3 = UITheme.text, Text = name,
         }, UIRefs.LanguageContent)
         create("UICorner", {CornerRadius = UDim.new(0, 8)}, button)
         buttons[code] = button
         addConnection(button.MouseButton1Click:Connect(function() Localization.setLanguage(code) end))
     end
     UIRefs.updateLanguageButtons()
+end
+
+--// V1.0: lightweight appearance preferences. All actions are event based.
+do
+    local page = UIRefs.SettingsContent
+    local palettes = {
+        {name="MINT", accent=Color3.fromRGB(78,224,187), active=Color3.fromRGB(25,93,85), border=Color3.fromRGB(51,71,87)},
+        {name="BLUE", accent=Color3.fromRGB(103,180,255), active=Color3.fromRGB(35,70,124), border=Color3.fromRGB(61,87,126)},
+        {name="PURPLE", accent=Color3.fromRGB(183,144,255), active=Color3.fromRGB(83,48,125), border=Color3.fromRGB(88,65,118)},
+        {name="PINK", accent=Color3.fromRGB(255,142,194), active=Color3.fromRGB(120,48,87), border=Color3.fromRGB(116,65,94)},
+        {name="AMBER", accent=Color3.fromRGB(255,197,106), active=Color3.fromRGB(111,75,34), border=Color3.fromRGB(105,82,57)},
+        {name="RED", accent=Color3.fromRGB(255,122,130), active=Color3.fromRGB(115,43,55), border=Color3.fromRGB(104,58,71)},
+    }
+    local chosen = 1
+    local swatches = {}
+    local function textRow(name, label, order, height, size)
+        return create("TextLabel", {Name=name, LayoutOrder=order,
+            Size=UDim2.new(1,-4,0,height), BackgroundTransparency=1,
+            Text=label, Font=Enum.Font.GothamSemibold,
+            TextSize=size or 13, TextWrapped=true,
+            TextXAlignment=Enum.TextXAlignment.Left,
+            TextColor3=UITheme.text}, page)
+    end
+    textRow("AppearanceTitle", "UI SETTINGS", 1, 29, 18)
+    textRow("AppearanceHint", "Personalize the menu without changing gameplay settings.", 2, 37, 12)
+    textRow("AccentLabel", "ACCENT COLOR", 3, 23, 12)
+    local paletteGrid = create("Frame", {Name="AccentColors", LayoutOrder=4,
+        Size=UDim2.new(1,-4,0,94), BackgroundTransparency=1}, page)
+    for index, palette in ipairs(palettes) do
+        local col, row = (index-1)%3, math.floor((index-1)/3)
+        local btn = create("TextButton", {Name="Color"..palette.name,
+            Position=UDim2.new(col/3,3,row*0.5,3), Size=UDim2.new(1/3,-7,0.5,-6),
+            Text=palette.name, TextSize=11, Font=Enum.Font.GothamBold,
+            BackgroundColor3=palette.active, TextColor3=palette.accent,
+            AutoButtonColor=false, BorderSizePixel=0}, paletteGrid)
+        create("UICorner", {CornerRadius=UDim.new(0,8)},btn)
+        swatches[index]=create("UIStroke", {Color=palette.accent, Thickness=index==1 and 2 or 0,
+            Transparency=0.15},btn)
+        addConnection(btn.MouseButton1Click:Connect(function()
+            chosen=index
+            for key, value in pairs(palette) do
+                if key~="name" then UITheme[key]=value end
+            end
+            for object, props in pairs(UIStyling.colors) do
+                if object.Parent then
+                    for property, themeKey in pairs(props) do
+                        pcall(function() object[property]=UITheme[themeKey] end)
+                    end
+                end
+            end
+            for button, enabled in pairs(UIStyling.buttons) do
+                if button.Parent then setButtonVisual(button, enabled) end
+            end
+            for i, stroke in ipairs(swatches) do stroke.Thickness = i==chosen and 2 or 0 end
+        end))
+    end
+    textRow("WindowSizeLabel", "WINDOW SIZE", 5, 23, 12)
+    local sizeHolder = create("Frame", {Name="WindowSize", LayoutOrder=6,
+        Size=UDim2.new(1,-4,0,58), BackgroundColor3=UITheme.surface,
+        BorderSizePixel=0}, page)
+    create("UICorner", {CornerRadius=UDim.new(0,9)},sizeHolder)
+    local sizeValue=create("TextLabel", {Name="WindowSizeValue", Position=UDim2.fromOffset(9,4),
+        Size=UDim2.new(1,-18,0,18), BackgroundTransparency=1,
+        Text="100%", TextColor3=UITheme.accent, Font=Enum.Font.GothamBold,
+        TextSize=12, TextXAlignment=Enum.TextXAlignment.Right},sizeHolder)
+    local track=create("Frame", {Name="SizeTrack", Position=UDim2.fromOffset(12,35),
+        Size=UDim2.new(1,-24,0,8), BackgroundColor3=UITheme.item,
+        BorderSizePixel=0, Active=true},sizeHolder)
+    create("UICorner", {CornerRadius=UDim.new(1,0)},track)
+    local fill=create("Frame", {Name="Fill", Size=UDim2.fromScale(0.5,1),
+        BackgroundColor3=UITheme.accent, BorderSizePixel=0},track)
+    create("UICorner", {CornerRadius=UDim.new(1,0)},fill)
+    local function updateSize(percent)
+        percent=math.clamp(math.floor(percent/5+0.5)*5,75,125)
+        UIStyling.userScale=percent/100
+        sizeValue.Text=tostring(percent).."%"
+        fill.Size=UDim2.fromScale((percent-75)/50,1)
+        -- Fit the requested size within the viewport on mobile.
+        if IsMobile then
+            local camera=Workspace.CurrentCamera
+            local viewport=camera and camera.ViewportSize or Vector2.new(390,800)
+            Scale.Scale=math.min(1, (viewport.X-22)/(580*UIStyling.userScale),
+                (viewport.Y-30)/(610*UIStyling.userScale))
+        end
+        if UIRefs.Main.Visible then UIRefs.WindowScale.Scale=UIStyling.userScale end
+    end
+    local dragging=nil
+    local function moveSize(x)
+        local w=track.AbsoluteSize.X
+        if w>0 then updateSize(75+50*math.clamp((x-track.AbsolutePosition.X)/w,0,1)) end
+    end
+    addConnection(track.InputBegan:Connect(function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            dragging=input
+            moveSize(input.Position.X)
+        end
+    end))
+    addConnection(UIS.InputChanged:Connect(function(input)
+        if isPointerMove(input,dragging) then moveSize(input.Position.X) end
+    end))
+    addConnection(UIS.InputEnded:Connect(function(input)
+        if isPointerEnd(input,dragging) then dragging=nil end
+    end))
+    textRow("AudioVolumeLabel", "UI SOUND VOLUME", 7, 23, 12)
+    local audioRow=create("Frame", {Name="AudioVolume", LayoutOrder=8,
+        Size=UDim2.new(1,-4,0,43), BackgroundTransparency=1},page)
+    local volumeValue=create("TextLabel", {Name="AudioVolumeValue", Size=UDim2.new(0.28,0,1,0),
+        BackgroundTransparency=1, Text="100%", Font=Enum.Font.GothamBold,
+        TextColor3=UITheme.accent, TextSize=13},audioRow)
+    local volumeMinus=create("TextButton", {Name="VolumeMinus", Position=UDim2.fromScale(0.30,0),
+        Size=UDim2.new(0.29,0,1,0), Text="−", TextSize=18, Font=Enum.Font.GothamBold,
+        BackgroundColor3=UITheme.item, TextColor3=UITheme.text, BorderSizePixel=0},audioRow)
+    local volumePlus=create("TextButton", {Name="VolumePlus", Position=UDim2.fromScale(0.62,0),
+        Size=UDim2.new(0.29,0,1,0), Text="+", TextSize=18, Font=Enum.Font.GothamBold,
+        BackgroundColor3=UITheme.item, TextColor3=UITheme.text, BorderSizePixel=0},audioRow)
+    create("UICorner", {CornerRadius=UDim.new(0,8)},volumeMinus)
+    create("UICorner", {CornerRadius=UDim.new(0,8)},volumePlus)
+    local volume=100
+    local function updateVolume(n)
+        volume=math.clamp(n,0,100)
+        volumeValue.Text=tostring(volume).."%"
+        MenuAudio.volumeFactor=volume/100
+        for key,sound in pairs(MenuAudio.ready) do
+            if sound.Parent then sound.Volume=(MenuAudio.volumes[key] or 0.4)*MenuAudio.volumeFactor end
+        end
+    end
+    addConnection(volumeMinus.MouseButton1Click:Connect(function() updateVolume(volume-10) end))
+    addConnection(volumePlus.MouseButton1Click:Connect(function() updateVolume(volume+10) end))
+    local reset=create("TextButton", {Name="ResetAppearance", LayoutOrder=9,
+        Size=UDim2.new(1,-4,0,40), Text="RESET UI APPEARANCE",
+        Font=Enum.Font.GothamBold, TextSize=12, TextColor3=UITheme.text,
+        BackgroundColor3=UITheme.item, BorderSizePixel=0},page)
+    create("UICorner", {CornerRadius=UDim.new(0,9)},reset)
+    addConnection(reset.MouseButton1Click:Connect(function()
+        local first=palettes[1]
+        chosen=1
+        for key,value in pairs(first) do if key~="name" then UITheme[key]=value end end
+        for object,props in pairs(UIStyling.colors) do
+            if object.Parent then for property,key in pairs(props) do
+                pcall(function() object[property]=UITheme[key] end)
+            end end
+        end
+        for button,enabled in pairs(UIStyling.buttons) do
+            if button.Parent then setButtonVisual(button,enabled) end
+        end
+        for i,stroke in ipairs(swatches) do stroke.Thickness=i==1 and 2 or 0 end
+        updateSize(100)
+        updateVolume(100)
+    end))
+    UIRefs.applyInitialSize = function() updateSize(100) end
 end
 
 UIRefs.Layout = create("UIListLayout", {
@@ -1255,7 +1568,7 @@ create("UICorner", {CornerRadius = UDim.new(0, 12)}, UIRefs.FlyDownButton)
 UIRefs.dragHandle = create("Frame", {
     Name = "DragHandle",
     Position = UDim2.fromOffset(0, 0),
-    Size = UDim2.new(1, -116, 0, 52),
+    Size = UDim2.new(1, -116, 0, 70),
     BackgroundTransparency = 1,
     Active = true,
 }, UIRefs.TopBar)
@@ -1266,8 +1579,8 @@ local function addSection(text, order)
         BackgroundTransparency = 1,
         Font = Enum.Font.GothamBold,
         Text = text,
-        TextColor3 = Color3.fromRGB(165, 165, 175),
-        TextSize = 12,
+        TextColor3 = UITheme.accent,
+        TextSize = 11,
         TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = order,
     }, UIRefs.Content)
@@ -1277,30 +1590,33 @@ local function addToggle(name, order, callback)
     local button = create("TextButton", {
         Name = name,
         Size = UDim2.new(1, -4, 0, 38),
-        BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+        BackgroundColor3 = UITheme.item,
         BorderSizePixel = 0,
         Font = Enum.Font.GothamSemibold,
-        Text = name .. "  [OFF]",
-        TextColor3 = Color3.fromRGB(220, 220, 225),
+        Text = name .. "   [OFF]",
+        TextColor3 = UITheme.text,
         TextSize = 13,
         AutoButtonColor = false,
         LayoutOrder = order,
     }, UIRefs.Content)
 
-    create("UICorner", {
-        CornerRadius = UDim.new(0, 8),
-    }, button)
+    create("UICorner", {CornerRadius = UDim.new(0, 10)}, button)
+    create("UIStroke", {Color=UITheme.border, Thickness=1, Transparency=0.45}, button)
 
     local enabled = false
     local function setEnabled(value)
         enabled = value
-        button.Text = name .. (enabled and "  [ON]" or "  [OFF]")
+        button.Text = name .. (enabled and "   [ON]" or "   [OFF]")
         setButtonVisual(button, enabled)
         callback(enabled)
     end
 
     addConnection(button.MouseButton1Click:Connect(function()
+        local wasEnabled = enabled
         setEnabled(not enabled)
+        if wasEnabled ~= enabled then
+            playMenuSound(enabled and "toggleOn" or "toggleOff")
+        end
     end))
 
     return button, setEnabled
@@ -1310,7 +1626,7 @@ local function addSlider(name, minValue, maxValue, defaultValue, order, callback
     local holder = create("Frame", {
         Name = name .. "Slider",
         Size = UDim2.new(1, -4, 0, 57),
-        BackgroundColor3 = Color3.fromRGB(31, 31, 37),
+        BackgroundColor3 = UITheme.surface,
         BorderSizePixel = 0,
         LayoutOrder = order,
     }, UIRefs.Content)
@@ -1336,7 +1652,7 @@ local function addSlider(name, minValue, maxValue, defaultValue, order, callback
         Size = UDim2.fromOffset(55, 18),
         Font = Enum.Font.GothamBold,
         Text = tostring(defaultValue),
-        TextColor3 = Color3.fromRGB(170, 240, 200),
+        TextColor3 = UITheme.accent,
         TextSize = 12,
         TextXAlignment = Enum.TextXAlignment.Right,
     }, holder)
@@ -1355,7 +1671,7 @@ local function addSlider(name, minValue, maxValue, defaultValue, order, callback
 
     local fill = create("Frame", {
         Size = UDim2.fromScale((defaultValue - minValue) / (maxValue - minValue), 1),
-        BackgroundColor3 = Color3.fromRGB(72, 170, 105),
+        BackgroundColor3 = UITheme.accent,
         BorderSizePixel = 0,
     }, bar)
 
@@ -1423,9 +1739,8 @@ end)
 UIRefs.noclipButton = nil
 UIRefs.setNoclipToggle = nil
 UIRefs.noclipButton, UIRefs.setNoclipToggle = addToggle("Noclip", 4, function(enabled)
-    if state.coinFarm and not enabled and not coinFarm.switching and UIRefs.setCoinFarmToggle then
-        UIRefs.setCoinFarmToggle(false)
-    end
+    -- Auto Coin Farm is a persistent intent, not the current actuator state.
+    -- Round end legitimately turns this controller off while the farm remains ON.
     state.noclip = enabled
 
     if enabled then
@@ -1438,9 +1753,8 @@ end)
 UIRefs.flyButton = nil
 UIRefs.setFlyToggle = nil
 UIRefs.flyButton, UIRefs.setFlyToggle = addToggle("Fly", 5, function(enabled)
-    if state.coinFarm and not enabled and not coinFarm.switching and UIRefs.setCoinFarmToggle then
-        UIRefs.setCoinFarmToggle(false)
-    end
+    -- Auto Coin Farm is a persistent intent, not the current actuator state.
+    -- Round end legitimately turns this controller off while the farm remains ON.
     state.fly = enabled
     UIRefs.MobileFlyControls.Visible = IsMobile and enabled
 end)
@@ -1730,9 +2044,9 @@ do
     local function spectateButton(name, label, order)
         local button = create("TextButton", {
             Name = name, Size = UDim2.new(1, -4, 0, 38),
-            BackgroundColor3 = Color3.fromRGB(37, 37, 43), BorderSizePixel = 0,
+            BackgroundColor3 = UITheme.item, BorderSizePixel = 0,
             Font = Enum.Font.GothamSemibold, Text = label, TextSize = 13,
-            TextColor3 = Color3.fromRGB(220, 220, 225), AutoButtonColor = false,
+            TextColor3 = UITheme.text, AutoButtonColor = false,
             LayoutOrder = order,
         }, UIRefs.SpectateContent)
         create("UICorner", { CornerRadius = UDim.new(0, 8) }, button)
@@ -1741,7 +2055,7 @@ do
     create("TextLabel", {
         Name = "SpectateTitle", Size = UDim2.new(1, -4, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = "WATCH A ROLE", TextColor3 = Color3.fromRGB(165, 165, 175),
+        Text = "WATCH A ROLE", TextColor3 = UITheme.muted,
         TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = 1,
     }, UIRefs.SpectateContent)
@@ -1759,7 +2073,7 @@ do
     create("TextLabel", {
         Name = "SpectateListTitle", Size = UDim2.new(1, -4, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = "PLAYERS (CLICK TO WATCH)", TextColor3 = Color3.fromRGB(165, 165, 175),
+        Text = "PLAYERS (CLICK TO WATCH)", TextColor3 = UITheme.muted,
         TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = 6,
     }, UIRefs.SpectateContent)
@@ -1774,7 +2088,7 @@ do
     create("TextLabel", {
         Name = "TeleportListTitle", Size = UDim2.new(1, -4, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = "TELEPORT TO PLAYER", TextColor3 = Color3.fromRGB(165, 165, 175),
+        Text = "TELEPORT TO PLAYER", TextColor3 = UITheme.muted,
         TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = 8,
     }, UIRefs.SpectateContent)
@@ -1790,7 +2104,7 @@ do
         Name = "BringTitle", Size = UDim2.new(1, -4, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = "BRING (LOCAL / SERVER UNVERIFIED)",
-        TextColor3 = Color3.fromRGB(165, 165, 175), TextSize = 12,
+        TextColor3 = UITheme.muted, TextSize = 12,
         TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 10,
     }, UIRefs.SpectateContent)
     UIRefs.bringAllButton = spectateButton("BringAll", "Bring All [OFF]", 11)
@@ -1814,7 +2128,7 @@ do
         Name = "TargetAttackTitle", Size = UDim2.new(1, -4, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = "TARGET ATTACK (NORMAL WEAPON / SERVER CHECKS)",
-        TextColor3 = Color3.fromRGB(165, 165, 175), TextSize = 12,
+        TextColor3 = UITheme.muted, TextSize = 12,
         TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 15,
     }, UIRefs.SpectateContent)
     UIRefs.attackStatus = create("TextLabel", {
@@ -1837,7 +2151,7 @@ do
         Name = "FlingSelectTitle", Size = UDim2.new(1, -4, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
         Text = "FLING: SELECT ONE PLAYER",
-        TextColor3 = Color3.fromRGB(165, 165, 175), TextSize = 12,
+        TextColor3 = UITheme.muted, TextSize = 12,
         TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 19,
     }, UIRefs.SpectateContent)
     UIRefs.flingSelectStatus = create("TextLabel", {
@@ -1864,40 +2178,6 @@ UIRefs.antiFlingButton, UIRefs.setAntiFlingToggle = addToggle("AntiFling", 16, f
     state.antiFling = enabled
     if not enabled and pauseAntiFling then pauseAntiFling() end
 end)
-
---// Client-only effect. Presence of a remote named Stealth does not establish
---// that the server allows arbitrary invisibility or reveal its arguments.
-local function ghostServerStatus()
-    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-    local gameplay = remotes and remotes:FindFirstChild("Gameplay")
-    local stealth = gameplay and gameplay:FindFirstChild("Stealth")
-    if stealth and stealth:IsA("RemoteEvent") then
-        return "Server: UNVERIFIED (Stealth event exists; no request sent)"
-    end
-    return "Server: UNAVAILABLE (no verified invisibility interface)"
-end
-
-UIRefs.localGhostButton, UIRefs.setLocalGhostToggle = addToggle("Invisible (local view)", 16.5, function(enabled)
-    state.localGhost = enabled
-    if enabled then applyLocalGhost(getCharacter()) else restoreLocalGhost() end
-    if UIRefs.ghostServerLabel then UIRefs.ghostServerLabel.Text = ghostServerStatus() end
-    UIRefs.Status.Text = enabled
-        and "Invisible LOCAL: ON. Other players may still see you. " .. ghostServerStatus()
-        or "Invisible LOCAL: OFF. " .. ghostServerStatus()
-end)
-UIRefs.ghostServerLabel = create("TextLabel", {
-    Name = "GhostServerStatus",
-    Size = UDim2.new(1, -4, 0, 35),
-    BackgroundTransparency = 1,
-    Font = Enum.Font.Gotham,
-    Text = ghostServerStatus(),
-    TextColor3 = Color3.fromRGB(180, 185, 195),
-    TextSize = 11,
-    TextWrapped = true,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Center,
-    LayoutOrder = 16.6,
-}, UIRefs.Content)
 
 --// Read-only hit-position diagnostic. Uses replicated actual character roots.
 --// Never invokes remotes or applies damage.
@@ -2047,6 +2327,17 @@ UIRefs.espNamesButton, UIRefs.setESPNamesToggle = addToggle("ESP Names", 28, fun
         end
     end
 end)
+
+-- Hide only the name/role/distance cards; highlights and tracers remain independent.
+UIRefs.espInfoCardsButton, UIRefs.setESPInfoCardsToggle = addToggle("ESP Info Cards", 28.5, function(enabled)
+    state.espInfoCards = enabled
+    for _, object in pairs(espObjects) do
+        if object.billboard and object.billboard.Parent then
+            object.billboard.Enabled = enabled
+        end
+    end
+end)
+UIRefs.setESPInfoCardsToggle(true) -- Keep existing V1.0 visible-card default.
 
 UIRefs._unused, UIRefs.setFOVSliderValue = addSlider("FOV", CONFIG.MinFOV, CONFIG.MaxFOV, values.fov, 29, function(value)
     values.fov = value
@@ -2281,11 +2572,11 @@ addSection("UTILITY", 30)
 UIRefs.refreshButton = create("TextButton", {
     Name = "RefreshRoles",
     Size = UDim2.new(1, -4, 0, 38),
-    BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+    BackgroundColor3 = UITheme.item,
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
     Text = "Refresh Roles",
-    TextColor3 = Color3.fromRGB(220, 220, 225),
+    TextColor3 = UITheme.text,
     TextSize = 13,
     AutoButtonColor = false,
     LayoutOrder = 31,
@@ -2295,11 +2586,11 @@ create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.refreshButton)
 UIRefs.teleportRevolverButton = create("TextButton", {
     Name = "TeleportRevolver",
     Size = UDim2.new(1, -4, 0, 38),
-    BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+    BackgroundColor3 = UITheme.item,
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
     Text = IsMobile and "Grab Revolver (return if collected)" or "Grab Revolver (return if collected) [H]",
-    TextColor3 = Color3.fromRGB(220, 220, 225),
+    TextColor3 = UITheme.text,
     TextSize = 13,
     AutoButtonColor = false,
     LayoutOrder = 32,
@@ -2310,9 +2601,9 @@ create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.teleportRevolverButto
 local function makeTravelButton(name, label, order)
     local button = create("TextButton", {
         Name = name, Size = UDim2.new(1, -4, 0, 38),
-        BackgroundColor3 = Color3.fromRGB(37, 37, 43), BorderSizePixel = 0,
+        BackgroundColor3 = UITheme.item, BorderSizePixel = 0,
         Font = Enum.Font.GothamSemibold, Text = label, TextSize = 13,
-        TextColor3 = Color3.fromRGB(220, 220, 225),
+        TextColor3 = UITheme.text,
         AutoButtonColor = false, LayoutOrder = order,
     }, UIRefs.Content)
     create("UICorner", {CornerRadius = UDim.new(0, 8)}, button)
@@ -2383,9 +2674,6 @@ do
             elseif child == UIRefs.antiFlingButton then
                 child.LayoutOrder = 30.1
                 destination = UIRefs.CategoryPages.utilities
-            elseif child == UIRefs.localGhostButton then
-                child.LayoutOrder = 20.5
-                destination = UIRefs.CategoryPages.visuals
             else
                 destination = order >= 30 and UIRefs.CategoryPages.utilities
                     or (order >= 20 and UIRefs.CategoryPages.visuals)
@@ -2645,6 +2933,13 @@ end
 do
     local function coinPart(obj)
         if not obj or not obj.Parent then return nil end
+        local cached = coinFarm.partCache[obj]
+        if cached then
+            -- MM2 removes a visual part on pickup. Never return a detached cache.
+            if cached.Parent and (cached == obj or cached:IsDescendantOf(obj))
+                and cached:IsDescendantOf(Workspace) then return cached end
+            coinFarm.partCache[obj] = nil
+        end
         local n = obj.Name:lower():gsub("[^%w]", "")
         if n ~= "coin" and n ~= "coinserver" and n ~= "coinpickup" and n ~= "goldcoin" then return nil end
         if not obj:IsDescendantOf(Workspace) then return nil end
@@ -2661,9 +2956,17 @@ do
             if obj.Parent and obj.Parent:IsA("Model") and obj.Parent.Name:lower():gsub("[^%w]", "") == "coinserver" then
                 return nil
             end
+            coinFarm.partCache[obj] = obj
             return obj
         end
-        if obj:IsA("Model") then return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true) end
+        if obj:IsA("Model") then
+            -- Resolve expensive model lookup just once per live target.
+            local visual = obj:FindFirstChild("Coin", true)
+            local resolved = visual and visual:IsA("BasePart") and visual
+                or obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true)
+            if resolved then coinFarm.partCache[obj] = resolved end
+            return resolved
+        end
         return nil
     end
 
@@ -2680,27 +2983,75 @@ do
         coinFarm.targets[#coinFarm.targets + 1] = candidate
     end
 
+    -- Never build Workspace:GetDescendants() on the simulation thread: doing so
+    -- caused multi-second FPS stalls in large MM2 maps. Process <=180 nodes/yield.
+    -- DescendantAdded remains the primary source of new coin objects.
     local function scanCoins(force)
         local now = os.clock()
+        if coinFarm.scanRunning then return end
         if not force and now - coinFarm.lastScan < CONFIG.CoinFarmScanInterval then return end
         coinFarm.lastScan = now
-        local sample, namedCount = nil, 0
-        coinFarm.targets = {}
-        coinFarm.targetSet = setmetatable({}, {__mode = "k"})
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            -- Save one possible missed name for diagnostics, not a target by guesswork.
-            local name = obj.Name:lower()
-            if name:find("coin", 1, true) then
-                namedCount += 1
-                if not sample then sample = obj.Name end
+        coinFarm.scanRunning = true
+        local generation = coinFarm.scanGeneration
+        local baseline = coinFarm.baselineScan
+        task.spawn(function()
+            local queue, head = Workspace:GetChildren(), 1
+            local namedCount, sample = 0, nil
+            while head <= #queue do
+                if state.unloaded or not state.coinFarm or generation ~= coinFarm.scanGeneration then
+                    return -- a newer scan owns scanRunning after re-arm
+                end
+                local batch = 0
+                while head <= #queue and batch < 90 do
+                    local obj = queue[head]
+                    queue[head] = false -- release old references as the scan advances
+                    head += 1
+                    batch += 1
+                    if obj and obj.Parent then
+                        local name = obj.Name:lower()
+                        if name:find("coin", 1, true) then
+                            namedCount += 1
+                            if not sample then sample = obj.Name end
+                            registerCoin(obj)
+                            if baseline and coinFarm.targetSet[obj] then
+                                coinFarm.knownCoins[obj] = true
+                            end
+                            -- BaseParts inside Coin_Server get promoted to their model.
+                            if baseline and obj:IsA("BasePart") and obj.Parent:IsA("Model")
+                                and coinFarm.targetSet[obj.Parent] then
+                                coinFarm.knownCoins[obj.Parent] = true
+                            end
+                        end
+                        -- Skip irrelevant heavy lobby and live character subtrees.
+                        local norm = name:gsub("[^%w]", "")
+                        local skipTree = norm == "lobby" or norm == "mainlobby" or norm == "lobbymap"
+                            or (obj:IsA("Model") and Players:GetPlayerFromCharacter(obj) ~= nil)
+                        if not skipTree then
+                            for _, child in ipairs(obj:GetChildren()) do queue[#queue + 1] = child end
+                        end
+                    end
+                end
+                task.wait()
             end
-            if name:find("coin", 1, true) then registerCoin(obj) end
-        end
-        coinFarm.coinLikeSample = sample
-        coinFarm.coinNamedCount = namedCount
+            if generation ~= coinFarm.scanGeneration or state.unloaded then return end
+            -- Compact stale references without discarding coins added by events.
+            local kept = {}
+            local set = setmetatable({}, {__mode = "k"})
+            for _, object in ipairs(coinFarm.targets) do
+                if not set[object] and coinPart(object) then
+                    set[object] = true
+                    kept[#kept + 1] = object
+                end
+            end
+            coinFarm.targets, coinFarm.targetSet = kept, set
+            coinFarm.coinLikeSample, coinFarm.coinNamedCount = sample, namedCount
+            coinFarm.baselineScan, coinFarm.scanRunning = false, false
+        end)
     end
 
     -- Track newly spawned coins instead of traversing the entire map every frame.
+    -- A new collectible Coin_Server model also recovers from a missed CoinsStarted event.
+    -- This is narrower than treating any old replicated coin as a new round.
     addConnection(Workspace.DescendantAdded:Connect(function(obj)
         if not state.coinFarm or state.unloaded then return end
         local n = obj.Name:lower()
@@ -2709,6 +3060,24 @@ do
         if n:find("coin", 1, true) or pn:find("coin", 1, true) then
             registerCoin(obj)
             if parent and parent:IsA("Model") then registerCoin(parent) end
+            local spawnedModel = obj:IsA("Model") and obj
+                or (parent and parent:IsA("Model") and parent)
+            if coinFarm.roundEnded and spawnedModel
+                and spawnedModel.Name:lower():gsub("[^%w]", "") == "coinserver"
+                and not coinFarm.roundEndKnown[spawnedModel] and coinPart(spawnedModel) then
+                -- Only fresh model instances after GameOver can re-arm the farm.
+                coinFarm.roundEnded = false
+                coinFarm.deathLock = false
+                coinFarm.paused = true
+                coinFarm.allowExistingCoins = true
+                coinFarm.freshSince = nil
+                coinFarm.limitReached = false
+                coinFarm.collected = 0
+                coinFarm.pendingPickups = {}
+                coinFarm.visited = setmetatable({}, {__mode = "k"})
+                coinFarm.skipped = setmetatable({}, {__mode = "k"})
+                UIRefs.Status.Text = "Coin Farm: new coin spawn • preparing Fly"
+            end
         end
     end))
 
@@ -2716,6 +3085,7 @@ do
     -- collectible instances can release the next round's waiting state.
     local function armWaitingForNewCoins(allowExistingCoins)
         coinFarm.target = nil
+        coinFarm.lastNearestCheck = 0
         coinFarm.paused = true
         coinFarm.freshSince = nil
         -- Only an explicit ON press may use coins already spawned this round.
@@ -2725,6 +3095,7 @@ do
         coinFarm.collected = 0
         coinFarm.cachedBagCount = nil
         coinFarm.lastHudRead = -1
+        coinFarm.bagLabels = nil
         coinFarm.pendingPickups = {}
         coinFarm.visited = setmetatable({}, {__mode = "k"})
         coinFarm.skipped = setmetatable({}, {__mode = "k"})
@@ -2732,13 +3103,60 @@ do
         coinFarm.limitEmptySince = nil
         coinFarm.knownCoins = setmetatable({}, {__mode = "k"})
         coinFarm.freshCoins = setmetatable({}, {__mode = "k"})
+        -- Cancel any older incremental traversal before resetting target caches.
+        coinFarm.scanGeneration += 1
+        coinFarm.scanRunning = false
+        coinFarm.baselineScan = not coinFarm.allowExistingCoins
+        coinFarm.targets = {}
+        coinFarm.targetSet = setmetatable({}, {__mode = "k"})
         coinFarm.lastScan = -math.huge
         scanCoins(true)
-        for _, obj in ipairs(coinFarm.targets) do coinFarm.knownCoins[obj] = true end
         stopFly()
         restoreNoclip()
     end
     UIRefs.armCoinFarmWaiting = armWaitingForNewCoins
+
+    -- MM2 exposes explicit CoinsStarted / GameOver events in Remotes.Gameplay.
+    -- These prevent stale locally replicated coins from locking the farm forever
+    -- after death or the 40-coin limit. We never invoke either remote.
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local gameplay = remotes and remotes:FindFirstChild("Gameplay")
+    if gameplay then
+        local coinsStarted = gameplay:FindFirstChild("CoinsStarted")
+        if coinsStarted and coinsStarted:IsA("RemoteEvent") then
+            addConnection(coinsStarted.OnClientEvent:Connect(function()
+                if not state.coinFarm or state.unloaded then return end
+                coinFarm.roundEnded = false
+                coinFarm.deathLock = false
+                coinFarm.deathEmptySince = nil
+                -- This signal confirms a new collectible round: existing coins
+                -- are allowed after spawn confirmation, even if added earlier.
+                armWaitingForNewCoins(true)
+                UIRefs.Status.Text = "Coin Farm: new round • waiting for coin spawn"
+            end))
+        end
+        local gameOver = gameplay:FindFirstChild("GameOver")
+        if gameOver and gameOver:IsA("RemoteEvent") then
+            addConnection(gameOver.OnClientEvent:Connect(function()
+                if not state.coinFarm or state.unloaded then return end
+                -- GameOver pauses movement only; never change state.coinFarm/UI toggle.
+                coinFarm.roundEnded = true
+                coinFarm.roundEndKnown = setmetatable({}, {__mode = "k"})
+                for _, old in ipairs(coinFarm.targets) do coinFarm.roundEndKnown[old] = true end
+                coinFarm.paused = true
+                coinFarm.target = nil
+                coinFarm.pendingPickups = {}
+                if flyObjects.flyVelocity then flyObjects.flyVelocity.Velocity = Vector3.zero end
+                stopFly()
+                restoreNoclip()
+                coinFarm.switching = true
+                if UIRefs.setFlyToggle then UIRefs.setFlyToggle(false) end
+                if UIRefs.setNoclipToggle then UIRefs.setNoclipToggle(false) end
+                coinFarm.switching = false
+                UIRefs.Status.Text = "Coin Farm: round ended • waiting for next coins"
+            end))
+        end
+    end
     -- A defeated player cannot continue the route. Keep the ON setting,
     -- but require the old round's coins to clear before arming a new round.
     UIRefs.pauseCoinFarmOnDeath = function(character)
@@ -2760,14 +3178,47 @@ do
     -- A plain numeric TextLabel inside a Coin GUI may be a currency balance, NOT
     -- the current round's bag. Only accept explicit progress out of 40.
     -- Without an unambiguous HUD, retain the conservative locally observed count.
-    local function readCoinBagCount()
-        local now = os.clock()
-        if now - coinFarm.lastHudRead < 0.55 then return coinFarm.cachedBagCount end
-        coinFarm.lastHudRead = now
-        local highest = nil
+    -- HUD candidates are indexed once; continuously walking PlayerGui:GetDescendants()
+    -- every half second was a measurable source of client-side GC / small frame spikes.
+    local function indexBagLabels()
+        local items = {}
         for _, gui in ipairs(PlayerGui:GetDescendants()) do
             if (gui:IsA("TextLabel") or gui:IsA("TextButton"))
-                and gui:IsA("GuiObject") and not gui:IsDescendantOf(UIRefs.ScriptMM2) then
+                and not gui:IsDescendantOf(UIRefs.ScriptMM2) then
+                local n = gui.Name:lower()
+                local pn = gui.Parent and gui.Parent.Name:lower() or ""
+                local raw = tostring(gui.Text or "")
+                if n:find("coin", 1, true) or n:find("bag", 1, true)
+                    or pn:find("coin", 1, true) or pn:find("bag", 1, true)
+                    or raw:match("%d+%s*/%s*40") then
+                    items[#items + 1] = gui
+                end
+            end
+        end
+        coinFarm.bagLabels = items
+        coinFarm.lastBagIndex = os.clock()
+    end
+    addConnection(PlayerGui.DescendantAdded:Connect(function(gui)
+        if not state.coinFarm or not coinFarm.bagLabels then return end
+        if not (gui:IsA("TextLabel") or gui:IsA("TextButton")) then return end
+        if gui:IsDescendantOf(UIRefs.ScriptMM2) then return end
+        local n = gui.Name:lower()
+        local pn = gui.Parent and gui.Parent.Name:lower() or ""
+        if n:find("coin", 1, true) or n:find("bag", 1, true)
+            or pn:find("coin", 1, true) or pn:find("bag", 1, true) then
+            coinFarm.bagLabels[#coinFarm.bagLabels + 1] = gui
+        end
+    end))
+    local function readCoinBagCount()
+        local now = os.clock()
+        if now - coinFarm.lastHudRead < 0.8 then return coinFarm.cachedBagCount end
+        coinFarm.lastHudRead = now
+        if not coinFarm.bagLabels or (now - coinFarm.lastBagIndex > 12 and #coinFarm.bagLabels == 0) then
+            indexBagLabels()
+        end
+        local highest = nil
+        for _, gui in ipairs(coinFarm.bagLabels) do
+            if gui.Parent then
                 local raw = tostring(gui.Text or "")
                 local count = raw:match("^%s*(%d+)%s*/%s*40%s*$")
                     or raw:match("[Cc][Oo][Ii][Nn][Ss]?%s*:?%s*(%d+)%s*/%s*40")
@@ -2842,7 +3293,9 @@ do
         if not part then return nil end
         if coinFarm.visited[object] or coinFarm.pendingPickups[object] then return nil end
         if (coinFarm.skipped[object] or 0) > os.clock() then return nil end
-        if part.LocalTransparencyModifier >= 0.95 or part.Transparency >= 0.95 then return nil end
+        -- MM2 can use invisible trigger/mesh parts even for an UNCOLLECTED coin.
+        -- Excluding by transparency alone left every target unavailable and Fly OFF.
+        -- Confirm pickup from pending/visited or object removal instead.
         return part
     end
 
@@ -2867,8 +3320,12 @@ do
         state.coinFarm = false
         coinFarm.paused = false
         coinFarm.target = nil
+        coinFarm.scanGeneration += 1
+        coinFarm.scanRunning = false
         coinFarm.targets = {}
         coinFarm.targetSet = setmetatable({}, {__mode = "k"})
+        coinFarm.partCache = setmetatable({}, {__mode = "k"})
+        coinFarm.bagLabels = nil
         coinFarm.knownCoins = setmetatable({}, {__mode = "k"})
         coinFarm.freshCoins = setmetatable({}, {__mode = "k"})
         coinFarm.freshSince = nil
@@ -2881,6 +3338,7 @@ do
         coinFarm.limitEmptySince = nil
         coinFarm.deathLock = false
         coinFarm.deathEmptySince = nil
+        coinFarm.roundEnded = false
         coinFarm.switching = true
         if UIRefs.setFlyToggle then UIRefs.setFlyToggle(coinFarm.savedFly) end
         if UIRefs.setNoclipToggle then UIRefs.setNoclipToggle(coinFarm.savedNoclip) end
@@ -2892,13 +3350,9 @@ do
     UIRefs.startCoinFarm = function()
         if state.coinFarm then return end
         local char, root, hum = getCharacter(), getRoot(), getHumanoid()
-        if state.unloaded or teleportBusy or flingBusy or shootMurdererBusy then
-            UIRefs.Status.Text = "Coin Farm: finish Fling / TP / Shot first"
-            task.defer(function()
-                if UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
-            end)
-            return
-        end
+        if state.unloaded then return end
+        -- Enabling the farm while another action is active is allowed: remember
+        -- ON and wait for the character/round rather than auto-switching OFF.
         coinFarm.savedFly, coinFarm.savedNoclip = state.fly, state.noclip
         -- Set PAUSED before enabling Fly/NoClip, otherwise flight can start
         -- in the lobby for a frame before the next movement refresh.
@@ -2906,6 +3360,7 @@ do
         coinFarm.paused = true
         coinFarm.deathLock = not (hum and hum.Health > 0)
         coinFarm.deathEmptySince = nil
+        coinFarm.roundEnded = false
         -- Fly/NoClip are enabled ONLY after the spawn confirmation in refreshCoinFarm.
         coinFarm.progressAt = os.clock()
         coinFarm.lastDistance = math.huge
@@ -2920,8 +3375,9 @@ do
     UIRefs.refreshCoinFarm = function()
         if not state.coinFarm or state.unloaded then return end
         local refreshNow = os.clock()
-        if refreshNow - coinFarm.lastRefresh < 0.20 then return end
+        if refreshNow - coinFarm.lastRefresh < 0.45 then return end
         coinFarm.lastRefresh = refreshNow
+        if coinFarm.roundEnded then return end
         if coinFarm.limitReached then
             -- There is no forced death now. Wait for the actual old round's
             -- coins to disappear, then arm the next round while staying ON.
@@ -2954,6 +3410,7 @@ do
         -- flight for a failed/unfinished character and suspend it each frame.
         local ready = char and root and hum and hum.Health > 0
             and not root.Anchored and not hum.Sit
+            and not teleportBusy and not flingBusy and not shootMurdererBusy
             and (not hum.PlatformStand or (flyObjects.active and flyObjects.humanoid == hum))
         local now = os.clock()
         if now - coinFarm.lastScan >= CONFIG.CoinFarmScanInterval then
@@ -2994,6 +3451,13 @@ do
         end
         -- Coins all disappeared: arm the *next* round, without turning OFF.
         if visibleCount == 0 then
+            if coinFarm.scanRunning then
+                if now - coinFarm.lastDiagnostic >= 2.0 then
+                    coinFarm.lastDiagnostic = now
+                    UIRefs.Status.Text = "Coin Farm: ON • indexing coin objects..."
+                end
+                return
+            end
             if not coinFarm.paused then
                 armWaitingForNewCoins()
             end
@@ -3044,8 +3508,8 @@ do
         if coinFarm.paused then
             -- If enabled mid-round, already-spawned collectible coins are valid.
             -- Otherwise (after respawn / round end) require genuinely NEW coins.
-            if availableFreshCount >= CONFIG.CoinFarmMinFreshCoins
-                or (coinFarm.allowExistingCoins and availableCount >= 1) then
+            if (coinFarm.allowExistingCoins and availableCount >= 1)
+                or availableFreshCount >= CONFIG.CoinFarmMinFreshCoins then
                 coinFarm.freshSince = coinFarm.freshSince or now
                 if now - coinFarm.freshSince >= CONFIG.CoinFarmSpawnConfirm then
                     -- Fly is OFF after a completed 40-coin round; enable it only
@@ -3056,31 +3520,55 @@ do
                     coinFarm.switching = false
                     coinFarm.paused = false
                     coinFarm.allowExistingCoins = false
-                    coinFarm.target = nil
+                    -- Choose nearest collectible coin from the current position as
+                    -- soon as Fly starts; recalculate after every pickup.
+                    coinFarm.target = nextCoin(root)
                     coinFarm.progressAt, coinFarm.lastDistance = now, math.huge
-                    UIRefs.Status.Text = "Coin Farm: round coins appeared • " .. values.coinFarmSpeed .. " studs/s"
+                    UIRefs.Status.Text = "Coin Farm: flying to nearest coin • " .. values.coinFarmSpeed .. " studs/s"
                 end
             else
                 coinFarm.freshSince = nil
+                if now - coinFarm.lastDiagnostic >= 2.0 then
+                    coinFarm.lastDiagnostic = now
+                    UIRefs.Status.Text = "Coin Farm: ON • coins=" .. availableCount
+                        .. " fresh=" .. availableFreshCount
+                        .. " allowExisting=" .. tostring(coinFarm.allowExistingCoins)
+                        .. " (waiting for round)"
+                end
             end
         end
     end
 
     UIRefs.coinFarmVelocity = function(root)
         local hum = getHumanoid()
-        if not state.coinFarm or coinFarm.paused or coinFarm.deathLock
+        if not state.coinFarm or coinFarm.paused or coinFarm.deathLock or coinFarm.roundEnded
             or not hum or hum.Health <= 0 or root ~= getRoot() then return nil end
         local now = os.clock()
         if now - coinFarm.lastScan >= CONFIG.CoinFarmScanInterval then scanCoins() end
+
+        -- V0.9.52: continuously choose the closest AVAILABLE coin to our current
+        -- character position. A new closer coin can replace the current target,
+        -- rather than waiting for the old (possibly distant) target to disappear.
+        -- Rate-limited to 5 checks/sec and uses only the cached coin array.
+        if now - coinFarm.lastNearestCheck >= 0.25 then
+            coinFarm.lastNearestCheck = now
+            local nearest, nearestDistance = nextCoin(root)
+            local currentPart = coinAvailable(coinFarm.target)
+            local currentDistance = currentPart
+                and (currentPart.Position - root.Position).Magnitude or math.huge
+            if nearest ~= coinFarm.target and nearest
+                and (not currentPart or nearestDistance + 0.10 < currentDistance) then
+                coinFarm.target = nearest
+                coinFarm.progressAt, coinFarm.lastDistance = now, math.huge
+            end
+        end
 
         -- Retarget from cached targets; NEVER force a full Workspace traversal on target loss.
         -- A collected/removed coin may vanish before the scheduled network scan.
         for attempt = 1, 3 do
             local previousTarget = coinFarm.target
             local part = coinPart(previousTarget)
-            if not part or coinFarm.visited[previousTarget]
-                or coinFarm.pendingPickups[previousTarget]
-                or (part and (part.LocalTransparencyModifier >= 0.95 or part.Transparency >= 0.95)) then
+            if not part or not coinAvailable(previousTarget) then
                 -- Refresh on target loss and periodically while waiting. The
                 -- candidate distances are measured from the CURRENT root.Position
                 -- on every acquisition, without scanning Workspace every frame.
@@ -3092,10 +3580,11 @@ do
             end
 
             if not part then
-                if #coinFarm.targets > 0 then
-                    UIRefs.Status.Text = "Coin Farm: no uncollected coins left nearby • paused"
-                else
-                    UIRefs.Status.Text = "Coin Farm: no coin objects detected • waiting for spawn"
+                if now - coinFarm.lastMovementStatus >= 1.5 then
+                    coinFarm.lastMovementStatus = now
+                    UIRefs.Status.Text = #coinFarm.targets > 0
+                        and "Coin Farm: no uncollected coins left nearby • waiting"
+                        or "Coin Farm: no coin objects detected • waiting for spawn"
                 end
                 return Vector3.zero
             end
@@ -3107,7 +3596,9 @@ do
             end
 
             if dist <= CONFIG.CoinFarmReach then
-                -- Only after a close approach: then wait for actual visual/HUD evidence.
+                -- V0.9.3: at reach distance, immediately retarget in this same
+                -- simulation frame. Confirmation remains asynchronous via HUD/
+                -- local disappearance; no artificial stop at the coin.
                 if not coinFarm.visited[coinFarm.target] and coinFarm.pendingPickups[coinFarm.target] == nil then
                     coinFarm.pendingPickups[coinFarm.target] = now
                 end
@@ -3118,7 +3609,8 @@ do
                 coinFarm.skipped[coinFarm.target] = now + CONFIG.CoinFarmRetryDelay
                 coinFarm.target = nil
             else
-                -- Constant travel speed, even close to the target.
+                -- V0.9.3 continuous travel: no slowdown near the coin.
+                -- Keep the newer speed slider as an optional override.
                 return delta.Unit * values.coinFarmSpeed
             end
         end
@@ -3368,10 +3860,10 @@ do
                 local button = create("TextButton", {
                     Name = "Watch_" .. tostring(player.UserId),
                     Size = UDim2.new(1, -4, 0, 38),
-                    BackgroundColor3 = Color3.fromRGB(37, 37, 43), BorderSizePixel = 0,
+                    BackgroundColor3 = UITheme.item, BorderSizePixel = 0,
                     Font = Enum.Font.GothamSemibold,
                     Text = player.DisplayName .. "  (@" .. player.Name .. ")",
-                    TextColor3 = Color3.fromRGB(220, 220, 225), TextSize = 13,
+                    TextColor3 = UITheme.text, TextSize = 13,
                     TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false,
                     LayoutOrder = order,
                 }, UIRefs.spectatePlayerList)
@@ -4770,6 +5262,7 @@ local function createESPForPlayer(player)
 
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "ModMenuESPInfo"
+    billboard.Enabled = state.espInfoCards
     billboard.Adornee = head or root
     billboard.AlwaysOnTop = true
     billboard.LightInfluence = 0
@@ -4948,6 +5441,7 @@ local function updateESP()
                 object.highlight.FillTransparency = alive and 0.94 or 0.97
                 object.highlight.OutlineTransparency = alive and 0.03 or 0.45
 
+                object.billboard.Enabled = state.espInfoCards
                 object.cardStroke.Color = color
                 object.accent.BackgroundColor3 = color
                 object.nameLabel.Text = player.DisplayName ~= player.Name
@@ -5316,7 +5810,7 @@ local function updateMovement(deltaTime)
             stopRegularSpin()
             spinState.root, spinState.velocity = root, root.AssemblyAngularVelocity
         end
-        root.AssemblyAngularVelocity = Vector3.new(0, 12, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 15, 0) -- V1.0: slightly faster ordinary Spin
     elseif spinState.root then
         stopRegularSpin()
     end
@@ -5490,7 +5984,6 @@ local function onCharacterAdded(character)
     end
     stopSpectateMurderer()
     setCharacterMovement()
-    if state.localGhost then applyLocalGhost(character) end
 
     if state.fly and not (state.coinFarm and coinFarm.paused)
         and not teleportBusy and not flingBusy then
@@ -5510,17 +6003,6 @@ if LocalPlayer.Character then
         onCharacterAdded(initialCharacter)
     end)
 end
-
---// Refresh ghost periodically for newly equipped accessories, not each frame.
-local ghostRefresh = 0
-addConnection(RunService.Heartbeat:Connect(function(dt)
-    if not state.localGhost or state.unloaded then return end
-    ghostRefresh += dt
-    if ghostRefresh >= 0.3 then
-        ghostRefresh = 0
-        applyLocalGhost(getCharacter())
-    end
-end))
 
 --// Role refresh and ESP update
 local roleTimer = 0
@@ -5606,15 +6088,64 @@ addConnection(UIS.InputBegan:Connect(function(input, processed)
 end))
 
 --// UI actions
-local function setMainVisible(visible)
+-- Inflate on opening and gently deflate on minimizing. Tweens are event based:
+-- no RenderStepped or Heartbeat animation workload, even while Coin Farm is ON.
+local visibilityTween = nil
+local visibilitySerial = 0
+local function setMainVisible(visible, instant)
+    if state.unloaded then return end
+    visibilitySerial += 1
+    local serial = visibilitySerial
     state.uiVisible = visible
-    UIRefs.Main.Visible = visible
-    UIRefs.reopen.Visible = IsMobile and not visible
-    if IsMobile then
-        UIRefs.MobileFlyControls.Visible = state.fly
-    else
-        UIRefs.MobileFlyControls.Visible = false
+    if visibilityTween then
+        visibilityTween:Cancel()
+        visibilityTween = nil
     end
+    local scale = UIRefs.WindowScale
+    local function tweenScale(value, duration, easing, direction, onDone)
+        if serial ~= visibilitySerial or state.unloaded then return end
+        local tween = TweenService:Create(scale,
+            TweenInfo.new(duration, easing, direction), {Scale = value * UIStyling.userScale})
+        visibilityTween = tween
+        tween.Completed:Once(function(playback)
+            if serial ~= visibilitySerial or state.unloaded then return end
+            if playback ~= Enum.PlaybackState.Completed then return end
+            visibilityTween = nil
+            if onDone then onDone() end
+        end)
+        tween:Play()
+    end
+    if visible then
+        UIRefs.reopen.Visible = false
+        UIRefs.Main.Visible = true
+        if instant then
+            scale.Scale = UIStyling.userScale
+        else
+            playMenuSound("open")
+            -- Sharp inflate: fast initial pop, visible overshoot and quick rebound.
+            scale.Scale = 0.43 * UIStyling.userScale
+            tweenScale(1.105, 0.135, Enum.EasingStyle.Back, Enum.EasingDirection.Out, function()
+                tweenScale(0.975, 0.065, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, function()
+                    tweenScale(1, 0.065, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+                end)
+            end)
+        end
+    elseif instant then
+        UIRefs.Main.Visible = false
+        UIRefs.reopen.Visible = IsMobile
+        scale.Scale = UIStyling.userScale
+    else
+        playMenuSound("close")
+        -- Short air release: brief recoil followed by a fast collapse.
+        tweenScale(1.045, 0.045, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, function()
+            tweenScale(0.25, 0.145, Enum.EasingStyle.Back, Enum.EasingDirection.In, function()
+                UIRefs.Main.Visible = false
+                UIRefs.reopen.Visible = IsMobile
+                scale.Scale = UIStyling.userScale
+            end)
+        end)
+    end
+    UIRefs.MobileFlyControls.Visible = IsMobile and state.fly
 end
 
 addConnection(UIS.InputBegan:Connect(function(input, processed)
@@ -5766,12 +6297,12 @@ local function unload()
     UIRefs.setInnocentESPToggle(false)
     UIRefs.setESPLinesToggle(false)
     UIRefs.setESPNamesToggle(false)
+    UIRefs.setESPInfoCardsToggle(false)
     UIRefs.setAimLockToggle(false)
     if UIRefs.setSmoothAimToggle then UIRefs.setSmoothAimToggle(false) end
     if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(false) end
     if UIRefs.setXenoShotSnapToggle then UIRefs.setXenoShotSnapToggle(false) end
     UIRefs.setAntiFlingToggle(false)
-    UIRefs.setLocalGhostToggle(false)
     UIRefs.setHitDiagToggle(false)
 
     stopFly()
@@ -5791,6 +6322,11 @@ local function unload()
         end)
     end
 
+    MenuAudio.unloaded = true
+    for which, sound in pairs(MenuAudio.ready) do
+        pcall(function() sound:Stop(); sound:Destroy() end)
+        MenuAudio.ready[which] = nil
+    end
     if UIRefs.ScriptMM2 then
         pcall(function()
             UIRefs.ScriptMM2:Destroy()
@@ -6119,12 +6655,12 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     UIRefs.setInnocentESPToggle(false)
     UIRefs.setESPLinesToggle(false)
     UIRefs.setESPNamesToggle(true)
+    UIRefs.setESPInfoCardsToggle(true)
     UIRefs.setAimLockToggle(false)
     if UIRefs.setSmoothAimToggle then UIRefs.setSmoothAimToggle(false) end
     if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(false) end
     if UIRefs.setXenoShotSnapToggle then UIRefs.setXenoShotSnapToggle(false) end
     UIRefs.setAntiFlingToggle(false)
-    UIRefs.setLocalGhostToggle(false)
     UIRefs.setHitDiagToggle(false)
     restoreCameraFOV()
 
@@ -6161,21 +6697,33 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     UIRefs.Status.Text = "Settings reset"
 end))
 
-addConnection(UIRefs.Close.MouseButton1Click:Connect(unload))
+-- X plays the same deflation before unloading all active features.
+addConnection(UIRefs.Close.MouseButton1Click:Connect(function()
+    if state.unloaded then return end
+    setMainVisible(false)
+    task.delay(0.32, unload)
+end))
 addConnection(UIRefs.unloadButton.MouseButton1Click:Connect(unload))
 
 --// Device-specific UI
 if IsMobile then
-    UIRefs.Title.Text = "ScriptMM2 | Mobile  •  " .. VERSION
+    UIRefs.Title.Text = "SCRIPTMM2   /   " .. VERSION .. "  •  MOBILE"
     UIRefs.Status.Text = "Tap MOD to reopen • drag MOD to move"
-    Scale.Scale = 0.9
+    local camera = Workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or Vector2.new(390, 800)
+    Scale.Scale = math.min(0.90, (viewport.X - 22) / 580, (viewport.Y - 30) / 610)
     UIRefs.reopen.Visible = false
 else
-    UIRefs.Title.Text = "ScriptMM2 | PC  •  " .. VERSION
+    UIRefs.Title.Text = "SCRIPTMM2   /   " .. VERSION .. "  •  PC"
     UIRefs.Status.Text = "Mouse4/G = menu • B = AimLock • H = grab"
     UIRefs.reopen.Visible = false
     UIRefs.MobileFlyControls.Visible = false
 end
+
+-- Apply a viewport-safe initial window size; opening uses the chosen scale.
+if UIRefs.applyInitialSize then UIRefs.applyInitialSize() end
+-- Animate the first appearance, too; subsequent opens use the same balloon effect.
+setMainVisible(true)
 
 --// Apply enabled overrides without changing the game's untouched defaults.
 setCharacterMovement()
