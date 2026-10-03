@@ -1,8 +1,9 @@
 --// ScriptMM2
 --// UI and callback references are grouped to keep the root chunk below Luau register limits.
+--// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
 --// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
 
-local VERSION = "V0.9.15"
+local VERSION = "V0.9.33"
 local UIRefs = {}
 
 local Players = game:GetService("Players")
@@ -23,10 +24,20 @@ local CONFIG = {
     CoinFarmSpeed = 18, -- default auto-collect travel speed
     MinCoinFarmSpeed = 10,
     MaxCoinFarmSpeed = 250,
-    CoinFarmReach = 1.65,
-    CoinFarmScanInterval = 0.65,
-    CoinFarmRetryDelay = 3.0,
+    CoinFarmReach = 0.80, -- approach the pickup closely; do not stop outside touch range
+    CoinFarmScanInterval = 8.0, -- full map fallback only; new coins are indexed by DescendantAdded
+    CoinFarmMinFreshCoins = 2, -- require genuinely new round pickups, not old decorative/stale coins
+    CoinFarmSpawnConfirm = 0.85, -- prevent one-frame false start while the map loads
+    CoinFarmRetryDelay = 4.0, -- unconfirmed coins are retried, never permanently counted as collected
+    CoinFarmRoundLimit = 40, -- stop flight when observed bag reaches 40; conservative pickup fallback
     DefaultStrafeSpeed = 60,
+    DefaultLongJumpSpeed = 110,
+    MinLongJumpSpeed = 40,
+    MaxLongJumpSpeed = 180,
+    LongJumpDuration = 1.65,
+    UltraJumpSpeed = 20000, -- theoretical 100k studs at five seconds (client physics; not a guarantee)
+    UltraJumpDuration = 5.0,
+    UltraJumpMaxDistance = 100000,
     MinStrafeSpeed = 16,
     MaxStrafeSpeed = 250,
     StrafeAcceleration = 150,
@@ -45,7 +56,7 @@ local CONFIG = {
     -- Roblox does not expose side buttons directly. Map Mouse4/XButton1 to G.
     -- Revolver pickup uses H to avoid a bind conflict.
     RevolverPickupKey = Enum.KeyCode.H,
-    RevolverPickupTimeout = 0.9,
+    RevolverPickupTimeout = 1.8,
     -- Local physics contact only: the server retains authority over other players.
     -- Very large angular/linear velocities tunnel through collision geometry.
     FlingSpeed = 440,
@@ -71,7 +82,8 @@ local CONFIG = {
     -- A bounded final lunge on manual release; extreme velocities tunnel through bodies.
     FlingReleaseSpeed = 390,
     FlingReleaseTime = 0.16,
-    AntiFlingScanInterval = 0.15,
+    AntiFlingScanInterval = 0.25, -- avoid building collision constraints for distant players
+    AntiFlingNearbyRadius = 85,
     AntiFlingTeleportDistance = 12,
     AntiFlingTeleportGrace = 0.45,
 }
@@ -87,6 +99,8 @@ local state = {
     spin = false,
     bunnyHop = false,
     strafe = false,
+    longJump = false,
+    ultraLongJump = false,
     esp = false,
     roleESP = false,
     innocentESP = false,
@@ -118,9 +132,11 @@ local values = {
     flySpeed = CONFIG.DefaultFlySpeed,
     coinFarmSpeed = CONFIG.CoinFarmSpeed,
     strafeSpeed = CONFIG.DefaultStrafeSpeed,
+    longJumpSpeed = CONFIG.DefaultLongJumpSpeed,
     fov = CONFIG.DefaultFOV,
     aimRadius = 115, -- screen pixels (not camera field of view)
     aimSmooth = 9, -- higher = faster camera tracking
+    aimLeadMs = 140, -- B AimLock: predictive lead base in milliseconds (0 disables)
 }
 
 local connections = {}
@@ -128,8 +144,13 @@ local characterConnections = {}
 local originalCollisions = {}
 local espObjects = {}
 local coinFarm = {targets = {}, skipped = setmetatable({}, {__mode="k"}), target = nil,
-    savedFly = false, savedNoclip = false, switching = false, lastScan = 0,
-    lastDistance = math.huge, progressAt = 0, lastTargetAt = 0}
+    savedFly = false, savedNoclip = false, switching = false, paused = false, lastScan = 0,
+    lastDistance = math.huge, progressAt = 0, lastTargetAt = 0,
+    knownCoins = setmetatable({}, {__mode = "k"}), freshCoins = setmetatable({}, {__mode = "k"}),
+    freshSince = nil, allowExistingCoins = false, collected = 0, pendingPickups = {}, visited = setmetatable({}, {__mode = "k"}), limitReached = false,
+    deathLock = false, deathEmptySince = nil, limitEmptySince = nil,
+    targetSet = setmetatable({}, {__mode = "k"}), lastHudRead = -1, cachedBagCount = nil,
+    lastRefresh = 0, coinLikeSample = nil, lastDiagnostic = 0}
 local flyObjects = {
     active = false,
     up = false,
@@ -142,6 +163,15 @@ local savedLighting = nil
 local savedGravity = nil
 local fovState = {active = false, saved = setmetatable({}, {__mode = "k"})}
 local movementSnapshots = setmetatable({}, {__mode = "k"})
+local longJumpState = {pendingUntil = 0, active = false, startedAt = 0, character = nil, direction = nil, startPosition = nil}
+local function clearLongJump()
+    longJumpState.pendingUntil = 0
+    longJumpState.active = false
+    longJumpState.startedAt = 0
+    longJumpState.character = nil
+    longJumpState.direction = nil
+    longJumpState.startPosition = nil
+end
 local windowFocused = true
 local spinState = {}
 
@@ -151,6 +181,7 @@ UIRefs.setFlySpeedSlider = nil
 UIRefs.setCoinFarmSpeedSlider = nil
 UIRefs.setFOVSlider = nil
 UIRefs.setStrafeSpeedSlider = nil
+UIRefs.setLongJumpSpeedSlider = nil
 
 local enableFullBright
 local disableFullBright
@@ -169,6 +200,8 @@ local updateSmoothAim
 local findRevolver
 local flingBusy = false
 local flingTrip = nil
+local flingAllActive = false
+local flingAllGeneration = 0
 local stopRoleFling
 local stopSpectateMurderer
 local toggleSpectateMurderer
@@ -883,6 +916,19 @@ UIRefs.strafeButton, UIRefs.setStrafeToggle = addToggle("Air Strafe", 8, functio
     state.strafe = enabled
 end)
 
+UIRefs.longJumpButton, UIRefs.setLongJumpToggle = addToggle("Long Jump (press Jump)", 8.1, function(enabled)
+    state.longJump = enabled
+    if not enabled then clearLongJump() end
+end)
+
+UIRefs.ultraLongJumpButton, UIRefs.setUltraLongJumpToggle = addToggle("Ultra Long Jump (100k studs)", 8.2, function(enabled)
+    state.ultraLongJump = enabled
+    clearLongJump()
+    if enabled and not state.longJump and UIRefs.setLongJumpToggle then
+        UIRefs.setLongJumpToggle(true)
+    end
+end)
+
 UIRefs._unused, UIRefs.setWalkSpeedSliderValue = addSlider("WalkSpeed", CONFIG.MinWalkSpeed, CONFIG.MaxWalkSpeed, values.walkSpeed, 9, function(value)
     values.walkSpeed = value
     applyMovementSettings(getHumanoid())
@@ -904,6 +950,11 @@ UIRefs._unused, UIRefs.setStrafeSpeedSliderValue = addSlider("StrafeSpeed", CONF
     values.strafeSpeed = value
 end)
 UIRefs.setStrafeSpeedSlider = UIRefs.setStrafeSpeedSliderValue
+
+UIRefs._unused, UIRefs.setLongJumpSpeedSliderValue = addSlider("Long Jump Speed", CONFIG.MinLongJumpSpeed, CONFIG.MaxLongJumpSpeed, values.longJumpSpeed, 12.1, function(value)
+    values.longJumpSpeed = value
+end)
+UIRefs.setLongJumpSpeedSlider = UIRefs.setLongJumpSpeedSliderValue
 
 addSection("COMBAT", 13)
 
@@ -979,6 +1030,11 @@ UIRefs._unused, UIRefs.setXenoShotSnapToggle = addToggle("Xeno Shot Snap [J] (ca
     end
 end)
 
+--// V0.9.31: velocity-based B AimLock lead; zero disables prediction.
+UIRefs._unused, UIRefs.setAimLead = addSlider("B AimLock prediction (ms)", 0, 300, values.aimLeadMs, 14.109, function(v)
+    values.aimLeadMs = v
+end)
+
 UIRefs._unused, UIRefs.setAimRadius = addSlider("Aim circle radius (px)", 35, 350, values.aimRadius, 14.11, function(v)
     values.aimRadius = v
 end)
@@ -1042,6 +1098,17 @@ UIRefs.flingSheriffButton = create("TextButton", {
     LayoutOrder = 15.1,
 }, UIRefs.Content)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.flingSheriffButton)
+
+UIRefs.flingAllButton = create("TextButton", {
+    Name = "FlingSelected",
+    Size = UDim2.new(1, -4, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(95, 62, 100),
+    BorderSizePixel = 0, Font = Enum.Font.GothamSemibold,
+    Text = "Fling Selected [OFF]",
+    TextColor3 = Color3.fromRGB(245, 230, 255), TextSize = 13,
+    AutoButtonColor = false, LayoutOrder = 15.15,
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.flingAllButton)
 
 UIRefs.stopFlingButton = create("TextButton", {
     Name = "StopFling",
@@ -1165,6 +1232,29 @@ do
     create("UIListLayout", {
         Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder,
     }, UIRefs.attackPlayerList)
+    create("TextLabel", {
+        Name = "FlingSelectTitle", Size = UDim2.new(1, -4, 0, 25),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+        Text = "FLING: SELECT ONE PLAYER",
+        TextColor3 = Color3.fromRGB(165, 165, 175), TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 19,
+    }, UIRefs.SpectateContent)
+    UIRefs.flingSelectStatus = create("TextLabel", {
+        Name = "FlingSelectStatus", Size = UDim2.new(1, -4, 0, 44),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+        Text = "Select a player below, then press Fling Selected.",
+        TextColor3 = Color3.fromRGB(180, 185, 195), TextSize = 12,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 20,
+    }, UIRefs.SpectateContent)
+    UIRefs.flingSelectButton = spectateButton("FlingSelectedAction", "Fling Selected [OFF]", 21)
+    UIRefs.flingPlayerList = create("Frame", {
+        Name = "FlingPlayerList", Size = UDim2.new(1, -4, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+        LayoutOrder = 22,
+    }, UIRefs.SpectateContent)
+    create("UIListLayout", {
+        Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, UIRefs.flingPlayerList)
 end
 
 UIRefs.antiFlingButton = nil
@@ -1440,7 +1530,7 @@ end
 local teleportBusy = false
 local revolverTrip = nil
 
-local function finishRevolverTrip()
+local function finishRevolverTrip(shouldReturn)
     local trip = revolverTrip
     if not trip or trip.finished then
         return false
@@ -1449,9 +1539,10 @@ local function finishRevolverTrip()
     if trip.stepConnection then
         trip.stepConnection:Disconnect()
     end
-    -- Never move a new character after death/respawn during the pickup.
+    -- Only return after a Tool is confirmed in our own Character/Backpack.
+    -- Cancelling, timing out, or a failed pickup leaves us at the drop.
     local returned, returnError = false, nil
-    if LocalPlayer.Character == trip.character and trip.character.Parent
+    if shouldReturn and LocalPlayer.Character == trip.character and trip.character.Parent
         and trip.root.Parent and trip.humanoid.Health > 0 then
         local ok, err = pcall(function()
             trip.character:PivotTo(trip.returnPivot)
@@ -1563,7 +1654,11 @@ local function teleportToRevolver()
     if trip.finished then
         return
     end
-    local returned, returnError = finishRevolverTrip()
+    -- One final check to account for replication arriving at the timeout boundary.
+    if LocalPlayer.Character == character and root.Parent and humanoid.Health > 0 then
+        pickedUp = findRevolver() ~= nil
+    end
+    local returned, returnError = finishRevolverTrip(pickedUp)
     if state.unloaded then
         return
     end
@@ -1571,12 +1666,12 @@ local function teleportToRevolver()
         UIRefs.Status.Text = "Pickup error: " .. tostring(err)
     elseif returnError then
         UIRefs.Status.Text = "Return error: " .. tostring(returnError)
+    elseif not pickedUp then
+        UIRefs.Status.Text = "Revolver not collected • staying at the drop"
     elseif not returned then
-        UIRefs.Status.Text = "Pickup cancelled: character changed/dead"
-    elseif pickedUp then
-        UIRefs.Status.Text = "Revolver collected • returned to starting point"
+        UIRefs.Status.Text = "Revolver detected • return cancelled: character changed/dead"
     else
-        UIRefs.Status.Text = "Returned • server did not confirm the pickup"
+        UIRefs.Status.Text = "Revolver collected • returned to starting point"
     end
 end
 
@@ -1602,7 +1697,7 @@ UIRefs.teleportRevolverButton = create("TextButton", {
     BackgroundColor3 = Color3.fromRGB(37, 37, 43),
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
-    Text = IsMobile and "Grab Revolver & Return (~1s)" or "Grab Revolver & Return [H]",
+    Text = IsMobile and "Grab Revolver (return if collected)" or "Grab Revolver (return if collected) [H]",
     TextColor3 = Color3.fromRGB(220, 220, 225),
     TextSize = 13,
     AutoButtonColor = false,
@@ -1915,9 +2010,10 @@ end
 --// Actual pickup must still be accepted by the game server.
 do
     local function coinPart(obj)
-        if not obj or not obj.Parent or not obj:IsDescendantOf(Workspace) then return nil end
+        if not obj or not obj.Parent then return nil end
         local n = obj.Name:lower():gsub("[^%w]", "")
         if n ~= "coin" and n ~= "coinserver" and n ~= "coinpickup" and n ~= "goldcoin" then return nil end
+        if not obj:IsDescendantOf(Workspace) then return nil end
         -- Don't farm decorative lobby coins or player-owned models/tools.
         local ancestor = obj.Parent
         while ancestor and ancestor ~= Workspace do
@@ -1937,20 +2033,194 @@ do
         return nil
     end
 
-    local function scanCoins()
-        coinFarm.targets = {}
-        for _, obj in ipairs(Workspace:GetDescendants()) do
-            if coinPart(obj) then coinFarm.targets[#coinFarm.targets + 1] = obj end
+    local function registerCoin(obj)
+        if not obj or not obj.Parent then return end
+        -- Some MM2 variants spawn a model first, its MeshPart later.
+        local candidate = obj
+        if obj:IsA("BasePart") and obj.Parent:IsA("Model") then
+            local pn = obj.Parent.Name:lower():gsub("[^%w]", "")
+            if pn == "coinserver" or pn == "coin" then candidate = obj.Parent end
         end
-        coinFarm.lastScan = os.clock()
+        if coinFarm.targetSet[candidate] or not coinPart(candidate) then return end
+        coinFarm.targetSet[candidate] = true
+        coinFarm.targets[#coinFarm.targets + 1] = candidate
     end
 
+    local function scanCoins(force)
+        local now = os.clock()
+        if not force and now - coinFarm.lastScan < CONFIG.CoinFarmScanInterval then return end
+        coinFarm.lastScan = now
+        local sample, namedCount = nil, 0
+        coinFarm.targets = {}
+        coinFarm.targetSet = setmetatable({}, {__mode = "k"})
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            -- Save one possible missed name for diagnostics, not a target by guesswork.
+            local name = obj.Name:lower()
+            if name:find("coin", 1, true) then
+                namedCount += 1
+                if not sample then sample = obj.Name end
+            end
+            if name:find("coin", 1, true) then registerCoin(obj) end
+        end
+        coinFarm.coinLikeSample = sample
+        coinFarm.coinNamedCount = namedCount
+    end
+
+    -- Track newly spawned coins instead of traversing the entire map every frame.
+    addConnection(Workspace.DescendantAdded:Connect(function(obj)
+        if not state.coinFarm or state.unloaded then return end
+        local n = obj.Name:lower()
+        local parent = obj.Parent
+        local pn = parent and parent.Name:lower() or ""
+        if n:find("coin", 1, true) or pn:find("coin", 1, true) then
+            registerCoin(obj)
+            if parent and parent:IsA("Model") then registerCoin(parent) end
+        end
+    end))
+
+    -- Arm while stationary: existing coins become baseline, only newly spawned
+    -- collectible instances can release the next round's waiting state.
+    local function armWaitingForNewCoins(allowExistingCoins)
+        coinFarm.target = nil
+        coinFarm.paused = true
+        coinFarm.freshSince = nil
+        -- Only an explicit ON press may use coins already spawned this round.
+        -- Respawns and round transitions must wait for NEW coin instances.
+        coinFarm.allowExistingCoins = (allowExistingCoins == true)
+        -- New round / respawn: fresh per-round pickup estimate.
+        coinFarm.collected = 0
+        coinFarm.cachedBagCount = nil
+        coinFarm.lastHudRead = -1
+        coinFarm.pendingPickups = {}
+        coinFarm.visited = setmetatable({}, {__mode = "k"})
+        coinFarm.skipped = setmetatable({}, {__mode = "k"})
+        coinFarm.limitReached = false
+        coinFarm.limitEmptySince = nil
+        coinFarm.knownCoins = setmetatable({}, {__mode = "k"})
+        coinFarm.freshCoins = setmetatable({}, {__mode = "k"})
+        coinFarm.lastScan = -math.huge
+        scanCoins(true)
+        for _, obj in ipairs(coinFarm.targets) do coinFarm.knownCoins[obj] = true end
+        stopFly()
+        restoreNoclip()
+    end
+    UIRefs.armCoinFarmWaiting = armWaitingForNewCoins
+    -- A defeated player cannot continue the route. Keep the ON setting,
+    -- but require the old round's coins to clear before arming a new round.
+    UIRefs.pauseCoinFarmOnDeath = function(character)
+        if not state.coinFarm or state.unloaded or LocalPlayer.Character ~= character then return end
+        if coinFarm.deathLock then return end
+        coinFarm.deathLock = true
+        coinFarm.deathEmptySince = nil
+        coinFarm.paused = true
+        coinFarm.allowExistingCoins = false
+        coinFarm.freshSince = nil
+        coinFarm.target = nil
+        coinFarm.pendingPickups = {}
+        if flyObjects.flyVelocity then flyObjects.flyVelocity.Velocity = Vector3.zero end
+        stopFly()
+        restoreNoclip()
+        UIRefs.Status.Text = "Coin Farm: ON • defeated; waiting for next round"
+    end
+
+    -- A plain numeric TextLabel inside a Coin GUI may be a currency balance, NOT
+    -- the current round's bag. Only accept explicit progress out of 40.
+    -- Without an unambiguous HUD, retain the conservative locally observed count.
+    local function readCoinBagCount()
+        local now = os.clock()
+        if now - coinFarm.lastHudRead < 0.55 then return coinFarm.cachedBagCount end
+        coinFarm.lastHudRead = now
+        local highest = nil
+        for _, gui in ipairs(PlayerGui:GetDescendants()) do
+            if (gui:IsA("TextLabel") or gui:IsA("TextButton"))
+                and gui:IsA("GuiObject") and not gui:IsDescendantOf(UIRefs.ScriptMM2) then
+                local raw = tostring(gui.Text or "")
+                local count = raw:match("^%s*(%d+)%s*/%s*40%s*$")
+                    or raw:match("[Cc][Oo][Ii][Nn][Ss]?%s*:?%s*(%d+)%s*/%s*40")
+                count = tonumber(count)
+                if count and count >= 0 and count <= CONFIG.CoinFarmRoundLimit then
+                    highest = math.max(highest or 0, count)
+                end
+            end
+        end
+        coinFarm.cachedBagCount = highest
+        return highest
+    end
+
+    local function completeCoinFarmRound()
+        if coinFarm.limitReached then return end
+        coinFarm.limitReached = true
+        coinFarm.limitEmptySince = nil
+        coinFarm.paused = true
+        coinFarm.target = nil
+        coinFarm.pendingPickups = {}
+        if flyObjects.flyVelocity then flyObjects.flyVelocity.Velocity = Vector3.zero end
+        stopFly()
+        restoreNoclip()
+        -- Explicitly switch Fly OFF without switching the persistent farm toggle OFF.
+        coinFarm.switching = true
+        if UIRefs.setFlyToggle then UIRefs.setFlyToggle(false) end
+        if UIRefs.setNoclipToggle then UIRefs.setNoclipToggle(false) end
+        coinFarm.switching = false
+        UIRefs.Status.Text = "Coin Farm: 40/40 • Fly OFF; waiting for next round"
+        -- Do NOT set Humanoid.Health to zero or force a respawn.
+    end
+
+    -- Local disappearance is pickup evidence; merely approaching a coin is not.
+    -- If the MM2 bag HUD is visible, its count overrides this fallback estimate.
+    local function updatePickupProgress()
+        if coinFarm.limitReached or not state.coinFarm then return end
+        local now = os.clock()
+        local bagCount = readCoinBagCount()
+        for object, markedAt in pairs(coinFarm.pendingPickups) do
+            local part = coinPart(object)
+            local localGone = not part
+                or (part and (part.LocalTransparencyModifier >= 0.95 or part.Transparency >= 0.95))
+            if localGone then
+                coinFarm.visited[object] = true
+                coinFarm.pendingPickups[object] = nil
+                coinFarm.skipped[object] = math.huge
+                if bagCount == nil then coinFarm.collected += 1 end
+            elseif now - markedAt > 1.2 then
+                -- An unchanged coin is NOT a confirmed pickup. The old logic
+                -- marked it visited forever, eventually excluding every visible
+                -- coin from the available-target list. Retry after a cooldown.
+                coinFarm.pendingPickups[object] = nil
+                coinFarm.skipped[object] = now + CONFIG.CoinFarmRetryDelay
+            end
+        end
+        -- Pickup progress within one round cannot decrease. Do not let unrelated
+        -- HUD zeros or late UI refreshes erase locally confirmed pickups.
+        if bagCount ~= nil then coinFarm.collected = math.max(coinFarm.collected, bagCount) end
+        if coinFarm.collected >= CONFIG.CoinFarmRoundLimit then
+            completeCoinFarmRound()
+            return
+        end
+        UIRefs.Status.Text = "Coin Farm: " .. coinFarm.collected .. "/"
+            .. CONFIG.CoinFarmRoundLimit
+            .. (bagCount ~= nil and " (bag HUD)" or " (locally confirmed estimate)")
+    end
+
+    -- Workspace can keep a coin replicated after it disappears just for this
+    -- player. Separate raw coin instances from genuinely available targets.
+    local function coinAvailable(object)
+        local part = coinPart(object)
+        if not part then return nil end
+        if coinFarm.visited[object] or coinFarm.pendingPickups[object] then return nil end
+        if (coinFarm.skipped[object] or 0) > os.clock() then return nil end
+        if part.LocalTransparencyModifier >= 0.95 or part.Transparency >= 0.95 then return nil end
+        return part
+    end
+
+    -- Re-evaluate distance from the CURRENT character position for each pickup.
+    -- Exclude pending pickups immediately, otherwise a still-replicated coin can
+    -- be targeted over and over before the local counter marks it visited.
     local function nextCoin(root)
         local now = os.clock()
         local closest, shortest = nil, math.huge
         for _, obj in ipairs(coinFarm.targets) do
-            local part = coinPart(obj)
-            if part and (coinFarm.skipped[obj] or 0) <= now then
+            local part = coinAvailable(obj)
+            if part then
                 local d = (part.Position - root.Position).Magnitude
                 if d < shortest then closest, shortest = obj, d end
             end
@@ -1961,8 +2231,22 @@ do
     UIRefs.stopCoinFarm = function()
         if not state.coinFarm then return end
         state.coinFarm = false
+        coinFarm.paused = false
         coinFarm.target = nil
         coinFarm.targets = {}
+        coinFarm.targetSet = setmetatable({}, {__mode = "k"})
+        coinFarm.knownCoins = setmetatable({}, {__mode = "k"})
+        coinFarm.freshCoins = setmetatable({}, {__mode = "k"})
+        coinFarm.freshSince = nil
+        coinFarm.allowExistingCoins = false
+        coinFarm.collected = 0
+        coinFarm.pendingPickups = {}
+        coinFarm.visited = setmetatable({}, {__mode = "k"})
+        coinFarm.skipped = setmetatable({}, {__mode = "k"})
+        coinFarm.limitReached = false
+        coinFarm.limitEmptySince = nil
+        coinFarm.deathLock = false
+        coinFarm.deathEmptySince = nil
         coinFarm.switching = true
         if UIRefs.setFlyToggle then UIRefs.setFlyToggle(coinFarm.savedFly) end
         if UIRefs.setNoclipToggle then UIRefs.setNoclipToggle(coinFarm.savedNoclip) end
@@ -1974,48 +2258,211 @@ do
     UIRefs.startCoinFarm = function()
         if state.coinFarm then return end
         local char, root, hum = getCharacter(), getRoot(), getHumanoid()
-        if state.unloaded or teleportBusy or flingBusy or shootMurdererBusy
-            or not char or not root or not hum or hum.Health <= 0 or root.Anchored or hum.Sit then
-            UIRefs.Status.Text = "Coin Farm: wait for an alive character / stop Fling or TP"
+        if state.unloaded or teleportBusy or flingBusy or shootMurdererBusy then
+            UIRefs.Status.Text = "Coin Farm: finish Fling / TP / Shot first"
             task.defer(function()
                 if UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
             end)
             return
         end
         coinFarm.savedFly, coinFarm.savedNoclip = state.fly, state.noclip
-        coinFarm.switching = true
-        UIRefs.setFlyToggle(true)
-        UIRefs.setNoclipToggle(true)
-        coinFarm.switching = false
+        -- Set PAUSED before enabling Fly/NoClip, otherwise flight can start
+        -- in the lobby for a frame before the next movement refresh.
         state.coinFarm = true
-        coinFarm.target = nil
-        coinFarm.lastScan = 0
+        coinFarm.paused = true
+        coinFarm.deathLock = not (hum and hum.Health > 0)
+        coinFarm.deathEmptySince = nil
+        -- Fly/NoClip are enabled ONLY after the spawn confirmation in refreshCoinFarm.
         coinFarm.progressAt = os.clock()
         coinFarm.lastDistance = math.huge
-        scanCoins()
-        UIRefs.Status.Text = "Coin Farm: ON • " .. values.coinFarmSpeed .. " studs/s"
+        armWaitingForNewCoins(not coinFarm.deathLock)
+        UIRefs.Status.Text = coinFarm.deathLock
+            and "Coin Farm: ON • defeated; waiting for next round"
+            or "Coin Farm: ON • waiting for round coins"
+    end
+
+    -- Keep ON across rounds but NEVER use coins already present at activation
+    -- as proof a new round has started. Require newly observed coin instances.
+    UIRefs.refreshCoinFarm = function()
+        if not state.coinFarm or state.unloaded then return end
+        local refreshNow = os.clock()
+        if refreshNow - coinFarm.lastRefresh < 0.20 then return end
+        coinFarm.lastRefresh = refreshNow
+        if coinFarm.limitReached then
+            -- There is no forced death now. Wait for the actual old round's
+            -- coins to disappear, then arm the next round while staying ON.
+            local now = os.clock()
+            if now - coinFarm.lastScan >= CONFIG.CoinFarmScanInterval then scanCoins() end
+            local anyOldCoin = false
+            for _, obj in ipairs(coinFarm.targets) do
+                if coinPart(obj) then anyOldCoin = true break end
+            end
+            if anyOldCoin then
+                coinFarm.limitEmptySince = nil
+            else
+                coinFarm.limitEmptySince = coinFarm.limitEmptySince or now
+                if now - coinFarm.limitEmptySince >= 1.0 then
+                    armWaitingForNewCoins(false)
+                    UIRefs.Status.Text = "Coin Farm: ON • waiting for next round coins"
+                end
+            end
+            return
+        end
+        local char, root, hum = getCharacter(), getRoot(), getHumanoid()
+        -- Health must be checked BEFORE pending pickups can advance the counter.
+        if char and hum and hum.Health <= 0 then
+            if UIRefs.pauseCoinFarmOnDeath then UIRefs.pauseCoinFarmOnDeath(char) end
+            return
+        end
+        if not coinFarm.deathLock then updatePickupProgress() end
+        if coinFarm.limitReached then return end
+        -- Fly deliberately sets PlatformStand=true; do not mistake our own active
+        -- flight for a failed/unfinished character and suspend it each frame.
+        local ready = char and root and hum and hum.Health > 0
+            and not root.Anchored and not hum.Sit
+            and (not hum.PlatformStand or (flyObjects.active and flyObjects.humanoid == hum))
+        local now = os.clock()
+        if now - coinFarm.lastScan >= CONFIG.CoinFarmScanInterval then
+            scanCoins()
+        end
+        local visibleCount, freshCount, availableCount, availableFreshCount = 0, 0, 0, 0
+        for _, obj in ipairs(coinFarm.targets) do
+            if coinPart(obj) then
+                visibleCount += 1
+                if not coinFarm.knownCoins[obj] then
+                    coinFarm.knownCoins[obj] = true
+                    coinFarm.freshCoins[obj] = true
+                end
+                if coinFarm.freshCoins[obj] then freshCount += 1 end
+                if coinAvailable(obj) then
+                    availableCount += 1
+                    if coinFarm.freshCoins[obj] then availableFreshCount += 1 end
+                end
+            end
+        end
+        -- After defeat, remain idle through respawn and the rest of this round.
+        -- A stable empty map is the next-round baseline; NEW coin instances can
+        -- then release the existing spawn confirmation delay.
+        if coinFarm.deathLock then
+            if visibleCount > 0 then
+                coinFarm.deathEmptySince = nil
+                UIRefs.Status.Text = "Coin Farm: ON • defeated; waiting for round end"
+                return
+            end
+            coinFarm.deathEmptySince = coinFarm.deathEmptySince or now
+            if now - coinFarm.deathEmptySince >= 1.0 then
+                coinFarm.deathLock = false
+                coinFarm.deathEmptySince = nil
+                armWaitingForNewCoins(false)
+                UIRefs.Status.Text = "Coin Farm: ON • waiting for next round coins"
+            end
+            return
+        end
+        -- Coins all disappeared: arm the *next* round, without turning OFF.
+        if visibleCount == 0 then
+            if not coinFarm.paused then
+                armWaitingForNewCoins()
+            end
+            coinFarm.freshSince = nil
+            if now - coinFarm.lastDiagnostic >= 2.0 then
+                coinFarm.lastDiagnostic = now
+                UIRefs.Status.Text = "Coin Farm: 0 usable coins • names="
+                    .. tostring(coinFarm.coinNamedCount or 0) .. " (e.g. "
+                    .. tostring(coinFarm.coinLikeSample or "none") .. ") • waiting"
+            end
+            return
+        end
+        -- All targets can remain in Workspace but be locally hidden or visited.
+        -- Do not fly in that state, and do not treat it as a new round.
+        if availableCount == 0 then
+            coinFarm.freshSince = nil
+            if flyObjects.flyVelocity then flyObjects.flyVelocity.Velocity = Vector3.zero end
+            if not coinFarm.paused then stopFly() end
+            -- Preserve permission to resume this round after a transient skip.
+            -- The death and 40/40 branches above are deliberately separate.
+            coinFarm.allowExistingCoins = true
+            coinFarm.paused = true
+            local pendingCount, retryCount, hiddenCount = 0, 0, 0
+            for _, obj in ipairs(coinFarm.targets) do
+                local part = coinPart(obj)
+                if part then
+                    if coinFarm.pendingPickups[obj] then pendingCount += 1 end
+                    if (coinFarm.skipped[obj] or 0) > now and not coinFarm.visited[obj] then retryCount += 1 end
+                    if part.Transparency >= 0.95 or part.LocalTransparencyModifier >= 0.95 then hiddenCount += 1 end
+                end
+            end
+            if visibleCount > 0 then
+                UIRefs.Status.Text = "Coin Farm: " .. visibleCount .. " found, " .. retryCount
+                    .. " retrying, " .. pendingCount .. " pending, " .. hiddenCount .. " hidden • waiting"
+            else
+                UIRefs.Status.Text = "Coin Farm: 0 targets; candidate: "
+                    .. tostring(coinFarm.coinLikeSample or "none") .. " • waiting"
+            end
+            return
+        end
+        if not ready then
+            if not coinFarm.paused then
+                armWaitingForNewCoins()
+                UIRefs.Status.Text = "Coin Farm: ON • character not ready; waiting"
+            end
+            return
+        end
+        if coinFarm.paused then
+            -- If enabled mid-round, already-spawned collectible coins are valid.
+            -- Otherwise (after respawn / round end) require genuinely NEW coins.
+            if availableFreshCount >= CONFIG.CoinFarmMinFreshCoins
+                or (coinFarm.allowExistingCoins and availableCount >= 1) then
+                coinFarm.freshSince = coinFarm.freshSince or now
+                if now - coinFarm.freshSince >= CONFIG.CoinFarmSpawnConfirm then
+                    -- Fly is OFF after a completed 40-coin round; enable it only
+                    -- once the next round's coin spawn is confirmed.
+                    coinFarm.switching = true
+                    if UIRefs.setFlyToggle then UIRefs.setFlyToggle(true) end
+                    if UIRefs.setNoclipToggle then UIRefs.setNoclipToggle(true) end
+                    coinFarm.switching = false
+                    coinFarm.paused = false
+                    coinFarm.allowExistingCoins = false
+                    coinFarm.target = nil
+                    coinFarm.progressAt, coinFarm.lastDistance = now, math.huge
+                    UIRefs.Status.Text = "Coin Farm: round coins appeared • " .. values.coinFarmSpeed .. " studs/s"
+                end
+            else
+                coinFarm.freshSince = nil
+            end
+        end
     end
 
     UIRefs.coinFarmVelocity = function(root)
-        if not state.coinFarm then return nil end
+        local hum = getHumanoid()
+        if not state.coinFarm or coinFarm.paused or coinFarm.deathLock
+            or not hum or hum.Health <= 0 or root ~= getRoot() then return nil end
         local now = os.clock()
         if now - coinFarm.lastScan >= CONFIG.CoinFarmScanInterval then scanCoins() end
 
-        -- Retarget in the same simulation frame. Never brake while approaching a coin.
+        -- Retarget from cached targets; NEVER force a full Workspace traversal on target loss.
         -- A collected/removed coin may vanish before the scheduled network scan.
         for attempt = 1, 3 do
             local previousTarget = coinFarm.target
             local part = coinPart(previousTarget)
-            if not part then
-                -- Force a fresh scan only if an assigned coin just disappeared.
-                if previousTarget then scanCoins() end
+            if not part or coinFarm.visited[previousTarget]
+                or coinFarm.pendingPickups[previousTarget]
+                or (part and (part.LocalTransparencyModifier >= 0.95 or part.Transparency >= 0.95)) then
+                -- Refresh on target loss and periodically while waiting. The
+                -- candidate distances are measured from the CURRENT root.Position
+                -- on every acquisition, without scanning Workspace every frame.
+                -- DescendantAdded keeps the cache current; scanCoins is rate-limited.
+                -- No forced full-map scan on every retarget.
                 coinFarm.target = nextCoin(root)
                 part = coinPart(coinFarm.target)
                 coinFarm.progressAt, coinFarm.lastDistance = now, math.huge
             end
 
             if not part then
-                UIRefs.Status.Text = "Coin Farm: no collectible coins visible • waiting"
+                if #coinFarm.targets > 0 then
+                    UIRefs.Status.Text = "Coin Farm: no uncollected coins left nearby • paused"
+                else
+                    UIRefs.Status.Text = "Coin Farm: no coin objects detected • waiting for spawn"
+                end
                 return Vector3.zero
             end
 
@@ -2026,7 +2473,10 @@ do
             end
 
             if dist <= CONFIG.CoinFarmReach then
-                -- Already at the pickup: choose another coin without pausing here.
+                -- Only after a close approach: then wait for actual visual/HUD evidence.
+                if not coinFarm.visited[coinFarm.target] and coinFarm.pendingPickups[coinFarm.target] == nil then
+                    coinFarm.pendingPickups[coinFarm.target] = now
+                end
                 coinFarm.skipped[coinFarm.target] = now + CONFIG.CoinFarmRetryDelay
                 coinFarm.target = nil
             elseif now - coinFarm.progressAt > 4.0 then
@@ -2263,6 +2713,14 @@ do
             for _, button in pairs(UIRefs.attackPlayerButtons) do button:Destroy() end
         end
         UIRefs.attackPlayerButtons = {}
+        if UIRefs.flingPlayerButtons then
+            for _, button in pairs(UIRefs.flingPlayerButtons) do button:Destroy() end
+        end
+        UIRefs.flingPlayerButtons = {}
+        if UIRefs.selectedFlingPlayer and UIRefs.selectedFlingPlayer.Parent ~= Players then
+            UIRefs.selectedFlingPlayer = nil
+            UIRefs.flingSelectStatus.Text = "Selected player left. Choose another player."
+        end
         if UIRefs.selectedAttackPlayer and UIRefs.selectedAttackPlayer.Parent ~= Players then
             UIRefs.selectedAttackPlayer = nil
             UIRefs.attackStatus.Text = "Selected player left. Choose another player."
@@ -2334,10 +2792,32 @@ do
                         .. " • Attack Selected or K (normal weapon attempt)"
                     if UIRefs.paintAttackSelection then UIRefs.paintAttackSelection() end
                 end)
+                local flingButton = create("TextButton", {
+                    Name = "FlingSelect_" .. tostring(player.UserId),
+                    Size = UDim2.new(1, -4, 0, 38),
+                    BackgroundColor3 = Color3.fromRGB(74, 49, 83), BorderSizePixel = 0,
+                    Font = Enum.Font.GothamSemibold,
+                    Text = "Target → " .. player.DisplayName .. " (@" .. player.Name .. ")",
+                    TextColor3 = Color3.fromRGB(245, 230, 255), TextSize = 13,
+                    TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false,
+                    LayoutOrder = order,
+                }, UIRefs.flingPlayerList)
+                create("UICorner", {CornerRadius = UDim.new(0, 8)}, flingButton)
+                UIRefs.flingPlayerButtons[player] = flingButton
+                flingButton.MouseButton1Click:Connect(function()
+                    if flingAllActive or flingBusy then
+                        UIRefs.flingSelectStatus.Text = "Stop current fling before changing target."
+                        return
+                    end
+                    UIRefs.selectedFlingPlayer = player
+                    UIRefs.flingSelectStatus.Text = "Target: " .. player.DisplayName .. " (@" .. player.Name .. ")"
+                    if UIRefs.paintFlingSelection then UIRefs.paintFlingSelection() end
+                end)
             end
         end
         paintSpectateButtons()
         if UIRefs.paintAttackSelection then UIRefs.paintAttackSelection() end
+        if UIRefs.paintFlingSelection then UIRefs.paintFlingSelection() end
     end
 
     local checkTimer = 0
@@ -2688,6 +3168,23 @@ updateAimLock = function()
 
     local cameraPosition = camera.CFrame.Position
     local targetPosition = targetPart.Position
+    -- The replicated torso location is already behind a moving target by the time
+    -- the local camera tracks it. Look ahead using the target assembly's velocity.
+    -- Only camera tracking is changed: this does not intercept gun or server hits.
+    if values.aimLeadMs > 0 then
+        local root = targetPart.Parent and targetPart.Parent:FindFirstChild("HumanoidRootPart")
+        local velocity = (root and root:IsA("BasePart") and root.AssemblyLinearVelocity)
+            or targetPart.AssemblyLinearVelocity
+        local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+        local speed = flatVelocity.Magnitude
+        if speed > 1 then
+            -- Slight extra lead for distance; cap it to prevent extreme overshoot.
+            local distance = (targetPosition - cameraPosition).Magnitude
+            local leadSeconds = math.clamp(values.aimLeadMs / 1000 + distance / 650, 0, 0.40)
+            local displacement = flatVelocity.Unit * math.min(speed * leadSeconds, 8)
+            targetPosition = targetPosition + displacement
+        end
+    end
     if (targetPosition - cameraPosition).Magnitude > 0.001 then
         camera.CFrame = CFrame.lookAt(cameraPosition, targetPosition)
     end
@@ -2993,12 +3490,30 @@ stopRoleFling = function(releaseBurst)
         UIRefs.flingSheriffButton.Text = "Inside Fling Sheriff"
         setButtonVisual(UIRefs.flingMurdererButton, false)
         setButtonVisual(UIRefs.flingSheriffButton, false)
+        if not flingAllActive then
+            UIRefs.flingAllButton.Text = "Fling Selected [OFF]"
+            if UIRefs.flingSelectButton then UIRefs.flingSelectButton.Text = "Fling Selected [OFF]" end
+            setButtonVisual(UIRefs.flingAllButton, false)
+            if UIRefs.flingSelectButton then setButtonVisual(UIRefs.flingSelectButton, false) end
+        end
     end
     return returned, returnError
 end
 
-local function flingRole(roleName)
+local function flingRole(roleName, chosenPlayer)
+    if flingAllActive and roleName ~= "Player" then
+        UIRefs.Status.Text = "Fling: stop selected fling first"
+        return
+    end
     local isMurderer = roleName == "Murderer"
+    local isPlayer = roleName == "Player"
+    if isPlayer and not flingAllActive then return end
+    local function targetMatches(player)
+        if isPlayer then
+            return player == chosenPlayer and chosenPlayer ~= LocalPlayer and chosenPlayer.Parent == Players
+        end
+        return (isMurderer and Murder or Sheriff) == player.Name
+    end
     if state.unloaded then return end
     if flingBusy then
         if flingTrip and flingTrip.roleName == roleName then
@@ -3036,9 +3551,12 @@ local function flingRole(roleName)
     }
     flingTrip = trip
     flingBusy = true
-    local activeButton = isMurderer and UIRefs.flingMurdererButton or UIRefs.flingSheriffButton
-    activeButton.Text = "Release " .. roleName .. " Inside Fling [ON]"
-    setButtonVisual(activeButton, true)
+    local activeButton = isPlayer and UIRefs.flingAllButton
+        or (isMurderer and UIRefs.flingMurdererButton or UIRefs.flingSheriffButton)
+    if not isPlayer then
+        activeButton.Text = "Release " .. roleName .. " Inside Fling [ON]"
+        setButtonVisual(activeButton, true)
+    end
     UIRefs.Status.Text = "Fling: checking " .. roleName .. "..."
 
     local outcome = "Fling stopped • returned"
@@ -3048,10 +3566,12 @@ local function flingRole(roleName)
         local target, targetName
         local roleDeadline = os.clock() + CONFIG.FlingRoleWait
         repeat
-            if trip.finished or state.unloaded or LocalPlayer.Character ~= character then return end
-            refreshRoles()
-            targetName = isMurderer and Murder or Sheriff
-            target = targetName ~= "" and Players:FindFirstChild(targetName) or nil
+            if trip.finished or state.unloaded or LocalPlayer.Character ~= character
+                or (isPlayer and not flingAllActive) then return end
+            if not isPlayer then refreshRoles() end
+            targetName = isPlayer and (chosenPlayer and chosenPlayer.Name or "")
+                or (isMurderer and Murder or Sheriff)
+            target = isPlayer and chosenPlayer or (targetName ~= "" and Players:FindFirstChild(targetName) or nil)
             if target and target ~= LocalPlayer and roleAlive(target.Name) then break end
             UIRefs.Status.Text = "Fling: waiting for living " .. roleName .. " / round..."
             task.wait(0.35)
@@ -3066,9 +3586,10 @@ local function flingRole(roleName)
         local targetCharacter, targetRoot
         local readyDeadline = os.clock() + CONFIG.FlingTargetWait
         repeat
-            if trip.finished or state.unloaded or LocalPlayer.Character ~= character then return end
-            if (isMurderer and Murder or Sheriff) ~= target.Name then
-                outcome = "Fling: role changed while waiting for target"
+            if trip.finished or state.unloaded or LocalPlayer.Character ~= character
+                or (isPlayer and not flingAllActive) then return end
+            if not targetMatches(target) then
+                outcome = "Fling: target changed while waiting"
                 return
             end
             targetCharacter = target.Character
@@ -3216,10 +3737,11 @@ local function flingRole(roleName)
 
         local function canMaintainContact()
             return not trip.finished and not trip.error and not state.unloaded
+                and (not isPlayer or flingAllActive)
                 and LocalPlayer.Character == character and target.Character == targetCharacter
                 and root.Parent and targetRoot.Parent and humanoid.Health > 0
-                and not targetRoot.Anchored and rolesAvailable
-                and (isMurderer and Murder or Sheriff) == target.Name and roleAlive(target.Name)
+                and not targetRoot.Anchored and (isPlayer or rolesAvailable)
+                and targetMatches(target) and roleAlive(target.Name)
         end
         local function alignWithTarget()
             -- Inside mode: place OUR pivot at the target root rather than orbiting
@@ -3274,13 +3796,14 @@ local function flingRole(roleName)
         end)
 
         repeat
-            if trip.finished or state.unloaded or trip.error then break end
+            if trip.finished or state.unloaded or trip.error
+                or (isPlayer and not flingAllActive) then break end
             if LocalPlayer.Character ~= character or not root.Parent or humanoid.Health <= 0 then
                 outcome = "Fling cancelled: character changed/dead"
                 break
             end
-            if not rolesAvailable or (isMurderer and Murder or Sheriff) ~= target.Name then
-                outcome = "Fling: " .. roleName .. " role changed / roles unavailable"
+            if (not isPlayer and not rolesAvailable) or not targetMatches(target) then
+                outcome = "Fling: " .. roleName .. " target changed / unavailable"
                 break
             end
             if target.Character ~= targetCharacter or not targetRoot.Parent or not roleAlive(target.Name) then
@@ -3356,6 +3879,83 @@ local function flingRole(roleName)
     else
         UIRefs.Status.Text = outcome
     end
+end
+
+--// Explicit one-player target, using the existing one-target contact attempt.
+--// Only our own character's physics is controlled; server displacement is not guaranteed.
+UIRefs.paintFlingSelection = function()
+    for player, button in pairs(UIRefs.flingPlayerButtons or {}) do
+        if button and button.Parent then
+            setButtonVisual(button, player == UIRefs.selectedFlingPlayer)
+        end
+    end
+end
+local function paintSelectedFlingAction(active)
+    local label = active and "Stop Fling Selected [ON]" or "Fling Selected [OFF]"
+    UIRefs.flingAllButton.Text = label
+    UIRefs.flingSelectButton.Text = label
+    setButtonVisual(UIRefs.flingAllButton, active)
+    setButtonVisual(UIRefs.flingSelectButton, active)
+end
+local function flingAllPlayers()
+    if state.unloaded then return end
+    if flingAllActive then
+        flingAllActive = false
+        flingAllGeneration = flingAllGeneration + 1
+        if flingBusy then stopRoleFling(true) end
+        paintSelectedFlingAction(false)
+        UIRefs.Status.Text = "Fling Selected: stopped • returned"
+        UIRefs.flingSelectStatus.Text = "Stopped. Choose a target to retry."
+        return
+    end
+    if flingBusy or teleportBusy then
+        UIRefs.Status.Text = "Fling Selected: stop current Fling / TP first"
+        return
+    end
+    local player = UIRefs.selectedFlingPlayer
+    if not player or player == LocalPlayer or player.Parent ~= Players then
+        UIRefs.Status.Text = "Fling Selected: choose a player in SPECTATE first"
+        UIRefs.flingSelectStatus.Text = UIRefs.Status.Text
+        return
+    end
+    if not roleAlive(player.Name) then
+        UIRefs.Status.Text = "Fling Selected: chosen player is not alive / available"
+        UIRefs.flingSelectStatus.Text = UIRefs.Status.Text
+        return
+    end
+    flingAllActive = true -- retained internal lifecycle flag for the Player mode
+    flingAllGeneration = flingAllGeneration + 1
+    local generation = flingAllGeneration
+    paintSelectedFlingAction(true)
+    UIRefs.Status.Text = "Fling Selected: " .. player.DisplayName .. " • local contact attempt"
+    UIRefs.flingSelectStatus.Text = UIRefs.Status.Text
+    task.spawn(function()
+        -- The role fling routine owns the physics and restores it on every exit.
+        -- Keep a single target, never iterate other players.
+        task.spawn(flingRole, "Player", player)
+        local deadline = os.clock() + CONFIG.FlingRoleWait + CONFIG.FlingTargetWait + 1
+        repeat
+            RunService.Heartbeat:Wait()
+        until not flingAllActive or generation ~= flingAllGeneration or state.unloaded
+            or (flingTrip and flingTrip.roleName == "Player")
+            or os.clock() >= deadline
+        if flingAllActive and generation == flingAllGeneration and not state.unloaded then
+            local trip = flingTrip
+            if trip and trip.roleName == "Player" then
+                while flingAllActive and generation == flingAllGeneration and not state.unloaded
+                    and flingTrip == trip and not trip.finished do
+                    RunService.Heartbeat:Wait()
+                end
+            end
+        end
+        if generation ~= flingAllGeneration then return end
+        flingAllActive = false
+        if flingBusy then stopRoleFling(false) end
+        if not state.unloaded then
+            paintSelectedFlingAction(false)
+            UIRefs.flingSelectStatus.Text = "Fling Selected: attempt finished; server result unverified."
+        end
+    end)
 end
 
 local function getLocalRole()
@@ -3772,9 +4372,13 @@ local function refreshAntiFlingPairs(character)
     for _, part in ipairs(character:GetChildren()) do
         if part:IsA("BasePart") and part.CanCollide then table.insert(body, part) end
     end
+    local ownRoot = character:FindFirstChild("HumanoidRootPart")
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character then
-            for _, targetPart in ipairs(player.Character:GetChildren()) do
+        local theirCharacter = player.Character
+        local theirRoot = theirCharacter and theirCharacter:FindFirstChild("HumanoidRootPart")
+        if player ~= LocalPlayer and theirRoot and ownRoot
+            and (theirRoot.Position - ownRoot.Position).Magnitude <= CONFIG.AntiFlingNearbyRadius then
+            for _, targetPart in ipairs(theirCharacter:GetChildren()) do
                 if targetPart:IsA("BasePart") and targetPart.CanCollide then
                     for _, part in ipairs(body) do
                         wanted[part] = wanted[part] or {}
@@ -3806,7 +4410,7 @@ local function refreshAntiFlingPairs(character)
 end
 
 updateAntiFling = function()
-    if state.unloaded or not state.antiFling or teleportBusy or flingBusy or state.fly then
+    if state.unloaded or not state.antiFling or teleportBusy or flingBusy then
         if antiFlingGuard.character then pauseAntiFling() end
         return
     end
@@ -3837,7 +4441,7 @@ end
 
 guardAntiFling = function()
     local guard = antiFlingGuard
-    if not state.antiFling or state.unloaded or teleportBusy or flingBusy or state.fly
+    if not state.antiFling or state.unloaded or teleportBusy or flingBusy
         or not guard.character or LocalPlayer.Character ~= guard.character
         or not guard.root.Parent or guard.humanoid.Health <= 0 then return end
     if guard.root.Anchored or guard.humanoid.Sit then return end
@@ -3848,17 +4452,36 @@ guardAntiFling = function()
     local previous = guard.safePivot
     guard.safePivot = current
     if previous and (current.Position - previous.Position).Magnitude >= CONFIG.AntiFlingTeleportDistance then
-        guard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
-        return
+        local lv = guard.root.AssemblyLinearVelocity.Magnitude
+        local av = guard.root.AssemblyAngularVelocity.Magnitude
+        local permittedTeleport = state.fly and math.max(180, values.coinFarmSpeed * 2.5, values.flySpeed * 2.5)
+            or math.max(110, guard.humanoid.WalkSpeed * 4, (longJumpState.active and (state.ultraLongJump and CONFIG.UltraJumpSpeed or values.longJumpSpeed) * 1.35 or 0))
+        if lv <= permittedTeleport and av <= 160 then
+            guard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
+            return
+        end
+        -- Suspicious physics fling: fall through to recovery below.
     end
     if os.clock() < guard.teleportUntil then return end
 
-    -- Collision constraints above are the primary protection. Only dampen
-    -- clearly abnormal spin; do not write CFrame/PivotTo or zero out normal
-    -- linear motion, as round transitions and scripted game movement need it.
+    -- AntiFling must remain operational while Coin Farm owns Fly/NoClip.
+    -- Respect the configured movement speed and ignore discrete normal-speed
+    -- game teleports (handled by the teleport-grace branch above).
+    local velocity = guard.root.AssemblyLinearVelocity
     local angular = guard.root.AssemblyAngularVelocity
-    if angular.Magnitude > 160 then
-        guard.root.AssemblyAngularVelocity = angular.Unit * 40
+    local permitted = state.fly and math.max(180, values.coinFarmSpeed * 2.5, values.flySpeed * 2.5)
+        or math.max(110, guard.humanoid.WalkSpeed * 4, (longJumpState.active and (state.ultraLongJump and CONFIG.UltraJumpSpeed or values.longJumpSpeed) * 1.35 or 0))
+    local abnormal = velocity.Magnitude > permitted or angular.Magnitude > 160
+    if abnormal then
+        guard.root.AssemblyAngularVelocity = Vector3.zero
+        if previous and (current.Position - previous.Position).Magnitude > 12 then
+            -- Recover only a high-velocity physics launch, not a normal teleport.
+            pcall(function() guard.character:PivotTo(previous) end)
+            guard.safePivot = previous
+            guard.root.AssemblyLinearVelocity = Vector3.zero
+        elseif velocity.Magnitude > permitted then
+            guard.root.AssemblyLinearVelocity = velocity.Unit * math.min(permitted * 0.5, 65)
+        end
     end
 end
 
@@ -3883,15 +4506,12 @@ end
 
 --// Physics movement runs after input, before the simulation.
 local function updateMovement(deltaTime)
-    if state.coinFarm then
-        local farmHum, farmRoot = getHumanoid(), getRoot()
-        if not farmHum or farmHum.Health <= 0 or not farmRoot or farmRoot.Anchored then
-            if UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
-        end
-    end
+    if state.coinFarm and UIRefs.refreshCoinFarm then UIRefs.refreshCoinFarm() end
     if state.unloaded or teleportBusy or (flingTrip and flingTrip.active) then
+        clearLongJump()
         return
     end
+    if state.fly or state.coinFarm or not state.longJump then clearLongJump() end
 
     local humanoid = getHumanoid()
     local root = getRoot()
@@ -3909,17 +4529,61 @@ local function updateMovement(deltaTime)
                 or movementState == Enum.HumanoidStateType.Landed) then
             humanoid.Jump = true
         end
-        if state.strafe and not grounded and (movementState == Enum.HumanoidStateType.Jumping
+        -- A genuine jump request arms one bounded horizontal boost; never triggers on its own.
+        -- Preserve Y velocity so game gravity and the normal jump arc still apply.
+        local now = os.clock()
+        if longJumpState.character ~= getCharacter() then clearLongJump() end
+        if not state.longJump or state.coinFarm then
+            clearLongJump()
+        elseif grounded then
+            if longJumpState.active then clearLongJump() end
+            if now > longJumpState.pendingUntil then longJumpState.pendingUntil = 0 end
+        elseif (movementState == Enum.HumanoidStateType.Jumping
+            or movementState == Enum.HumanoidStateType.Freefall) then
+            if not longJumpState.active and now <= longJumpState.pendingUntil then
+                longJumpState.active = true
+                longJumpState.startedAt = now
+                longJumpState.startPosition = root.Position
+                local wish = humanoid.MoveDirection
+                if wish.Magnitude < 0.05 then wish = root.CFrame.LookVector end
+                wish = Vector3.new(wish.X, 0, wish.Z)
+                longJumpState.direction = wish.Magnitude > 0.05 and wish.Unit or Vector3.new(0, 0, -1)
+                longJumpState.pendingUntil = 0
+            end
+            if longJumpState.active then
+                local ultra = state.ultraLongJump
+                local duration = ultra and CONFIG.UltraJumpDuration or CONFIG.LongJumpDuration
+                local distance = longJumpState.startPosition and (root.Position - longJumpState.startPosition).Magnitude or 0
+                if now - longJumpState.startedAt <= duration
+                    and (not ultra or distance < CONFIG.UltraJumpMaxDistance) then
+                    local wish = humanoid.MoveDirection
+                    wish = Vector3.new(wish.X, 0, wish.Z)
+                    if wish.Magnitude > 0.05 then
+                        local blended = longJumpState.direction:Lerp(wish.Unit, math.clamp(deltaTime * 3, 0, 0.25))
+                        if blended.Magnitude > 0.05 then longJumpState.direction = blended.Unit end
+                    end
+                    local v = root.AssemblyLinearVelocity
+                    local dir = longJumpState.direction
+                    local speed = ultra and CONFIG.UltraJumpSpeed or values.longJumpSpeed
+                    -- Keep the ultra boost airborne; ordinary Long Jump preserves normal gravity.
+                    local vertical = ultra and math.max(v.Y, 8) or v.Y
+                    root.AssemblyLinearVelocity = Vector3.new(dir.X * speed, vertical, dir.Z * speed)
+                else
+                    longJumpState.active = false
+                end
+            end
+        end
+        if state.strafe and not longJumpState.active and not grounded and (movementState == Enum.HumanoidStateType.Jumping
             or movementState == Enum.HumanoidStateType.Freefall) then
             root.AssemblyLinearVelocity = calculateStrafeVelocity(root.AssemblyLinearVelocity,
                 humanoid.MoveDirection, values.strafeSpeed, deltaTime)
         end
     end
 
-    if state.noclip then
+    if state.noclip and not (state.coinFarm and coinFarm.paused) then
         applyNoclip()
     else
-        -- Safety: make sure a disabled Noclip can never leave collision disabled.
+        -- Restore collisions while coin farming waits between rounds.
         if next(originalCollisions) ~= nil then
             restoreNoclip()
         end
@@ -3939,7 +4603,7 @@ local function updateMovement(deltaTime)
         stopRegularSpin()
     end
 
-    if state.fly then
+    if state.fly and not (state.coinFarm and coinFarm.paused) then
         if not flyObjects.active
             or not flyObjects.flyVelocity
             or not flyObjects.flyVelocity.Parent
@@ -4029,8 +4693,20 @@ end))
 -- Release an idle hold before the normal jump or Infinite Jump is processed.
 addConnection(UIS.JumpRequest:Connect(function()
     if state.antiFling and not state.unloaded and windowFocused and not UIS:GetFocusedTextBox() then
-        pauseAntiFling()
         antiFlingGuard.jumpUntil = os.clock() + 0.25
+    end
+end))
+
+--// Long Jump arms only for a new, grounded jump (keyboard, controller or mobile).
+addConnection(UIS.JumpRequest:Connect(function()
+    if state.unloaded or not state.longJump or state.fly or state.coinFarm
+        or flingBusy or teleportBusy or not windowFocused or UIS:GetFocusedTextBox() then return end
+    local humanoid, root = getHumanoid(), getRoot()
+    if humanoid and root and humanoid.Health > 0 and not root.Anchored and not humanoid.Sit
+        and not humanoid.PlatformStand and humanoid.FloorMaterial ~= Enum.Material.Air then
+        longJumpState.character = getCharacter()
+        longJumpState.pendingUntil = os.clock() + 0.55
+        longJumpState.active = false
     end
 end))
 
@@ -4053,10 +4729,20 @@ end))
 local function onCharacterAdded(character)
     if state.unloaded or not character or LocalPlayer.Character ~= character then return end
     disconnectBucket(characterConnections)
+    clearLongJump()
     if UIRefs.stopBring then UIRefs.stopBring("Bring stopped: respawn") end
     finishMurdererShot()
     finishRevolverTrip()
-    if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+    -- Respawn is not an explicit OFF action: suspend the route and keep the toggle ON.
+    if state.coinFarm then
+        -- Respawn/round transition is never permission to start flying.
+        coinFarm.paused = true
+        if UIRefs.armCoinFarmWaiting then UIRefs.armCoinFarmWaiting() end
+    end
+    flingAllActive = false
+    flingAllGeneration = flingAllGeneration + 1
+    if UIRefs.flingAllButton then UIRefs.flingAllButton.Text = "Fling Selected [OFF]" end
+    if UIRefs.flingSelectButton then UIRefs.flingSelectButton.Text = "Fling Selected [OFF]" end
     stopRoleFling()
     stopRegularSpin()
     stopFly()
@@ -4068,15 +4754,27 @@ local function onCharacterAdded(character)
     if not humanoid or not root or state.unloaded or LocalPlayer.Character ~= character then
         return
     end
+    -- Listen on the character itself: changing Health to zero must pause the
+    -- route immediately, rather than waiting for the next coin scan.
+    addConnection(humanoid.Died:Connect(function()
+        if UIRefs.pauseCoinFarmOnDeath then UIRefs.pauseCoinFarmOnDeath(character) end
+    end), characterConnections)
+    addConnection(humanoid.HealthChanged:Connect(function(health)
+        if health <= 0 and UIRefs.pauseCoinFarmOnDeath then UIRefs.pauseCoinFarmOnDeath(character) end
+    end), characterConnections)
+    if humanoid.Health <= 0 and UIRefs.pauseCoinFarmOnDeath then
+        UIRefs.pauseCoinFarmOnDeath(character)
+    end
     stopSpectateMurderer()
     setCharacterMovement()
     if state.localGhost then applyLocalGhost(character) end
 
-    if state.fly and not teleportBusy and not flingBusy then
+    if state.fly and not (state.coinFarm and coinFarm.paused)
+        and not teleportBusy and not flingBusy then
         startFly()
     end
 
-    if state.noclip then
+    if state.noclip and not (state.coinFarm and coinFarm.paused) then
         task.wait(0.1)
         if not state.unloaded and LocalPlayer.Character == character then applyNoclip() end
     end
@@ -4317,10 +5015,13 @@ local function unload()
     if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
     if UIRefs.stopBring then UIRefs.stopBring() end
     if UIRefs.clearAttackSelection then UIRefs.clearAttackSelection() end
+    UIRefs.selectedFlingPlayer = nil
     state.unloaded = true
     Silent.stop()
     finishMurdererShot()
     finishRevolverTrip()
+    flingAllActive = false
+    flingAllGeneration = flingAllGeneration + 1
     stopRoleFling()
     stopSpectateMurderer()
 
@@ -4334,6 +5035,8 @@ local function unload()
     UIRefs.setSpinToggle(false)
     UIRefs.setBunnyToggle(false)
     UIRefs.setStrafeToggle(false)
+    if UIRefs.setUltraLongJumpToggle then UIRefs.setUltraLongJumpToggle(false) end
+    if UIRefs.setLongJumpToggle then UIRefs.setLongJumpToggle(false) end
     UIRefs.setESPToggle(false)
     UIRefs.setRoleESPToggle(false)
     UIRefs.setInnocentESPToggle(false)
@@ -4372,69 +5075,79 @@ end
 
 --// Travel locations: use verified replicated landmarks/players, never fixed map coordinates.
 do
-    local function lobbySpawn()
-        -- A direct Lobby model/folder is safer than taking an arbitrary SpawnLocation
-        -- from an active map (where it could send the player back into the round).
-        local function normalized(name)
-            return string.lower(name):gsub("[^%w]", "")
+    local function normalized(name)
+        return string.lower(name):gsub("[^%w]", "")
+    end
+
+    local function safeSurface(part)
+        return part and part:IsA("BasePart") and part.CanCollide
+            and part.Anchored and part.CFrame.UpVector.Y > 0.91
+            and part.Size.X >= 5 and part.Size.Z >= 5
+    end
+
+    local function bestLandmark(container)
+        -- Prefer an actual spawn, then a stable horizontal floor. Never use
+        -- arbitrary decorations or roofs as travel destinations.
+        local floor, area = nil, 0
+        for _, part in ipairs(container:GetDescendants()) do
+            if part:IsA("SpawnLocation") and safeSurface(part) then return part end
+            if safeSurface(part) and part.Size.Y <= 18 then
+                local footprint = part.Size.X * part.Size.Z
+                if footprint > area and footprint >= 100 then
+                    floor, area = part, footprint
+                end
+            end
         end
-        local lobby = nil
+        return floor
+    end
+
+    local function lobbySpawn()
         for _, child in ipairs(Workspace:GetChildren()) do
             local name = normalized(child.Name)
             if (child:IsA("Model") or child:IsA("Folder")) and
                 (name == "lobby" or name == "mainlobby" or name == "lobbymap") then
-                lobby = child
-                break
+                local part = bestLandmark(child)
+                if part then return part end
             end
-        end
-        if lobby then
-            local best = nil
-            for _, part in ipairs(lobby:GetDescendants()) do
-                if part:IsA("SpawnLocation") then return part end
-                if part:IsA("BasePart") then
-                    local name = normalized(part.Name)
-                    if name:find("spawn", 1, true) then best = best or part end
-                end
-            end
-            if best then return best end
-            -- Some MM2 lobby revisions use an ordinary floor with no Spawn part.
-            -- Prefer a broad anchored floor within the explicitly named Lobby model.
-            local floor, area = nil, 0
-            for _, part in ipairs(lobby:GetDescendants()) do
-                if part:IsA("BasePart") and part.Anchored and part.CanCollide
-                    and part.Size.Y <= 16 then
-                    local horizontal = part.Size.X * part.Size.Z
-                    if horizontal > area and horizontal >= 100 then
-                        floor, area = part, horizontal
-                    end
-                end
-            end
-            if floor then return floor end
         end
         for _, part in ipairs(Workspace:GetDescendants()) do
-            if part:IsA("BasePart") then
+            if safeSurface(part) then
                 local name = normalized(part.Name)
-                if name == "lobbyspawn" or name == "lobbyspawnpoint" or name == "spawnlobby" then
-                    return part
-                end
+                if name == "lobbyspawn" or name == "lobbyspawnpoint"
+                    or name == "spawnlobby" then return part end
+            end
+        end
+        return nil
+    end
+
+    local function activeMapLandmark()
+        -- Replicated map models provide a fallback when role remotes are stale.
+        -- Explicit current-map names are preferred to any guessed coordinates.
+        for _, child in ipairs(Workspace:GetChildren()) do
+            local name = normalized(child.Name)
+            if (child:IsA("Model") or child:IsA("Folder")) and
+                (name == "map" or name == "currentmap" or name == "activemap"
+                    or name == "roundmap" or name == "gamemap") then
+                local part = bestLandmark(child)
+                if part then return part end
             end
         end
         return nil
     end
 
     local function mapPlayer()
-        -- Refresh role information to avoid using stale data from the prior round.
-        if not refreshRoles() or not rolesAvailable or Murder == "" then return nil end
+        -- Prefer a real participant in the active round, but never jump to our
+        -- own lobby character when roles have not replicated.
+        if not refreshRoles() or not rolesAvailable then return nil end
         local names = {Murder, Sheriff, Hero}
-        -- If all unique role holders are our own character, look for another
-        -- alive player with current round data (including Innocent).
         for playerName, data in pairs(roles) do
             if type(data) == "table" and data.Role and data.Role ~= "Spectator" then
                 table.insert(names, playerName)
             end
         end
         for _, name in ipairs(names) do
-            if type(name) == "string" and name ~= "" and roleAlive(name) then
+            if type(name) == "string" and name ~= "" and name ~= LocalPlayer.Name
+                and roleAlive(name) then
                 local player = Players:FindFirstChild(name)
                 local char = player and player.Character
                 local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -4444,8 +5157,41 @@ do
         return nil
     end
 
+    local function groundedDestination(char, root, hum, landmark, isPlayer)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local exclusions = {char}
+        if isPlayer then table.insert(exclusions, landmark.Parent) end
+        params.FilterDescendantsInstances = exclusions
+        params.IgnoreWater = true
+        local samples = isPlayer and {
+            Vector3.new(5, 0, 0), Vector3.new(-5, 0, 0),
+            Vector3.new(0, 0, 5), Vector3.new(0, 0, -5),
+        } or {Vector3.zero, Vector3.new(4, 0, 0), Vector3.new(-4, 0, 0)}
+        for _, offset in ipairs(samples) do
+            local proposed = landmark.Position + offset
+            local ground = Workspace:Raycast(proposed + Vector3.new(0, 18, 0),
+                Vector3.new(0, -65, 0), params)
+            if ground and ground.Instance and ground.Instance.CanCollide and ground.Normal.Y >= 0.75 then
+                if not isPlayer and ground.Instance ~= landmark
+                    and not ground.Instance:IsDescendantOf(landmark.Parent) then
+                    -- Do not accidentally land outside the identified map/lobby.
+                    continue
+                end
+                local standingHeight = hum.HipHeight + root.Size.Y * 0.5 + 1.25
+                return Vector3.new(proposed.X, ground.Position.Y + standingHeight, proposed.Z)
+            end
+        end
+        -- SpawnLocations may have a transparent/no-query top face; the explicit
+        -- landmark is still a reasonable fallback if it is a verified floor.
+        if not isPlayer and safeSurface(landmark) then
+            return landmark.Position + Vector3.new(0,
+                landmark.Size.Y * 0.5 + hum.HipHeight + root.Size.Y * 0.5 + 1.25, 0)
+        end
+        return nil
+    end
+
     local function travel(kind)
-        if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
         if state.unloaded then return end
         if teleportBusy or flingBusy or shootMurdererBusy then
             UIRefs.Status.Text = "TP: stop Fling / finish weapon action first"
@@ -4458,37 +5204,41 @@ do
         end
         teleportBusy = true
         local ok, err = pcall(function()
-            local target = kind == "map" and mapPlayer() or lobbySpawn()
+            local target, targetIsPlayer
+            if kind == "map" then
+                target = mapPlayer()
+                targetIsPlayer = target ~= nil
+                if not target then target = activeMapLandmark() end
+            else
+                target = lobbySpawn()
+                targetIsPlayer = false
+            end
             if not target or not target.Parent then
-                UIRefs.Status.Text = kind == "map" and "TP Map: active round / player not found"
+                UIRefs.Status.Text = kind == "map" and "TP Map: round map / player not replicated"
                     or "TP Lobby: lobby spawn not replicated"
                 return
             end
             if state.unloaded or LocalPlayer.Character ~= char or hum.Health <= 0 then return end
-            local destination
-            if kind == "map" then
-                -- A small horizontal separation prevents spawning inside a player.
-                local proposed = target.Position + Vector3.new(5, 3, 0)
-                local params = RaycastParams.new()
-                params.FilterType = Enum.RaycastFilterType.Exclude
-                params.FilterDescendantsInstances = {char, target.Parent}
-                params.IgnoreWater = true
-                local ground = Workspace:Raycast(proposed + Vector3.new(0, 15, 0), Vector3.new(0, -55, 0), params)
-                if not ground or not ground.Instance.CanCollide then
-                    UIRefs.Status.Text = "TP Map: safe floor not found"
-                    return
-                end
-                destination = Vector3.new(proposed.X, ground.Position.Y + hum.HipHeight + root.Size.Y + 1.5, proposed.Z)
-            else
-                destination = target.Position + Vector3.new(0, target.Size.Y * 0.5 + hum.HipHeight + root.Size.Y + 1, 0)
+            local destination = groundedDestination(char, root, hum, target, targetIsPlayer)
+            if not destination then
+                UIRefs.Status.Text = "TP " .. kind .. ": no safe landing surface"
+                return
             end
+            -- Stop the farm only after a valid landing point was found.
+            if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
+            -- Do not let an existing Fly body mover drag the character away.
+            if state.fly and UIRefs.setFlyToggle then UIRefs.setFlyToggle(false) end
+            clearLongJump()
             local rootToPivot = root.CFrame:ToObjectSpace(char:GetPivot())
             local desiredRoot = CFrame.new(destination) * root.CFrame.Rotation
             pauseAntiFling()
             root.AssemblyLinearVelocity = Vector3.zero
             root.AssemblyAngularVelocity = Vector3.zero
             char:PivotTo(desiredRoot * rootToPivot)
-            UIRefs.Status.Text = kind == "map" and "TP Map: moved near round player" or "TP Lobby: moved to lobby spawn"
+            antiFlingGuard.safePivot = char:GetPivot()
+            antiFlingGuard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
+            UIRefs.Status.Text = kind == "map" and (targetIsPlayer and "TP Map: landed near round player" or "TP Map: landed on active map")
+                or "TP Lobby: landed at lobby"
         end)
         teleportBusy = false
         if not ok then
@@ -4570,12 +5320,18 @@ end))
 addConnection(UIRefs.flingSheriffButton.MouseButton1Click:Connect(function()
     task.spawn(flingRole, "Sheriff")
 end))
+addConnection(UIRefs.flingAllButton.MouseButton1Click:Connect(flingAllPlayers))
+addConnection(UIRefs.flingSelectButton.MouseButton1Click:Connect(flingAllPlayers))
 addConnection(UIRefs.spectateMurdererButton.MouseButton1Click:Connect(toggleSpectateMurderer))
 addConnection(UIRefs.spectateSheriffButton.MouseButton1Click:Connect(UIRefs.toggleSpectateSheriff))
 addConnection(UIRefs.spectateReturnButton.MouseButton1Click:Connect(UIRefs.stopSpectate))
 UIRefs.rebuildSpectatorList()
 
 addConnection(UIRefs.stopFlingButton.MouseButton1Click:Connect(function()
+    if flingAllActive then
+        flingAllPlayers()
+        return
+    end
     if not flingBusy then
         UIRefs.Status.Text = "Fling: already stopped"
         return
@@ -4622,6 +5378,8 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     UIRefs.setSpinToggle(false)
     UIRefs.setBunnyToggle(false)
     UIRefs.setStrafeToggle(false)
+    if UIRefs.setUltraLongJumpToggle then UIRefs.setUltraLongJumpToggle(false) end
+    if UIRefs.setLongJumpToggle then UIRefs.setLongJumpToggle(false) end
     UIRefs.setESPToggle(false)
     UIRefs.setRoleESPToggle(false)
     UIRefs.setInnocentESPToggle(false)
@@ -4640,9 +5398,12 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     values.flySpeed = CONFIG.DefaultFlySpeed
     values.coinFarmSpeed = CONFIG.CoinFarmSpeed
     values.strafeSpeed = CONFIG.DefaultStrafeSpeed
+    values.longJumpSpeed = CONFIG.DefaultLongJumpSpeed
     values.fov = CONFIG.DefaultFOV
     values.aimRadius = 115
     values.aimSmooth = 9
+    values.aimLeadMs = 140
+    if UIRefs.setAimLead then UIRefs.setAimLead(140) end
     if UIRefs.setAimRadius then UIRefs.setAimRadius(115) end
     if UIRefs.setAimSmooth then UIRefs.setAimSmooth(9) end
     if UIRefs.setAimVisibleToggle then UIRefs.setAimVisibleToggle(true) end
@@ -4655,6 +5416,7 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     if UIRefs.setFlySpeedSlider then UIRefs.setFlySpeedSlider(CONFIG.DefaultFlySpeed) end
     if UIRefs.setCoinFarmSpeedSlider then UIRefs.setCoinFarmSpeedSlider(CONFIG.CoinFarmSpeed) end
     if UIRefs.setStrafeSpeedSlider then UIRefs.setStrafeSpeedSlider(CONFIG.DefaultStrafeSpeed) end
+    if UIRefs.setLongJumpSpeedSlider then UIRefs.setLongJumpSpeedSlider(CONFIG.DefaultLongJumpSpeed) end
     if UIRefs.setFOVSlider then UIRefs.setFOVSlider(CONFIG.DefaultFOV, true) end
     setCharacterMovement()
 
