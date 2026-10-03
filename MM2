@@ -36,7 +36,7 @@ local MenuAudio = {
         open = "ScriptMM2_UI_V1_VKL_cut1.mp3",
         close = "ScriptMM2_UI_V1_VIKL.mp3",
         toggleOn = "ScriptMM2_UI_V1_onfunction.mp3",
-        toggleOff = "ScriptMM2_toggle_off_cut2_final.mp3",",
+        toggleOff = "ScriptMM2_toggle_off_cut2_final.mp3",
         tab = "ScriptMM2_UI_V1_tabsclick.mp3",
     },
     volumes = {open=0.48, close=0.48, toggleOn=0.38, toggleOff=1.00, tab=0.32},
