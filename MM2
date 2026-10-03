@@ -1,10 +1,11 @@
 --// ScriptMM2
+--// V0.9.37: adaptive B AimLock prediction for jump spam and rapid direction changes.
 --// V0.9.36: four-language interface, English default, hot-switch Language tab.
 --// UI and callback references are grouped to keep the root chunk below Luau register limits.
 --// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
 --// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
 
-local VERSION = "V0.9.36"
+local VERSION = "V0.9.47"
 local UIRefs = {}
 
 local Players = game:GetService("Players")
@@ -109,8 +110,9 @@ local state = {
     espNames = true,
     aimLock = false,
     smoothAim = false,
+    fovIndicator = false, -- read-only FOV target preview, never alters camera or shot
     xenoShotSnap = false, -- opt-in J key; camera briefly moves, NOT Silent Aim
-    silentGun = false, -- only operates with a supported __namecall hook
+    silentGun = false, -- desired setting; remains ON while Gun is absent / during respawn
     silentKnife = false,
     aimVisibleOnly = true,
     aimTeamCheck = true,
@@ -315,6 +317,153 @@ function Silent.stop()
     -- Leave hook inert. Restoring a shared metatable would risk overwriting another script's hook.
 end
 
+--// V0.9.44 isolated experimental GunClient-activation replacement.
+--// Never require/patch WeaponService or RobloxScript modules, and never install
+--// a shared __namecall / hookfunction interception. This mode is opt-in and
+--// refuses to run unless the executor positively identifies the ONE original
+--// GunClient Tool.Activated connection and can reversibly disable that handler.
+--// Shoot signature comes from the user's decompiled GunClient:
+--//     Gun.Shoot:FireServer(GunRaycastAttachment.WorldCFrame, targetCFrame)
+--// The server may still reject a redirected shot.
+function Silent.restoreXeno(keepEnabled)
+    if not keepEnabled then state.silentGun = false end
+    if Silent.xenoActivation then
+        pcall(function() Silent.xenoActivation:Disconnect() end)
+        Silent.xenoActivation = nil
+    end
+    if Silent.xenoAncestry then
+        pcall(function() Silent.xenoAncestry:Disconnect() end)
+        Silent.xenoAncestry = nil
+    end
+    if Silent.xenoOriginalConnection then
+        local conn = Silent.xenoOriginalConnection
+        Silent.xenoOriginalConnection = nil
+        local ok, err = pcall(function() conn:Enable() end)
+        if not ok then warn("[ScriptMM2] Could not restore GunClient handler: " .. tostring(err)) end
+    end
+    Silent.xenoTool = nil
+    Silent.xenoInstalled = false
+end
+
+function Silent.xenoTargetCFrame()
+    if not state.silentGun or not rolesAvailable or Murder == "" then return nil end
+    local camera, mine = Workspace.CurrentCamera, LocalPlayer.Character
+    local target = Silent.target(Murder)
+    if not camera or not mine or not target then return nil end
+    local hum = mine:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return nil end
+    local point, visible = camera:WorldToViewportPoint(target.Position)
+    if not visible or point.Z <= 0 then return nil end
+    local center = camera.ViewportSize * 0.5
+    if (Vector2.new(point.X, point.Y) - center).Magnitude > values.aimRadius then return nil end
+    if state.aimVisibleOnly then
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = {mine, target.Parent}
+        params.IgnoreWater = true
+        if Workspace:Raycast(camera.CFrame.Position, target.Position - camera.CFrame.Position, params) then return nil end
+    end
+    local velocity = target.AssemblyLinearVelocity
+    local horizontalLead = math.clamp(values.aimLeadMs / 1000, 0, 0.22)
+    local offset = Vector3.new(velocity.X, 0, velocity.Z) * horizontalLead
+    if offset.Magnitude > 5 then offset = offset.Unit * 5 end
+    local predicted = target.Position + offset
+    if math.abs(velocity.Y) > 4 then
+        local t = math.clamp(values.jumpLeadMs / 1000, 0, 0.16)
+        predicted += Vector3.new(0, math.clamp(velocity.Y * t - 0.5 * Workspace.Gravity * t * t, -3, 3.5), 0)
+    end
+    return CFrame.new(predicted)
+end
+
+function Silent.installXeno()
+    if Silent.xenoInstalled then return true end
+    if UIS.PreferredInput == Enum.PreferredInput.Touch then
+        return false, "PC mouse mode only; touch fire signature differs"
+    end
+    if type(getconnections) ~= "function" then return false, "Xeno getconnections unavailable" end
+    local char, bag = LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")
+    local gun = (char and char:FindFirstChild("Gun")) or (bag and bag:FindFirstChild("Gun"))
+    if not gun or not gun:IsA("Tool") then return false, "Equip/pick up Gun first" end
+    local client, remote = gun:FindFirstChild("GunClient"), gun:FindFirstChild("Shoot")
+    if not client or not client:IsA("LocalScript") or not remote or not remote:IsA("RemoteEvent") then
+        return false, "GunClient or Gun.Shoot RemoteEvent not found"
+    end
+    local okList, list = pcall(getconnections, gun.Activated)
+    if not okList or type(list) ~= "table" then return false, "Cannot inspect Gun.Activated connections" end
+    -- Xeno can expose the one activated callback while masking its `script`
+    -- environment (`getfenv(fn).script == nil`). In a clean, single-script
+    -- session the supplied GunClient source has exactly one Activated:Connect.
+    -- Accept this narrow fallback ONLY for one visible, active callback and
+    -- with the expected GunClient + Shoot objects present. More than one is
+    -- ambiguous: refuse instead of disabling unrelated game/third-party code.
+    if #list ~= 1 then
+        return false, "Expected exactly 1 Gun.Activated handler; found " .. tostring(#list) .. " (restart Roblox; run only this version)"
+    end
+    local selected = list[1]
+    local fnOK, fn = pcall(function() return selected.Function end)
+    if not fnOK or type(fn) ~= "function" then
+        return false, "Xeno did not expose the sole Gun.Activated function"
+    end
+    local ownerOK, ownerEnv = pcall(getfenv, fn)
+    if ownerOK and type(ownerEnv) == "table" then
+        local owner = rawget(ownerEnv, "script")
+        if owner ~= nil and owner ~= client then
+            return false, "Sole activation handler belongs to another script"
+        end
+    end
+    if type(selected.Disable) ~= "function" or type(selected.Enable) ~= "function" then
+        return false, "Xeno connection has no reversible Disable/Enable"
+    end
+    local enabledOK, wasEnabled = pcall(function() return selected.State end)
+    if enabledOK and wasEnabled == false then
+        return false, "Original activation handler is already disabled"
+    end
+    -- Install our replacement before disabling the game's own connection so a
+    -- failed :Disable() cannot leave the weapon without a click handler.
+    local okConnect, replacement = pcall(function()
+        return gun.Activated:Connect(function()
+            if state.unloaded or not state.silentGun or LocalPlayer.Character ~= gun.Parent then return end
+            local root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local attachment = root and root:FindFirstChild("GunRaycastAttachment")
+            if not attachment then return end
+            local aim = Silent.xenoTargetCFrame()
+            if not aim then
+                local mouse = LocalPlayer:GetMouse()
+                aim = mouse and mouse.Hit
+            end
+            if typeof(aim) ~= "CFrame" then return end
+            local okShot, shotError = pcall(function()
+                remote:FireServer(attachment.WorldCFrame, aim)
+            end)
+            if not okShot then warn("[ScriptMM2] Gun shot failed: " .. tostring(shotError)) end
+        end)
+    end)
+    if not okConnect or not replacement then return false, "Cannot attach replacement activation: " .. tostring(replacement) end
+    local okDisable, disableError = pcall(function() selected:Disable() end)
+    if not okDisable then
+        replacement:Disconnect()
+        return false, "Cannot disable original GunClient: " .. tostring(disableError)
+    end
+    local stateOK, stateValue = pcall(function() return selected.State end)
+    if stateOK and stateValue == true then
+        replacement:Disconnect()
+        pcall(function() selected:Enable() end)
+        return false, "GunClient remained active; refusing a possible double shot"
+    end
+    Silent.xenoOriginalConnection, Silent.xenoActivation = selected, replacement
+    Silent.xenoTool, Silent.xenoInstalled = gun, true
+    Silent.xenoAncestry = gun.AncestryChanged:Connect(function(_, parent)
+        if not parent and Silent.xenoTool == gun then
+            -- Weapon was destroyed/removed at round transition. Preserve user ON preference.
+            Silent.restoreXeno(true)
+            if not state.unloaded and state.silentGun then
+                Silent.xenoStatusKey = nil -- let the retry worker publish WAITING
+            end
+        end
+    end)
+    return true
+end
+
 local function addConnection(connection, bucket)
     bucket = bucket or connections
     table.insert(bucket, connection)
@@ -467,10 +616,15 @@ local Localization = {language = "en", sources = setmetatable({}, {__mode = "k"}
 do
 local TEXT_TRANSLATIONS = {
     ["MAIN"] = {ru="ГЛАВНАЯ", uk="ГОЛОВНА", de="START"},
+    ["PLAYER"] = {ru="ИГРОК", uk="ГРАВЕЦЬ", de="SPIELER"},
+    ["UTILITIES"] = {ru="УТИЛИТЫ", uk="УТИЛІТИ", de="TOOLS"},
     ["SPECTATE"] = {ru="НАБЛЮДЕНИЕ", uk="СПОСТЕРЕЖЕННЯ", de="ZUSCHAUEN"},
     ["LANGUAGE"] = {ru="ЯЗЫК", uk="МОВА", de="SPRACHE"},
     ["MOVEMENT"] = {ru="ДВИЖЕНИЕ", uk="РУХ", de="BEWEGUNG"},
     ["COMBAT"] = {ru="БОЙ", uk="БІЙ", de="KAMPF"},
+    ["AIM"] = {ru="ПРИЦЕЛ", uk="ПРИЦІЛ", de="ZIELEN"},
+    ["FOV Target Indicator (visual only)"] = {ru="Индикатор цели FOV (только визуально)", uk="Індикатор цілі FOV (лише візуально)", de="FOV-Zielanzeige (nur visuell)"},
+    ["FOV preview: shows targets only; no shot redirection"] = {ru="FOV: только показывает цели; не перенаправляет выстрел", uk="FOV: лише показує цілі; не перенаправляє постріл", de="FOV-Vorschau: nur Zielanzeige, keine Schussumleitung"},
     ["UTILITY"] = {ru="ИНСТРУМЕНТЫ", uk="ІНСТРУМЕНТИ", de="WERKZEUGE"},
     ["VISUALS"] = {ru="ВИЗУАЛ", uk="ВІЗУАЛ", de="ANZEIGE"},
     ["Speed"] = {ru="Скорость", uk="Швидкість", de="Tempo"},
@@ -489,6 +643,11 @@ local TEXT_TRANSLATIONS = {
     ["AimLock Murderer [B]"] = {ru="Наводка на убийцу [B]", uk="Наведення на вбивцю [B]", de="Zielerfassung Mörder [B]"},
     ["Smooth Aim (camera only)"] = {ru="Плавная наводка (камера)", uk="Плавне наведення (камера)", de="Sanftes Zielen (Kamera)"},
     ["Silent Revolver (experimental)"] = {ru="Тихий револьвер (эксперимент)", uk="Тихий револьвер (експеримент)", de="Silent-Revolver (experimentell)"},
+    ["Xeno Silent Revolver (FOV experimental)"] = {ru="Xeno тихий револьвер (FOV, эксперимент)", uk="Xeno тихий револьвер (FOV, експеримент)", de="Xeno Silent-Revolver (FOV, experimentell)"},
+    ["Silent Revolver (paused: HUD safety)"] = {ru="Тихий револьвер (пауза: защита HUD)", uk="Тихий револьвер (пауза: захист HUD)", de="Silent-Revolver (Pause: HUD-Schutz)"},
+    ["Silent Revolver V2 (GunClient test)"] = {ru="Сайлент револьвер V2 (тест GunClient)", uk="Сайлент револьвер V2 (тест GunClient)", de="Silent-Revolver V2 (GunClient-Test)"},
+    ["Silent V2 armed: one client shot; server hit unverified"] = {ru="Silent V2 включён: один выстрел; серверное попадание не проверено", uk="Silent V2 увімкнено: один постріл; серверне влучання не перевірено", de="Silent V2 aktiv: ein Schuss; Servertreffer ungeprüft"},
+    ["Xeno Silent Gun: FOV target enabled • server hit unverified"] = {ru="Xeno Silent Gun: цель в FOV • попадание сервером не проверено", uk="Xeno Silent Gun: ціль у FOV • влучання сервером не перевірене", de="Xeno Silent Gun: FOV-Ziel aktiv • Servertreffer ungeprüft"},
     ["Silent Knife Throw (short lead)"] = {ru="Тихий бросок ножа (упреждение)", uk="Тихий кидок ножа (випередження)", de="Silent-Messerwurf (kurzer Vorhalt)"},
     ["Xeno Shot Snap [J] (camera moves)"] = {ru="Быстрый выстрел Xeno [J] (двигает камеру)", uk="Швидкий постріл Xeno [J] (рухає камеру)", de="Xeno-Schnellschuss [J] (Kamera bewegt sich)"},
     ["B AimLock prediction (ms)"] = {ru="Упреждение AimLock B (мс)", uk="Випередження AimLock B (мс)", de="AimLock-B-Vorhalt (ms)"},
@@ -896,78 +1055,83 @@ UIRefs.Content = create("ScrollingFrame", {
     CanvasSize = UDim2.new(0, 0, 0, 0),
 }, UIRefs.Main)
 
---// Two genuine pages, each with its own scrolling content.
+--// V0.9.38: six category pages; each keeps its own scroll position.
 do
-    UIRefs.Content.Position = UDim2.fromOffset(10, 100)
-    UIRefs.Content.Size = UDim2.new(1, -20, 1, -110)
+    local contentY, contentBottom = 140, 150
+    UIRefs.Content.Position = UDim2.fromOffset(10, contentY)
+    UIRefs.Content.Size = UDim2.new(1, -20, 1, -contentBottom)
+    UIRefs.Content.Name = "PlayerContent"
     UIRefs.TabBar = create("Frame", {
         Name = "TabBar", Position = UDim2.fromOffset(10, 58),
-        Size = UDim2.new(1, -20, 0, 36), BackgroundTransparency = 1,
+        Size = UDim2.new(1, -20, 0, 76), BackgroundTransparency = 1,
     }, UIRefs.Main)
-    UIRefs.mainTabButton = create("TextButton", {
-        Name = "MainTab", Position = UDim2.fromScale(0, 0),
-        Size = UDim2.new(1/3, -4, 1, 0), Text = "MAIN", LayoutOrder = 1,
-        Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
-        AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(38, 115, 72),
-        TextColor3 = Color3.fromRGB(240, 255, 245),
-    }, UIRefs.TabBar)
-    UIRefs.spectateTabButton = create("TextButton", {
-        Name = "SpectateTab", Position = UDim2.new(1/3, 2, 0, 0),
-        Size = UDim2.new(1/3, -4, 1, 0), Text = "SPECTATE", LayoutOrder = 2,
-        Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
-        AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(37, 37, 43),
-        TextColor3 = Color3.fromRGB(220, 220, 225),
-    }, UIRefs.TabBar)
-    UIRefs.languageTabButton = create("TextButton", {
-        Name = "LanguageTab", Position = UDim2.new(2/3, 2, 0, 0),
-        Size = UDim2.new(1/3, -4, 1, 0), Text = "LANGUAGE", LayoutOrder = 3,
-        Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
-        AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(37, 37, 43),
-        TextColor3 = Color3.fromRGB(220, 220, 225),
-    }, UIRefs.TabBar)
-    create("UICorner", { CornerRadius = UDim.new(0, 7) }, UIRefs.mainTabButton)
-    create("UICorner", { CornerRadius = UDim.new(0, 7) }, UIRefs.languageTabButton)
-    create("UICorner", { CornerRadius = UDim.new(0, 7) }, UIRefs.spectateTabButton)
-    UIRefs.SpectateContent = create("ScrollingFrame", {
-        Name = "SpectateContent", Position = UDim2.fromOffset(10, 100),
-        Size = UDim2.new(1, -20, 1, -110), Visible = false,
-        BackgroundTransparency = 1, BorderSizePixel = 0,
-        ScrollBarThickness = 4, ScrollBarImageTransparency = 0.35,
-        AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        CanvasSize = UDim2.new(0, 0, 0, 0),
-    }, UIRefs.Main)
-    create("UIListLayout", {
-        Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder,
-    }, UIRefs.SpectateContent)
-    create("UIPadding", {
-        PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5),
-        PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 6),
-    }, UIRefs.SpectateContent)
-    UIRefs.LanguageContent = create("ScrollingFrame", {
-        Name = "LanguageContent", Position = UDim2.fromOffset(10, 100),
-        Size = UDim2.new(1, -20, 1, -110), Visible = false,
-        BackgroundTransparency = 1, BorderSizePixel = 0,
-        ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        CanvasSize = UDim2.new(0, 0, 0, 0),
-    }, UIRefs.Main)
-    create("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder}, UIRefs.LanguageContent)
-    create("UIPadding", {PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5),
-        PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 6)}, UIRefs.LanguageContent)
+    local tabSpecs = {
+        {"player", "PLAYER", "PlayerTab"},
+        {"visuals", "VISUALS", "VisualsTab"},
+        {"combat", "AIM", "AimTab"},
+        {"utilities", "UTILITIES", "UtilitiesTab"},
+        {"spectate", "SPECTATE", "SpectateTab"},
+        {"language", "LANGUAGE", "LanguageTab"},
+    }
+    UIRefs.CategoryTabs = {}
+    UIRefs.CategoryPages = {player = UIRefs.Content}
+    local function categoryContent(name)
+        local page = create("ScrollingFrame", {
+            Name = name .. "Content", Position = UDim2.fromOffset(10, contentY),
+            Size = UDim2.new(1, -20, 1, -contentBottom), Visible = false,
+            BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 4, ScrollBarImageTransparency = 0.35,
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+        }, UIRefs.Main)
+        create("UIListLayout", {
+            Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder,
+        }, page)
+        create("UIPadding", {
+            PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5),
+            PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 6),
+        }, page)
+        return page
+    end
+    UIRefs.CategoryPages.visuals = categoryContent("Visuals")
+    UIRefs.CategoryPages.combat = categoryContent("Aim")
+    UIRefs.CategoryPages.utilities = categoryContent("Utilities")
+    UIRefs.SpectateContent = categoryContent("Spectate")
+    UIRefs.LanguageContent = categoryContent("Language")
+    UIRefs.CategoryPages.spectate = UIRefs.SpectateContent
+    UIRefs.CategoryPages.language = UIRefs.LanguageContent
+    for index, spec in ipairs(tabSpecs) do
+        local row = math.floor((index - 1) / 3)
+        local column = (index - 1) % 3
+        local button = create("TextButton", {
+            Name = spec[3], Position = UDim2.new(column / 3, column == 0 and 0 or 2, 0, row * 40),
+            Size = UDim2.new(1 / 3, -4, 0, 36), Text = spec[2], LayoutOrder = index,
+            Font = Enum.Font.GothamBold, TextSize = 12, BorderSizePixel = 0,
+            AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+            TextColor3 = Color3.fromRGB(220, 220, 225),
+        }, UIRefs.TabBar)
+        create("UICorner", {CornerRadius = UDim.new(0, 7)}, button)
+        UIRefs.CategoryTabs[spec[1]] = button
+        addConnection(button.MouseButton1Click:Connect(function() UIRefs.setPage(spec[1]) end))
+    end
+    UIRefs.mainTabButton = UIRefs.CategoryTabs.player
+    UIRefs.spectateTabButton = UIRefs.CategoryTabs.spectate
+    UIRefs.languageTabButton = UIRefs.CategoryTabs.language
     UIRefs.setPage = function(page)
         if state.unloaded then return end
-        local showSpectate = page == "spectate"
-        local showLanguage = page == "language"
-        UIRefs.Content.Visible = not showSpectate and not showLanguage
-        UIRefs.SpectateContent.Visible = showSpectate
-        UIRefs.LanguageContent.Visible = showLanguage
-        setButtonVisual(UIRefs.mainTabButton, not showSpectate and not showLanguage)
-        setButtonVisual(UIRefs.spectateTabButton, showSpectate)
-        setButtonVisual(UIRefs.languageTabButton, showLanguage)
-        if showSpectate and UIRefs.rebuildSpectatorList then UIRefs.rebuildSpectatorList() end
+        if page == "main" then page = "player" end -- Legacy callers continue to work.
+        if not UIRefs.CategoryPages[page] then page = "player" end
+        for key, content in pairs(UIRefs.CategoryPages) do
+            content.Visible = key == page
+        end
+        for key, button in pairs(UIRefs.CategoryTabs) do
+            setButtonVisual(button, key == page)
+        end
+        if page == "spectate" and UIRefs.rebuildSpectatorList then
+            UIRefs.rebuildSpectatorList()
+        end
     end
-    addConnection(UIRefs.mainTabButton.MouseButton1Click:Connect(function() UIRefs.setPage("main") end))
-    addConnection(UIRefs.spectateTabButton.MouseButton1Click:Connect(function() UIRefs.setPage("spectate") end))
-    addConnection(UIRefs.languageTabButton.MouseButton1Click:Connect(function() UIRefs.setPage("language") end))
+    UIRefs.setPage("player")
 end
 
 --// Language tab (English is default; changes also apply to later status updates).
@@ -1240,7 +1404,7 @@ local function addSlider(name, minValue, maxValue, defaultValue, order, callback
     return holder, setValue
 end
 
-addSection("MOVEMENT", 1)
+addSection("PLAYER", 1)
 
 UIRefs.speedButton = nil
 UIRefs.setSpeedToggle = nil
@@ -1339,7 +1503,7 @@ UIRefs._unused, UIRefs.setLongJumpSpeedSliderValue = addSlider("Long Jump Speed"
 end)
 UIRefs.setLongJumpSpeedSlider = UIRefs.setLongJumpSpeedSliderValue
 
-addSection("COMBAT", 13)
+addSection("AIM", 13)
 
 UIRefs.aimLockButton = nil
 UIRefs.setAimLockToggle = nil
@@ -1367,7 +1531,7 @@ UIRefs.setSmoothAimToggle = nil
 UIRefs._unused, UIRefs.setSmoothAimToggle = addToggle("Smooth Aim (camera only)", 14.10, function(enabled)
     state.smoothAim = enabled
     RunService:UnbindFromRenderStep(smoothAimBindingName)
-    if not enabled and UIRefs.AimCircle then UIRefs.AimCircle.Visible = false end
+    if not enabled and UIRefs.AimCircle and not state.fovIndicator then UIRefs.AimCircle.Visible = false end
     if enabled and state.aimLock and UIRefs.setAimLockToggle then
         UIRefs.setAimLockToggle(false)
     end
@@ -1379,15 +1543,64 @@ UIRefs._unused, UIRefs.setSmoothAimToggle = addToggle("Smooth Aim (camera only)"
     end
 end)
 
---// V0.9.12: genuine attempt to redirect weapon arguments, NEVER camera movement.
+--// V0.9.39: stand-alone screen-space FOV target preview (does NOT alter a shot).
+UIRefs._unused, UIRefs.setFOVIndicatorToggle = addToggle("FOV Target Indicator (visual only)", 14.1005, function(enabled)
+    state.fovIndicator = enabled
+    if not enabled and UIRefs.AimCircle and not state.smoothAim then UIRefs.AimCircle.Visible = false end
+    if not state.unloaded then
+        UIRefs.Status.Text = "FOV preview: shows targets only; no shot redirection"
+    end
+end)
+
+--// V0.9.47: persistent user ON setting. The temporary GunClient connection
+--// may disappear each round; ON now means "armed / awaiting weapon", not "hook live".
+--// Retry at a bounded interval (no scanning Workspace, no WeaponService require).
+function Silent.publishXenoStatus(key, message)
+    if state.unloaded or not state.silentGun or Silent.xenoStatusKey == key then return end
+    Silent.xenoStatusKey = key
+    if UIRefs.Status then UIRefs.Status.Text = message end
+end
+function Silent.beginXenoWatcher()
+    Silent.xenoWatcherGeneration = (Silent.xenoWatcherGeneration or 0) + 1
+    local generation = Silent.xenoWatcherGeneration
+    task.spawn(function()
+        while state.silentGun and not state.unloaded and Silent.xenoWatcherGeneration == generation do
+            local char, bag = LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")
+            local tool = Silent.xenoTool
+            if Silent.xenoInstalled and (not tool or (tool.Parent ~= char and tool.Parent ~= bag)) then
+                Silent.restoreXeno(true)
+            end
+            if Silent.xenoInstalled then
+                Silent.publishXenoStatus("active", "Silent Revolver ON: GunClient connected; server hit unverified")
+            else
+                local ok, reason = Silent.installXeno()
+                if ok then
+                    Silent.publishXenoStatus("active", "Silent Revolver ON: GunClient connected; server hit unverified")
+                elseif tostring(reason) == "Equip/pick up Gun first" then
+                    Silent.publishXenoStatus("waiting", "Silent Revolver ON: waiting for revolver")
+                else
+                    local detail = tostring(reason or "connection unavailable")
+                    Silent.publishXenoStatus("retry:" .. detail, "Silent Revolver ON: waiting / retrying: " .. detail)
+                end
+            end
+            task.wait(1.0)
+        end
+    end)
+end
 UIRefs.setSilentGunToggle = nil
-UIRefs._unused, UIRefs.setSilentGunToggle = addToggle("Silent Revolver (experimental)", 14.101, function(enabled)
+UIRefs._unused, UIRefs.setSilentGunToggle = addToggle("Silent Revolver V2 (GunClient test)", 14.101, function(enabled)
+    state.silentGun = enabled
     if enabled then
-        local ok, why = Silent.install()
-        state.silentGun = ok
-        if not ok then UIRefs.setSilentGunToggle(false); UIRefs.Status.Text = "Silent Revolver OFF: " .. tostring(why); return end
-    else state.silentGun = false end
-    UIRefs.Status.Text = state.silentGun and "Silent Revolver armed • server hit unverified" or "Silent Revolver OFF"
+        Silent.xenoStatusKey = nil
+        if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(true) end
+        Silent.publishXenoStatus("waiting", "Silent Revolver ON: waiting for revolver")
+        Silent.beginXenoWatcher()
+    else
+        Silent.xenoWatcherGeneration = (Silent.xenoWatcherGeneration or 0) + 1
+        Silent.restoreXeno(false)
+        Silent.xenoStatusKey = nil
+        if not state.unloaded then UIRefs.Status.Text = "Silent Revolver OFF" end
+    end
 end)
 UIRefs.setSilentKnifeToggle = nil
 UIRefs._unused, UIRefs.setSilentKnifeToggle = addToggle("Silent Knife Throw (short lead)", 14.102, function(enabled)
@@ -1457,7 +1670,7 @@ UIRefs.AimCircle = create("Frame", {
     BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
 }, UIRefs.AimCircleGui)
 create("UICorner", {CornerRadius = UDim.new(1, 0)}, UIRefs.AimCircle)
-create("UIStroke", {Thickness = 1, Transparency = 0.25, Color = Color3.fromRGB(70, 220, 130)}, UIRefs.AimCircle)
+UIRefs.AimCircleStroke = create("UIStroke", {Thickness = 1, Transparency = 0.25, Color = Color3.fromRGB(70, 220, 130)}, UIRefs.AimCircle)
 
 UIRefs.flingMurdererButton = create("TextButton", {
     Name = "FlingMurderer",
@@ -2154,6 +2367,39 @@ UIRefs.unloadButton = create("TextButton", {
     LayoutOrder = 34,
 }, UIRefs.Content)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.unloadButton)
+
+--// Reparent the existing MAIN controls into their category pages. No callbacks
+--// are recreated; UIRefs still point to the original controls and slider states.
+do
+    local move = {}
+    for _, child in ipairs(UIRefs.Content:GetChildren()) do
+        if child:IsA("GuiObject") then
+            local order = child.LayoutOrder
+            local destination
+            if child == UIRefs.gravityButton or child == UIRefs.spinButton then
+                -- These are movement abilities, not visual effects.
+                child.LayoutOrder = child == UIRefs.gravityButton and 12.2 or 12.3
+                destination = nil -- Already parented to Player.
+            elseif child == UIRefs.antiFlingButton then
+                child.LayoutOrder = 30.1
+                destination = UIRefs.CategoryPages.utilities
+            elseif child == UIRefs.localGhostButton then
+                child.LayoutOrder = 20.5
+                destination = UIRefs.CategoryPages.visuals
+            else
+                destination = order >= 30 and UIRefs.CategoryPages.utilities
+                    or (order >= 20 and UIRefs.CategoryPages.visuals)
+                    or (order >= 13 and UIRefs.CategoryPages.combat)
+                    or nil -- 1..12: Player / movement.
+            end
+            if destination then
+                table.insert(move, {child, destination})
+            end
+        end
+    end
+    for _, pair in ipairs(move) do pair[1].Parent = pair[2] end
+end
+
 
 UIRefs.dragStart = nil
 UIRefs.startPosition = nil
@@ -3533,24 +3779,23 @@ local function getMurdererAimPart()
     return nil
 end
 
+--// Smooth sampled target motion rather than extrapolating a single replicated velocity.
+--// This changes local camera direction only; it cannot guarantee a server hit.
+local aimMotion = {part = nil, position = nil, sampleAt = 0, filtered = nil}
 updateAimLock = function()
     if state.unloaded or state.spectateMurderer or flingBusy or not state.aimLock or UIS:GetFocusedTextBox() then
+        aimMotion.part = nil
         return
     end
 
     local humanoid = getHumanoid()
     local camera = Workspace.CurrentCamera
-    if not humanoid or humanoid.Health <= 0 or not camera then
-        return
-    end
-
-    -- Leave scripted cameras (including the existing X shot) in control.
-    if camera.CameraType == Enum.CameraType.Scriptable then
-        return
-    end
+    if not humanoid or humanoid.Health <= 0 or not camera then return end
+    if camera.CameraType == Enum.CameraType.Scriptable then return end
 
     local targetPart = getMurdererAimPart()
     if not targetPart then
+        aimMotion.part = nil
         return
     end
 
@@ -3559,30 +3804,59 @@ updateAimLock = function()
     local targetChar = targetPart.Parent
     local root = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
     local targetHumanoid = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
-    local velocity = (root and root:IsA("BasePart") and root.AssemblyLinearVelocity)
-        or targetPart.AssemblyLinearVelocity
-    local distance = (targetPosition - cameraPosition).Magnitude
+    local motionPart = (root and root:IsA("BasePart")) and root or targetPart
+    local observedPosition = motionPart.Position
+    local reportedVelocity = motionPart.AssemblyLinearVelocity
+    local now = os.clock()
+    local velocity = reportedVelocity
 
-    -- Predict horizontal motion separately. This only controls the local camera;
-    -- actual hit registration remains with the MM2 server.
+    -- A respawn, target swap or long frame pause invalidates old samples.
+    local sampleDt = now - aimMotion.sampleAt
+    if aimMotion.part ~= motionPart or not aimMotion.position or sampleDt > 0.35 or sampleDt < 0 then
+        aimMotion.part = motionPart
+        aimMotion.filtered = reportedVelocity
+        aimMotion.position = observedPosition
+        aimMotion.sampleAt = now
+    elseif sampleDt >= 0.025 then
+        local displacement = observedPosition - aimMotion.position
+        local sampledVelocity = displacement / sampleDt
+        -- Reject teleport/fling deltas; replicated positions can arrive in bursts.
+        if sampledVelocity.Magnitude <= 75 and displacement.Magnitude >= 0.035 then
+            -- Follow genuine reversals quickly to reduce overshooting strafing targets.
+            local reversal = aimMotion.filtered and aimMotion.filtered:Dot(sampledVelocity) < -25
+            local blend = reversal and 0.80 or 0.42
+            local mixed = reportedVelocity:Lerp(sampledVelocity, 0.52)
+            aimMotion.filtered = (aimMotion.filtered or mixed):Lerp(mixed, blend)
+        else
+            aimMotion.filtered = (aimMotion.filtered or reportedVelocity):Lerp(reportedVelocity, 0.30)
+        end
+    end
+    if sampleDt >= 0.025 or aimMotion.position == nil or aimMotion.part ~= motionPart then
+        aimMotion.position = observedPosition
+        aimMotion.sampleAt = now
+    end
+    velocity = aimMotion.filtered or reportedVelocity
+
+    local distance = (targetPosition - cameraPosition).Magnitude
     if values.aimLeadMs > 0 then
-        local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
-        local speed = flatVelocity.Magnitude
-        if speed > 1 then
-            local leadSeconds = math.clamp(values.aimLeadMs / 1000 + distance / 650, 0, 0.40)
-            targetPosition = targetPosition + flatVelocity.Unit * math.min(speed * leadSeconds, 8)
+        local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+        if horizontal.Magnitude > 1 then
+            local t = math.clamp(values.aimLeadMs / 1000 + distance / 750, 0, 0.32)
+            local offset = horizontal * t
+            targetPosition = targetPosition + (offset.Magnitude > 7 and offset.Unit * 7 or offset)
         end
     end
 
-    -- Jump spam: torso Y is a delayed snapshot. Approximate a short airborne arc
-    -- from the replicated vertical velocity and gravity; never extrapolate far.
-    -- Disable when grounded and bound the correction to avoid large snap/overshoot.
-    if values.jumpLeadMs > 0 and targetHumanoid and targetHumanoid.Health > 0
-        and targetHumanoid.FloorMaterial == Enum.Material.Air then
+    -- Short ballistic extrapolation for ascending, falling and apex frames.
+    -- FloorMaterial alone is not reliable on a replicated remote character.
+    if values.jumpLeadMs > 0 and targetHumanoid and targetHumanoid.Health > 0 then
         local ySpeed = math.clamp(velocity.Y, -75, 75)
-        local t = math.clamp(values.jumpLeadMs / 1000 + distance / 1200, 0, 0.22)
-        local predictedY = ySpeed * t - 0.5 * Workspace.Gravity * t * t
-        targetPosition = targetPosition + Vector3.new(0, math.clamp(predictedY, -3.5, 4), 0)
+        local airborne = targetHumanoid.FloorMaterial == Enum.Material.Air or math.abs(ySpeed) > 4
+        if airborne then
+            local t = math.clamp(values.jumpLeadMs / 1000 + distance / 1500, 0, 0.22)
+            local yOffset = ySpeed * t - 0.5 * Workspace.Gravity * t * t
+            targetPosition = targetPosition + Vector3.new(0, math.clamp(yOffset, -4.5, 5), 0)
+        end
     end
     if (targetPosition - cameraPosition).Magnitude > 0.001 then
         camera.CFrame = CFrame.lookAt(cameraPosition, targetPosition)
@@ -3593,7 +3867,7 @@ end
 updateSmoothAim = function(dt)
     local circle = UIRefs.AimCircle
     if circle then
-        circle.Visible = state.smoothAim and not state.unloaded and not state.spectateMurderer
+        circle.Visible = (state.smoothAim or state.fovIndicator) and not state.unloaded and not state.spectateMurderer
         circle.Size = UDim2.fromOffset(values.aimRadius * 2, values.aimRadius * 2)
     end
     if not state.smoothAim or state.unloaded or state.spectateMurderer or flingBusy
@@ -3652,6 +3926,51 @@ updateSmoothAim = function(dt)
             camera.CFrame = camera.CFrame:Lerp(goal, alpha)
         end
     end
+end
+
+--// Visual-only FOV target indicator. The presence of hookfunction in Xeno is
+--// NOT evidence that Roblox's actual ShootGun namecall can be intercepted.
+do
+    local elapsed = 0
+    addConnection(RunService.Heartbeat:Connect(function(dt)
+        elapsed = elapsed + (dt or 0)
+        if elapsed < 0.10 then return end
+        elapsed = 0
+        local circle = UIRefs.AimCircle
+        if not circle or not UIRefs.AimCircleStroke then return end
+        local enabled = state.fovIndicator and not state.unloaded and not state.spectateMurderer
+        if not enabled then
+            UIRefs.AimCircleStroke.Color = Color3.fromRGB(150, 150, 150)
+            if not state.smoothAim then circle.Visible = false end
+            return
+        end
+        local camera = Workspace.CurrentCamera
+        local myCharacter = LocalPlayer.Character
+        local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
+        circle.Visible = true
+        circle.Size = UDim2.fromOffset(values.aimRadius * 2, values.aimRadius * 2)
+        if not camera or not myHumanoid or myHumanoid.Health <= 0 or not rolesAvailable or Murder == "" then
+            UIRefs.AimCircleStroke.Color = Color3.fromRGB(150, 150, 150)
+            return
+        end
+        local target = Silent.target(Murder)
+        if not target then
+            UIRefs.AimCircleStroke.Color = Color3.fromRGB(150, 150, 150)
+            return
+        end
+        local screenPos, onScreen = camera:WorldToViewportPoint(target.Position)
+        local center = camera.ViewportSize * 0.5
+        local within = onScreen and screenPos.Z > 0
+            and (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude <= values.aimRadius
+        if within and state.aimVisibleOnly then
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = {myCharacter, target.Parent}
+            params.IgnoreWater = true
+            within = Workspace:Raycast(camera.CFrame.Position, target.Position - camera.CFrame.Position, params) == nil
+        end
+        UIRefs.AimCircleStroke.Color = within and Color3.fromRGB(80, 235, 120) or Color3.fromRGB(150, 150, 150)
+    end))
 end
 
 --// Infer the active map from nearby anchored, collidable geometry. Characters,
@@ -5127,6 +5446,11 @@ end))
 --// Respawn handler
 local function onCharacterAdded(character)
     if state.unloaded or not character or LocalPlayer.Character ~= character then return end
+    if Silent.xenoInstalled then
+        -- Respawning is a temporary pause, NOT a request to switch the toggle OFF.
+        Silent.restoreXeno(true)
+        Silent.xenoStatusKey = nil
+    end
     disconnectBucket(characterConnections)
     clearLongJump()
     if UIRefs.stopBring then UIRefs.stopBring("Bring stopped: respawn") end
@@ -5417,6 +5741,7 @@ local function unload()
     UIRefs.selectedFlingPlayer = nil
     state.unloaded = true
     Silent.stop()
+    Silent.restoreXeno()
     finishMurdererShot()
     finishRevolverTrip()
     flingAllActive = false
@@ -5443,6 +5768,7 @@ local function unload()
     UIRefs.setESPNamesToggle(false)
     UIRefs.setAimLockToggle(false)
     if UIRefs.setSmoothAimToggle then UIRefs.setSmoothAimToggle(false) end
+    if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(false) end
     if UIRefs.setXenoShotSnapToggle then UIRefs.setXenoShotSnapToggle(false) end
     UIRefs.setAntiFlingToggle(false)
     UIRefs.setLocalGhostToggle(false)
@@ -5795,6 +6121,7 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     UIRefs.setESPNamesToggle(true)
     UIRefs.setAimLockToggle(false)
     if UIRefs.setSmoothAimToggle then UIRefs.setSmoothAimToggle(false) end
+    if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(false) end
     if UIRefs.setXenoShotSnapToggle then UIRefs.setXenoShotSnapToggle(false) end
     UIRefs.setAntiFlingToggle(false)
     UIRefs.setLocalGhostToggle(false)
