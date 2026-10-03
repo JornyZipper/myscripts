@@ -1,9 +1,10 @@
 --// ScriptMM2
+--// V0.9.36: four-language interface, English default, hot-switch Language tab.
 --// UI and callback references are grouped to keep the root chunk below Luau register limits.
 --// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
 --// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
 
-local VERSION = "V0.9.33"
+local VERSION = "V0.9.36"
 local UIRefs = {}
 
 local Players = game:GetService("Players")
@@ -136,7 +137,8 @@ local values = {
     fov = CONFIG.DefaultFOV,
     aimRadius = 115, -- screen pixels (not camera field of view)
     aimSmooth = 9, -- higher = faster camera tracking
-    aimLeadMs = 140, -- B AimLock: predictive lead base in milliseconds (0 disables)
+    aimLeadMs = 140, -- B AimLock: predictive horizontal lead (0 disables)
+    jumpLeadMs = 115, -- B AimLock: airborne vertical prediction (0 disables)
 }
 
 local connections = {}
@@ -459,12 +461,326 @@ local function setButtonVisual(button, enabled)
     end
 end
 
+--// V0.9.36: live four-language UI. English source strings remain authoritative.
+local Localization = {language = "en", sources = setmetatable({}, {__mode = "k"}),
+    rendered = setmetatable({}, {__mode = "k"}), busy = setmetatable({}, {__mode = "k"})}
+do
+local TEXT_TRANSLATIONS = {
+    ["MAIN"] = {ru="ГЛАВНАЯ", uk="ГОЛОВНА", de="START"},
+    ["SPECTATE"] = {ru="НАБЛЮДЕНИЕ", uk="СПОСТЕРЕЖЕННЯ", de="ZUSCHAUEN"},
+    ["LANGUAGE"] = {ru="ЯЗЫК", uk="МОВА", de="SPRACHE"},
+    ["MOVEMENT"] = {ru="ДВИЖЕНИЕ", uk="РУХ", de="BEWEGUNG"},
+    ["COMBAT"] = {ru="БОЙ", uk="БІЙ", de="KAMPF"},
+    ["UTILITY"] = {ru="ИНСТРУМЕНТЫ", uk="ІНСТРУМЕНТИ", de="WERKZEUGE"},
+    ["VISUALS"] = {ru="ВИЗУАЛ", uk="ВІЗУАЛ", de="ANZEIGE"},
+    ["Speed"] = {ru="Скорость", uk="Швидкість", de="Tempo"},
+    ["JumpPower"] = {ru="Сила прыжка", uk="Сила стрибка", de="Sprungkraft"},
+    ["Noclip"] = {ru="Без коллизий", uk="Без зіткнень", de="Keine Kollision"},
+    ["Fly"] = {ru="Полёт", uk="Політ", de="Fliegen"},
+    ["Infinite Jump"] = {ru="Бесконечный прыжок", uk="Нескінченний стрибок", de="Endlos springen"},
+    ["Bunny Hop"] = {ru="Автопрыжки", uk="Автострибки", de="Automatisch springen"},
+    ["Air Strafe"] = {ru="Управление в воздухе", uk="Керування в повітрі", de="Luftsteuerung"},
+    ["Long Jump (press Jump)"] = {ru="Дальний прыжок (нажми прыжок)", uk="Далекий стрибок (натисни стрибок)", de="Weitsprung (Springen drücken)"},
+    ["Ultra Long Jump (100k studs)"] = {ru="Ультрадальний прыжок (100 тыс. studs)", uk="Ультрадалекий стрибок (100 тис. studs)", de="Ultraweitsprung (100.000 Studs)"},
+    ["WalkSpeed"] = {ru="Скорость ходьбы", uk="Швидкість ходьби", de="Lauftempo"},
+    ["FlySpeed"] = {ru="Скорость полёта", uk="Швидкість польоту", de="Flugtempo"},
+    ["StrafeSpeed"] = {ru="Скорость стрейфа", uk="Швидкість стрейфу", de="Strafe-Tempo"},
+    ["Long Jump Speed"] = {ru="Скорость дальнего прыжка", uk="Швидкість далекого стрибка", de="Weitsprungtempo"},
+    ["AimLock Murderer [B]"] = {ru="Наводка на убийцу [B]", uk="Наведення на вбивцю [B]", de="Zielerfassung Mörder [B]"},
+    ["Smooth Aim (camera only)"] = {ru="Плавная наводка (камера)", uk="Плавне наведення (камера)", de="Sanftes Zielen (Kamera)"},
+    ["Silent Revolver (experimental)"] = {ru="Тихий револьвер (эксперимент)", uk="Тихий револьвер (експеримент)", de="Silent-Revolver (experimentell)"},
+    ["Silent Knife Throw (short lead)"] = {ru="Тихий бросок ножа (упреждение)", uk="Тихий кидок ножа (випередження)", de="Silent-Messerwurf (kurzer Vorhalt)"},
+    ["Xeno Shot Snap [J] (camera moves)"] = {ru="Быстрый выстрел Xeno [J] (двигает камеру)", uk="Швидкий постріл Xeno [J] (рухає камеру)", de="Xeno-Schnellschuss [J] (Kamera bewegt sich)"},
+    ["B AimLock prediction (ms)"] = {ru="Упреждение AimLock B (мс)", uk="Випередження AimLock B (мс)", de="AimLock-B-Vorhalt (ms)"},
+    ["B Jump prediction (ms)"] = {ru="Упреждение прыжка B (мс)", uk="Випередження стрибка B (мс)", de="B-Sprungvorhersage (ms)"},
+    ["Aim circle radius (px)"] = {ru="Радиус прицела (пкс)", uk="Радіус прицілу (пкс)", de="Zielkreisradius (px)"},
+    ["Aim tracking speed"] = {ru="Скорость отслеживания цели", uk="Швидкість стеження за ціллю", de="Zielverfolgungstempo"},
+    ["Aim visibility check"] = {ru="Проверка видимости", uk="Перевірка видимості", de="Sichtprüfung"},
+    ["Aim team check"] = {ru="Проверка команды", uk="Перевірка команди", de="Teamprüfung"},
+    ["Aim Murderer only (MM2)"] = {ru="Цель — только убийца (MM2)", uk="Ціль — лише вбивця (MM2)", de="Nur Mörder anvisieren (MM2)"},
+    ["Aim at Head (OFF = body)"] = {ru="Целиться в голову (ВЫКЛ = тело)", uk="Цілитися в голову (ВИМК = тіло)", de="Auf Kopf zielen (AUS = Körper)"},
+    ["AntiFling"] = {ru="Антифлинг", uk="Антифлінг", de="Anti-Fling"},
+    ["Inside Fling Murderer"] = {ru="Флинг убийцы", uk="Флінг убивці", de="Mörder wegschleudern"},
+    ["Inside Fling Sheriff"] = {ru="Флинг шерифа", uk="Флінг шерифа", de="Sheriff wegschleudern"},
+    ["Fling Selected"] = {ru="Флинг выбранного", uk="Флінг вибраного", de="Ausgewählten wegschleudern"},
+    ["Release Fling / Return"] = {ru="Остановить флинг / Вернуться", uk="Зупинити флінг / Повернутися", de="Fling stoppen / Zurück"},
+    ["WATCH A ROLE"] = {ru="НАБЛЮДЕНИЕ ЗА РОЛЬЮ", uk="СПОСТЕРЕЖЕННЯ ЗА РОЛЛЮ", de="ROLLE BEOBACHTEN"},
+    ["Spectate Murderer"] = {ru="Смотреть за убийцей", uk="Дивитися за вбивцею", de="Mörder beobachten"},
+    ["Spectate Sheriff"] = {ru="Смотреть за шерифом", uk="Дивитися за шерифом", de="Sheriff beobachten"},
+    ["Return to My Camera"] = {ru="Вернуть свою камеру", uk="Повернути свою камеру", de="Zur eigenen Kamera"},
+    ["Select Murderer, Sheriff, or a player below."] = {ru="Выбери убийцу, шерифа или игрока ниже.", uk="Обери вбивцю, шерифа або гравця нижче.", de="Wähle Mörder, Sheriff oder einen Spieler unten."},
+    ["PLAYERS (CLICK TO WATCH)"] = {ru="ИГРОКИ (НАЖМИ ДЛЯ ПРОСМОТРА)", uk="ГРАВЦІ (НАТИСНИ ДЛЯ ПЕРЕГЛЯДУ)", de="SPIELER (KLICKEN ZUM ZUSCHAUEN)"},
+    ["TELEPORT TO PLAYER"] = {ru="ТП К ИГРОКУ", uk="ТП ДО ГРАВЦЯ", de="ZU SPIELER TELEPORTIEREN"},
+    ["BRING (LOCAL / SERVER UNVERIFIED)"] = {ru="ПРИТЯГИВАНИЕ (ЛОКАЛЬНО / СЕРВЕР НЕ ПОДТВЕРЖДЁН)", uk="ПРИТЯГУВАННЯ (ЛОКАЛЬНО / СЕРВЕР НЕ ПІДТВЕРДЖЕНО)", de="HERANHOLEN (LOKAL / SERVER UNBESTÄTIGT)"},
+    ["Bring All"] = {ru="Притянуть всех", uk="Притягнути всіх", de="Alle heranholen"},
+    ["Stop Bring / Restore Collision"] = {ru="Остановить притягивание / Вернуть коллизии", uk="Зупинити притягування / Відновити зіткнення", de="Heranholen stoppen / Kollision wiederherstellen"},
+    ["Client-side positioning only. No confirmed server teleport or hit registration."] = {ru="Только локальное перемещение. Серверное ТП и попадания не подтверждены.", uk="Лише локальне переміщення. Серверне ТП і влучання не підтверджені.", de="Nur lokale Positionierung. Server-TP und Treffer nicht bestätigt."},
+    ["TARGET ATTACK (NORMAL WEAPON / SERVER CHECKS)"] = {ru="АТАКА ЦЕЛИ (ОБЫЧНОЕ ОРУЖИЕ / ПРОВЕРКА СЕРВЕРА)", uk="АТАКА ЦІЛІ (ЗВИЧАЙНА ЗБРОЯ / ПЕРЕВІРКА СЕРВЕРА)", de="ZIELANGRIFF (NORMALE WAFFE / SERVERPRÜFUNG)"},
+    ["Select a player. No arbitrary instant kill or server bypass."] = {ru="Выбери игрока. Мгновенное убийство и обход сервера недоступны.", uk="Обери гравця. Миттєве вбивство й обхід сервера недоступні.", de="Wähle einen Spieler. Kein sofortiger Kill oder Server-Bypass."},
+    ["Select a player. Normal weapon only."] = {ru="Выбери игрока. Только обычное оружие.", uk="Обери гравця. Лише звичайна зброя.", de="Wähle einen Spieler. Nur normale Waffen."},
+    ["Attack Selected [K]"] = {ru="Атаковать выбранного [K]", uk="Атакувати вибраного [K]", de="Ausgewählten angreifen [K]"},
+    ["FLING: SELECT ONE PLAYER"] = {ru="ФЛИНГ: ВЫБЕРИ ОДНОГО ИГРОКА", uk="ФЛІНГ: ОБЕРИ ОДНОГО ГРАВЦЯ", de="FLING: EINEN SPIELER WÄHLEN"},
+    ["Select a player below, then press Fling Selected."] = {ru="Выбери игрока ниже и нажми «Флинг выбранного».", uk="Обери гравця нижче й натисни «Флінг вибраного».", de="Wähle unten einen Spieler und drücke „Ausgewählten wegschleudern“."},
+    ["Refresh Roles"] = {ru="Обновить роли", uk="Оновити ролі", de="Rollen aktualisieren"},
+    ["Grab Revolver (return if collected)"] = {ru="Взять револьвер (вернуться после подбора)", uk="Взяти револьвер (повернутися після підбору)", de="Revolver holen (zurück bei Aufnahme)"},
+    ["Grab Revolver (return if collected) [H]"] = {ru="Взять револьвер (возврат при подборе) [H]", uk="Взяти револьвер (повернення при підборі) [H]", de="Revolver holen (zurück bei Aufnahme) [H]"},
+    ["TP to Map"] = {ru="ТП на спавн карты", uk="ТП на спавн мапи", de="Zum Kartenspawn"},
+    ["TP to Lobby"] = {ru="ТП на спавн лобби", uk="ТП на спавн лобі", de="Zum Lobby-Spawn"},
+    ["Auto Coin Farm (Fly + NoClip)"] = {ru="Автофарм монет (полёт + без коллизий)", uk="Автофарм монет (політ + без зіткнень)", de="Auto-Münzfarmen (Flug + Noclip)"},
+    ["Coin Farm Speed"] = {ru="Скорость фарма монет", uk="Швидкість фарму монет", de="Münzfarm-Tempo"},
+    ["Reset Settings"] = {ru="Сбросить настройки", uk="Скинути налаштування", de="Einstellungen zurücksetzen"},
+    ["Unload Menu"] = {ru="Выгрузить меню", uk="Вивантажити меню", de="Menü entladen"},
+    ["MURDERER"] = {ru="УБИЙЦА", uk="ВБИВЦЯ", de="MÖRDER"},
+    ["SHERIFF"] = {ru="ШЕРИФ", uk="ШЕРИФ", de="SHERIFF"},
+    ["HERO"] = {ru="ГЕРОЙ", uk="ГЕРОЙ", de="HELD"},
+    ["INNOCENT"] = {ru="МИРНЫЙ", uk="МИРНИЙ", de="UNSCHULDIG"},
+    ["PLAYER"] = {ru="ИГРОК", uk="ГРАВЕЦЬ", de="SPIELER"},
+    ["DEAD"] = {ru="МЁРТВ", uk="МЕРТВИЙ", de="TOT"},
+    ["UNKNOWN"] = {ru="НЕИЗВЕСТНО", uk="НЕВІДОМО", de="UNBEKANNT"},
+    ["Language / Язык / Мова / Sprache"] = {ru="Язык интерфейса", uk="Мова інтерфейсу", de="Oberflächensprache"},
+    ["Choose interface language. Changes apply immediately."] = {ru="Выбери язык интерфейса. Изменения применяются сразу.", uk="Обери мову інтерфейсу. Зміни застосовуються одразу.", de="Wähle die Oberflächensprache. Änderungen gelten sofort."},
+    ["English (default)"] = {ru="English (по умолчанию)", uk="English (за замовчуванням)", de="English (Standard)"},
+    ["Russian / Русский"] = {ru="Русский", uk="Російська / Русский", de="Russisch / Русский"},
+    ["Ukrainian / Українська"] = {ru="Украинский / Українська", uk="Українська", de="Ukrainisch / Українська"},
+    ["German / Deutsch"] = {ru="Немецкий / Deutsch", uk="Німецька / Deutsch", de="Deutsch"},
+    ["Current language: English"] = {ru="Текущий язык: Английский", uk="Поточна мова: Англійська", de="Aktuelle Sprache: Englisch"},
+    ["Current language: Russian"] = {ru="Текущий язык: Русский", uk="Поточна мова: Російська", de="Aktuelle Sprache: Russisch"},
+    ["Current language: Ukrainian"] = {ru="Текущий язык: Украинский", uk="Поточна мова: Українська", de="Aktuelle Sprache: Ukrainisch"},
+    ["Current language: German"] = {ru="Текущий язык: Немецкий", uk="Поточна мова: Німецька", de="Aktuelle Sprache: Deutsch"},
+    ["Mouse4 (G) = hide/show • B = AimLock"] = {ru="Mouse4 (G) = скрыть/показать • B = наводка", uk="Mouse4 (G) = сховати/показати • B = наведення", de="Mouse4 (G) = ein/aus • B = Zielerfassung"},
+    ["Mouse4/G = menu • B = AimLock • H = grab"] = {ru="Mouse4/G = меню • B = наводка • H = подобрать", uk="Mouse4/G = меню • B = наведення • H = підібрати", de="Mouse4/G = Menü • B = Zielerfassung • H = Aufnehmen"},
+    ["Tap MOD to reopen • drag MOD to move"] = {ru="Нажми MOD для открытия • перетащи для перемещения", uk="Натисни MOD для відкриття • перетягни для переміщення", de="MOD zum Öffnen antippen • zum Bewegen ziehen"},
+    ["Settings reset"] = {ru="Настройки сброшены", uk="Налаштування скинуто", de="Einstellungen zurückgesetzt"},
+    ["Roles refreshed"] = {ru="Роли обновлены", uk="Ролі оновлено", de="Rollen aktualisiert"},
+    ["Revolver collected • returned to starting point"] = {ru="Револьвер подобран • вернулся в исходную точку", uk="Револьвер підібрано • повернувся у вихідну точку", de="Revolver aufgenommen • zurück zum Ausgangspunkt"},
+    ["Revolver not collected • staying at the drop"] = {ru="Револьвер не подобран • остаюсь возле него", uk="Револьвер не підібрано • залишаюся біля нього", de="Revolver nicht aufgenommen • bleibe beim Fundort"},
+    ["Waiting for your living character..."] = {ru="Ожидание живого персонажа...", uk="Очікування живого персонажа...", de="Warte auf deinen lebenden Charakter..."},
+    ["OFF: no tracking or hit requests."] = {ru="ВЫКЛ: нет отслеживания и запросов попадания.", uk="ВИМК: немає стеження й запитів влучання.", de="AUS: keine Verfolgung oder Trefferanfragen."},
+    ["OFF: observes replicated player positions only; no server hit confirmation."] = {ru="ВЫКЛ: только позиции игроков; нет подтверждения попаданий сервером.", uk="ВИМК: лише позиції гравців; немає підтвердження влучань сервером.", de="AUS: nur replizierte Spielerpositionen; keine Trefferbestätigung."},
+    ["Selected player left. Choose another player."] = {ru="Игрок вышел. Выбери другого.", uk="Гравець вийшов. Обери іншого.", de="Spieler hat verlassen. Wähle einen anderen."},
+    ["Stop current fling before changing target."] = {ru="Останови текущий флинг перед сменой цели.", uk="Зупини поточний флінг перед зміною цілі.", de="Stoppe den Fling vor dem Zielwechsel."},
+    ["Stopped. Choose a target to retry."] = {ru="Остановлено. Выбери цель для повтора.", uk="Зупинено. Обери ціль для повтору.", de="Gestoppt. Wähle ein Ziel für einen neuen Versuch."},
+    ["Spectate stopped for shot"] = {ru="Просмотр остановлен для выстрела", uk="Перегляд зупинено для пострілу", de="Zuschauen für Schuss beendet"},
+    ["Fling Selected: choose a player in SPECTATE first"] = {ru="Флинг: сначала выбери игрока в НАБЛЮДЕНИИ", uk="Флінг: спершу обери гравця у СПОСТЕРЕЖЕННІ", de="Fling: Wähle zuerst einen Spieler unter ZUSCHAUEN"},
+    ["Fling Selected: attempt finished; server result unverified."] = {ru="Флинг: попытка закончена; результат сервера неизвестен.", uk="Флінг: спробу завершено; результат сервера невідомий.", de="Fling: Versuch abgeschlossen; Serverergebnis unbestätigt."},
+    ["Fling Selected: stopped • returned"] = {ru="Флинг остановлен • возврат выполнен", uk="Флінг зупинено • повернення виконано", de="Fling gestoppt • zurückgekehrt"},
+    ["Coin Farm: ON • defeated; waiting for next round"] = {ru="Фарм монет: ВКЛ • погиб; ожидание следующего раунда", uk="Фарм монет: УВІМК • загинув; очікування наступного раунду", de="Münzfarm: AN • besiegt; warte auf nächste Runde"},
+    ["Coin Farm: 40/40 • Fly OFF; waiting for next round"] = {ru="Фарм монет: 40/40 • полёт выключен; ожидание следующего раунда", uk="Фарм монет: 40/40 • політ вимкнено; очікування наступного раунду", de="Münzfarm: 40/40 • Flug AUS; warte auf nächste Runde"},
+    ["Coin Farm: OFF • Fly/NoClip restored"] = {ru="Фарм монет: ВЫКЛ • полёт/коллизии восстановлены", uk="Фарм монет: ВИМК • політ/зіткнення відновлено", de="Münzfarm: AUS • Flug/Noclip zurückgesetzt"},
+    ["Coin Farm: ON • waiting for next round coins"] = {ru="Фарм монет: ВКЛ • ожидание монет нового раунда", uk="Фарм монет: УВІМК • очікування монет нового раунду", de="Münzfarm: AN • warte auf Münzen der nächsten Runde"},
+    ["Coin Farm: ON • character not ready; waiting"] = {ru="Фарм монет: ВКЛ • персонаж не готов; ожидание", uk="Фарм монет: УВІМК • персонаж не готовий; очікування", de="Münzfarm: AN • Charakter nicht bereit; warte"},
+    ["Coin Farm: no uncollected coins left nearby • paused"] = {ru="Фарм монет: рядом не осталось доступных монет • пауза", uk="Фарм монет: поруч не залишилося доступних монет • пауза", de="Münzfarm: keine verfügbaren Münzen in der Nähe • pausiert"},
+    ["Coin Farm: no coin objects detected • waiting for spawn"] = {ru="Фарм монет: объекты монет не обнаружены • ожидание появления", uk="Фарм монет: об’єкти монет не знайдено • очікування появи", de="Münzfarm: keine Münzobjekte erkannt • warte auf Spawn"},
+    ["Pickup: character not ready"] = {ru="Подбор: персонаж не готов", uk="Підбір: персонаж не готовий", de="Aufnehmen: Charakter nicht bereit"},
+    ["Pickup: you already have a revolver"] = {ru="Подбор: револьвер уже у тебя", uk="Підбір: револьвер уже в тебе", de="Aufnehmen: Du hast bereits einen Revolver"},
+    ["Pickup: no dropped revolver found"] = {ru="Подбор: выпавший револьвер не найден", uk="Підбір: револьвер, що випав, не знайдено", de="Aufnehmen: Kein abgelegter Revolver gefunden"},
+    ["Pickup: collecting revolver..."] = {ru="Подбор: собираю револьвер...", uk="Підбір: забираю револьвер...", de="Aufnehmen: Revolver wird eingesammelt..."},
+    ["Revolver detected • return cancelled: character changed/dead"] = {ru="Револьвер обнаружен • возврат отменён: смена персонажа/смерть", uk="Револьвер виявлено • повернення скасовано: зміна персонажа/смерть", de="Revolver erkannt • Rückkehr abgebrochen: Charakter gewechselt/tot"},
+    ["AimLock: ON • B = OFF"] = {ru="Наводка: ВКЛ • B = ВЫКЛ", uk="Наведення: УВІМК • B = ВИМК", de="Zielerfassung: AN • B = AUS"},
+    ["AimLock: OFF • B = ON"] = {ru="Наводка: ВЫКЛ • B = ВКЛ", uk="Наведення: ВИМК • B = УВІМК", de="Zielerfassung: AUS • B = AN"},
+    ["Smooth Aim: camera assistance ON (not Silent Aim)"] = {ru="Плавная наводка: ВКЛ (двигает камеру, не Silent Aim)", uk="Плавне наведення: УВІМК (рухає камеру, не Silent Aim)", de="Sanftes Zielen: AN (Kamera bewegt sich, kein Silent Aim)"},
+    ["Smooth Aim: OFF"] = {ru="Плавная наводка: ВЫКЛ", uk="Плавне наведення: ВИМК", de="Sanftes Zielen: AUS"},
+    ["Silent Revolver armed • server hit unverified"] = {ru="Тихий револьвер включён • попадание сервером не подтверждено", uk="Тихий револьвер увімкнено • влучання сервером не підтверджено", de="Silent-Revolver bereit • Servertreffer unbestätigt"},
+    ["Silent Knife armed • no auto throw • server unverified"] = {ru="Тихий нож включён • без автоброска • сервер не проверен", uk="Тихий ніж увімкнено • без автокидка • сервер не перевірено", de="Silent-Messer bereit • kein automatischer Wurf • Server unbestätigt"},
+    ["Xeno Snap: OFF"] = {ru="Быстрый выстрел Xeno: ВЫКЛ", uk="Швидкий постріл Xeno: ВИМК", de="Xeno-Schnellschuss: AUS"},
+    ["Xeno Snap: ON • J = quick camera shot • NOT Silent Aim"] = {ru="Быстрый выстрел Xeno: ВКЛ • J = движение камеры • НЕ Silent Aim", uk="Швидкий постріл Xeno: УВІМК • J = рух камери • НЕ Silent Aim", de="Xeno-Schnellschuss: AN • J = Kamera-Schuss • KEIN Silent Aim"},
+    ["Role ESP: GetPlayerData not found"] = {ru="ESP ролей: GetPlayerData не найден", uk="ESP ролей: GetPlayerData не знайдено", de="Rollen-ESP: GetPlayerData nicht gefunden"},
+    ["Role ESP: failed to read roles"] = {ru="ESP ролей: не удалось прочитать роли", uk="ESP ролей: не вдалося зчитати ролі", de="Rollen-ESP: Rollen konnten nicht gelesen werden"},
+    ["Role: Murderer"] = {ru="Роль: Убийца", uk="Роль: Вбивця", de="Rolle: Mörder"},
+    ["Role: Sheriff"] = {ru="Роль: Шериф", uk="Роль: Шериф", de="Rolle: Sheriff"},
+    ["Role: Hero"] = {ru="Роль: Герой", uk="Роль: Герой", de="Rolle: Held"},
+    ["Role: Innocent / unknown"] = {ru="Роль: Мирный / неизвестно", uk="Роль: Мирний / невідомо", de="Rolle: Unschuldig / unbekannt"},
+    ["Inside Fling: checking collision pairs • server response unverified"] = {ru="Флинг: проверка столкновений • ответ сервера неизвестен", uk="Флінг: перевірка зіткнень • відповідь сервера невідома", de="Fling: Kollisionen werden geprüft • Serverantwort unbestätigt"},
+    ["Inside Fling: target displacement observed (client) • Release = burst"] = {ru="Флинг: цель сместилась (клиент) • Отпустить = рывок", uk="Флінг: ціль змістилася (клієнт) • Відпустити = ривок", de="Fling: Zielbewegung lokal erkannt • Loslassen = Stoß"},
+    ["Inside Fling: target stationary locally • Release = burst / return"] = {ru="Флинг: цель локально неподвижна • Отпустить = рывок / возврат", uk="Флінг: ціль локально нерухома • Відпустити = ривок / повернення", de="Fling: Ziel lokal unbeweglich • Loslassen = Stoß / Zurück"},
+    ["Fling: already stopped"] = {ru="Флинг уже остановлен", uk="Флінг уже зупинено", de="Fling ist bereits gestoppt"},
+    ["Fling cancelled: character changed/dead"] = {ru="Флинг отменён: смена персонажа/смерть", uk="Флінг скасовано: зміна персонажа/смерть", de="Fling abgebrochen: Charakter gewechselt/tot"},
+    ["TP Map: moved to map spawn"] = {ru="ТП на карту: перемещение на спавн", uk="ТП на мапу: переміщення на спавн", de="Karten-TP: zum Spawn teleportiert"},
+    ["TP Lobby: moved to lobby spawn"] = {ru="ТП в лобби: перемещение на спавн", uk="ТП в лобі: переміщення на спавн", de="Lobby-TP: zum Spawn teleportiert"},
+    ["TP: spawn not replicated"] = {ru="ТП: спавн ещё не загружен", uk="ТП: спавн ще не завантажено", de="TP: Spawn nicht repliziert"},
+    ["TP: living character required"] = {ru="ТП: нужен живой персонаж", uk="ТП: потрібен живий персонаж", de="TP: lebender Charakter erforderlich"},
+    ["TP: stop Fling / finish weapon action first"] = {ru="ТП: останови флинг / заверши действие с оружием", uk="ТП: зупини флінг / заверш дію зі зброєю", de="TP: erst Fling stoppen / Waffenaktion beenden"},
+    ["TP Player: player unavailable"] = {ru="ТП к игроку: игрок недоступен", uk="ТП до гравця: гравець недоступний", de="Spieler-TP: Spieler nicht verfügbar"},
+    ["TP Player: target is not alive / loaded"] = {ru="ТП к игроку: цель мертва или не загружена", uk="ТП до гравця: ціль мертва або не завантажена", de="Spieler-TP: Ziel ist tot oder nicht geladen"},
+    ["TP Player: your character is not ready"] = {ru="ТП к игроку: твой персонаж не готов", uk="ТП до гравця: твій персонаж не готовий", de="Spieler-TP: Dein Charakter ist nicht bereit"},
+    [" [ON]"] = {ru=" [ВКЛ]", uk=" [УВІМК]", de=" [AN]"},
+    [" [OFF]"] = {ru=" [ВЫКЛ]", uk=" [ВИМК]", de=" [AUS]"},
+    [" [WATCHING]"] = {ru=" [СМОТРЮ]", uk=" [ДИВЛЮСЯ]", de=" [BEOBACHTET]"},
+    ["Coin Farm: "] = {ru="Фарм монет: ", uk="Фарм монет: ", de="Münzfarm: "},
+    ["Fling Selected: "] = {ru="Флинг выбранного: ", uk="Флінг вибраного: ", de="Ausgewählter Fling: "},
+    ["TP Player: "] = {ru="ТП к игроку: ", uk="ТП до гравця: ", de="Spieler-TP: "},
+    ["Shoot: "] = {ru="Выстрел: ", uk="Постріл: ", de="Schuss: "},
+    ["Attack: "] = {ru="Атака: ", uk="Атака: ", de="Angriff: "},
+    ["Fling: "] = {ru="Флинг: ", uk="Флінг: ", de="Fling: "},
+    ["Pickup: "] = {ru="Подбор: ", uk="Підбір: ", de="Aufnehmen: "},
+    ["Role: "] = {ru="Роль: ", uk="Роль: ", de="Rolle: "},
+    ["Selected: "] = {ru="Выбран: ", uk="Обрано: ", de="Ausgewählt: "},
+    ["Target: "] = {ru="Цель: ", uk="Ціль: ", de="Ziel: "},
+    ["Watching "] = {ru="Просмотр: ", uk="Перегляд: ", de="Beobachte "},
+    [" no safe floor at spawn"] = {ru=" нет безопасной поверхности на спавне", uk=" немає безпечної поверхні на спавні", de=" kein sicherer Boden am Spawn"},
+    [" studs/s"] = {ru=" studs/с", uk=" studs/с", de=" Studs/s"},
+    [" • paused"] = {ru=" • пауза", uk=" • пауза", de=" • pausiert"},
+    [" • waiting for next round"] = {ru=" • ожидание следующего раунда", uk=" • очікування наступного раунду", de=" • warte auf nächste Runde"},
+    [" waiting for next round"] = {ru=" ожидание следующего раунда", uk=" очікування наступного раунду", de=" warte auf nächste Runde"},
+    [" no collectible coins"] = {ru=" нет доступных монет", uk=" немає доступних монет", de=" keine sammelbaren Münzen"},
+    [" speed "] = {ru=" скорость ", uk=" швидкість ", de=" Tempo "},
+    [" uncollected coins"] = {ru=" несобранных монет", uk=" незібраних монет", de=" nicht gesammelte Münzen"},
+    [" visible"] = {ru=" видимых", uk=" видимих", de=" sichtbar"},
+    [" found, "] = {ru=" найдено, ", uk=" знайдено, ", de=" gefunden, "},
+    [" retries"] = {ru=" повторов", uk=" повторів", de=" Wiederholungen"},
+    [" hidden"] = {ru=" скрытых", uk=" прихованих", de=" ausgeblendet"},
+    ["target outside estimated bounds"] = {ru="цель вне предполагаемых границ", uk="ціль поза передбачуваними межами", de="Ziel außerhalb geschätzter Grenzen"},
+    ["Invisible (local view)"] = {ru="Невидимость (локально)", uk="Невидимість (локально)", de="Unsichtbar (nur lokal)"},
+    ["FullBright"] = {ru="Полная яркость", uk="Повна яскравість", de="Volle Helligkeit"},
+    ["Low Gravity"] = {ru="Низкая гравитация", uk="Низька гравітація", de="Niedrige Schwerkraft"},
+    ["Spin"] = {ru="Вращение", uk="Обертання", de="Drehen"},
+    ["ESP Players"] = {ru="ESP игроков", uk="ESP гравців", de="Spieler-ESP"},
+    ["Role ESP"] = {ru="ESP ролей", uk="ESP ролей", de="Rollen-ESP"},
+    ["Innocent ESP"] = {ru="ESP мирных", uk="ESP мирних", de="Unschuldigen-ESP"},
+    ["ESP Lines"] = {ru="Линии ESP", uk="Лінії ESP", de="ESP-Linien"},
+    ["ESP Names"] = {ru="Имена ESP", uk="Імена ESP", de="ESP-Namen"},
+    ["FOV"] = {ru="Поле зрения", uk="Поле зору", de="Sichtfeld"},
+    ["Hit Position Diagnostic (READ ONLY)"] = {ru="Диагностика попаданий (ТОЛЬКО ЧТЕНИЕ)", uk="Діагностика влучань (ЛИШЕ ЧИТАННЯ)", de="Trefferdiagnose (NUR LESEN)"},
+    ["Coin Farm: ON • defeated; waiting for round end"] = {ru="Фарм монет: ВКЛ • погиб; ожидание конца раунда", uk="Фарм монет: УВІМК • загинув; очікування завершення раунду", de="Münzfarm: AN • besiegt; warte auf Rundenende"},
+    ["Coin Farm: finish Fling / TP / Shot first"] = {ru="Фарм монет: сначала заверши флинг / ТП / выстрел", uk="Фарм монет: спершу заверши флінг / ТП / постріл", de="Münzfarm: zuerst Fling / TP / Schuss beenden"},
+    ["Coin Farm: 0 targets; candidate: "] = {ru="Фарм монет: 0 целей; кандидат: ", uk="Фарм монет: 0 цілей; кандидат: ", de="Münzfarm: 0 Ziele; Kandidat: "},
+    ["Coin Farm: 0 usable coins • names="] = {ru="Фарм монет: 0 доступных монет • названия=", uk="Фарм монет: 0 доступних монет • назви=", de="Münzfarm: 0 nutzbare Münzen • Namen="},
+    ["Coin Farm: round coins appeared • "] = {ru="Фарм монет: монеты раунда появились • ", uk="Фарм монет: монети раунду з’явилися • ", de="Münzfarm: Rundenmünzen erschienen • "},
+    ["AntiFling error: "] = {ru="Ошибка AntiFling: ", uk="Помилка AntiFling: ", de="Anti-Fling-Fehler: "},
+    ["Pickup error: "] = {ru="Ошибка подбора: ", uk="Помилка підбору: ", de="Aufnahmefehler: "},
+    ["Return error: "] = {ru="Ошибка возврата: ", uk="Помилка повернення: ", de="Rückkehrfehler: "},
+    ["Fling error: "] = {ru="Ошибка флинга: ", uk="Помилка флінгу: ", de="Fling-Fehler: "},
+    ["Fling return error: "] = {ru="Ошибка возврата флинга: ", uk="Помилка повернення флінгу: ", de="Fling-Rückkehrfehler: "},
+    ["Fling: character not ready / leave the seat first"] = {ru="Флинг: персонаж не готов / сначала встань с сиденья", uk="Флінг: персонаж не готовий / спершу залиш сидіння", de="Fling: Charakter nicht bereit / zuerst Sitz verlassen"},
+    ["Fling: final contact burst • returning shortly"] = {ru="Флинг: последний рывок • скоро возврат", uk="Флінг: останній ривок • незабаром повернення", de="Fling: letzter Kontaktstoß • Rückkehr folgt"},
+    ["Fling: stop current target before switching roles"] = {ru="Флинг: останови текущую цель перед сменой роли", uk="Флінг: зупини поточну ціль перед зміною ролі", de="Fling: aktuelles Ziel vor Rollenwechsel stoppen"},
+    ["Fling: stop selected fling first"] = {ru="Флинг: сначала останови выбранный флинг", uk="Флінг: спершу зупини вибраний флінг", de="Fling: zuerst gewählten Fling stoppen"},
+    ["Fling: wait for the revolver pickup to finish"] = {ru="Флинг: дождись завершения подбора револьвера", uk="Флінг: дочекайся завершення підбору револьвера", de="Fling: Warte auf Revolveraufnahme"},
+    ["Fling Selected: chosen player is not alive / available"] = {ru="Флинг: выбранный игрок мёртв или недоступен", uk="Флінг: вибраний гравець мертвий або недоступний", de="Fling: gewählter Spieler ist tot oder nicht verfügbar"},
+    ["Fling Selected: stop current Fling / TP first"] = {ru="Флинг: сначала останови текущий флинг / ТП", uk="Флінг: спершу зупини поточний флінг / ТП", de="Fling: zuerst aktuellen Fling / TP stoppen"},
+    ["Shoot: finish pickup / stop Fling first"] = {ru="Выстрел: сначала закончи подбор / останови флинг", uk="Постріл: спершу заверши підбір / зупини флінг", de="Schuss: zuerst Aufnahme beenden / Fling stoppen"},
+    ["TP Player: character changed; cancelled"] = {ru="ТП к игроку: персонаж сменился; отменено", uk="ТП до гравця: персонаж змінився; скасовано", de="Spieler-TP: Charakter gewechselt; abgebrochen"},
+    ["TP Player: stop Fling / finish weapon action first"] = {ru="ТП к игроку: сначала останови флинг / действие с оружием", uk="ТП до гравця: спершу зупини флінг / дію зі зброєю", de="Spieler-TP: zuerst Fling / Waffenaktion beenden"},
+    ["Inside Fling: target outside estimated bounds • Release = return"] = {ru="Флинг: цель вне предполагаемых границ • Отпустить = возврат", uk="Флінг: ціль поза передбачуваними межами • Відпустити = повернення", de="Fling: Ziel außerhalb geschätzter Grenzen • Loslassen = zurück"},
+    ["Shoot: cancelled"] = {ru="Выстрел: отменён", uk="Постріл: скасовано", de="Schuss: abgebrochen"},
+    ["Shoot: roles unavailable"] = {ru="Выстрел: роли недоступны", uk="Постріл: ролі недоступні", de="Schuss: Rollen nicht verfügbar"},
+    ["Shoot: no living murderer"] = {ru="Выстрел: нет живого убийцы", uk="Постріл: немає живого вбивці", de="Schuss: kein lebender Mörder"},
+    ["Shoot: no target part"] = {ru="Выстрел: нет части цели", uk="Постріл: немає частини цілі", de="Schuss: kein Zielkörperteil"},
+    ["Shoot: revolver not found"] = {ru="Выстрел: револьвер не найден", uk="Постріл: револьвер не знайдено", de="Schuss: Revolver nicht gefunden"},
+    ["Shoot: camera unavailable"] = {ru="Выстрел: камера недоступна", uk="Постріл: камера недоступна", de="Schuss: Kamera nicht verfügbar"},
+    ["Attack: select an available player first"] = {ru="Атака: сначала выбери доступного игрока", uk="Атака: спершу обери доступного гравця", de="Angriff: zuerst verfügbaren Spieler wählen"},
+    ["Attack: stop client-only Bring first; it cannot confirm server distance"] = {ru="Атака: останови локальный Bring; он не подтверждает серверную дистанцию", uk="Атака: зупини локальний Bring; він не підтверджує серверну відстань", de="Angriff: zuerst lokales Bring stoppen; Serverentfernung bleibt unbekannt"},
+    ["Attack: finish TP / Fling / Shot / Coin Farm first"] = {ru="Атака: сначала закончи ТП / флинг / выстрел / фарм монет", uk="Атака: спершу заверши ТП / флінг / постріл / фарм монет", de="Angriff: zuerst TP / Fling / Schuss / Münzfarm beenden"},
+    ["Attack: roles unavailable"] = {ru="Атака: роли недоступны", uk="Атака: ролі недоступні", de="Angriff: Rollen nicht verfügbar"},
+    ["Attack: selected player is unavailable/dead"] = {ru="Атака: выбранный игрок недоступен/мёртв", uk="Атака: вибраний гравець недоступний/мертвий", de="Angriff: gewählter Spieler nicht verfügbar/tot"},
+    ["Attack: revolver may only target the current Murderer"] = {ru="Атака: из револьвера можно целиться только в текущего убийцу", uk="Атака: револьвер може цілити лише в поточного вбивцю", de="Angriff: Revolver kann nur den aktuellen Mörder treffen"},
+    ["Release "] = {ru="Отпустить ", uk="Відпустити ", de="Loslassen "},
+    ["Select → "] = {ru="Выбрать → ", uk="Обрати → ", de="Wählen → "},
+    ["Bring → "] = {ru="Притянуть → ", uk="Притягнути → ", de="Heranholen → "},
+    ["TP → "] = {ru="ТП → ", uk="ТП → ", de="TP → "},
+    ["Target → "] = {ru="Цель → ", uk="Ціль → ", de="Ziel → "},
+    ["TP Player: safe ground not found near "] = {ru="ТП к игроку: безопасная поверхность не найдена возле ", uk="ТП до гравця: безпечної поверхні не знайдено біля ", de="Spieler-TP: kein sicherer Boden nahe "},
+    ["TP Player: moved near "] = {ru="ТП к игроку: перемещён рядом с ", uk="ТП до гравця: переміщено поруч із ", de="Spieler-TP: teleportiert in die Nähe von "},
+    ["Coin Farm: speed "] = {ru="Фарм монет: скорость ", uk="Фарм монет: швидкість ", de="Münzfarm: Tempo "},
+    ["Spectate Murderer "] = {ru="Смотреть за убийцей ", uk="Дивитися за вбивцею ", de="Mörder beobachten "},
+    ["Spectate Sheriff "] = {ru="Смотреть за шерифом ", uk="Дивитися за шерифом ", de="Sheriff beobachten "},
+    ["Fling: checking "] = {ru="Флинг: проверка ", uk="Флінг: перевірка ", de="Fling: prüfe "},
+    ["Fling: waiting for living "] = {ru="Флинг: ожидание живого ", uk="Флінг: очікування живого ", de="Fling: warte auf lebenden "},
+    ["Fling: waiting for "] = {ru="Флинг: ожидание ", uk="Флінг: очікування ", de="Fling: warte auf "},
+    ["TP "] = {ru="ТП ", uk="ТП ", de="TP "},
+    ["Shoot error: "] = {ru="Ошибка выстрела: ", uk="Помилка пострілу: ", de="Schussfehler: "},
+    ["Silent Revolver OFF: "] = {ru="Тихий револьвер ВЫКЛ: ", uk="Тихий револьвер ВИМК: ", de="Silent-Revolver AUS: "},
+    ["Silent Knife OFF: "] = {ru="Тихий нож ВЫКЛ: ", uk="Тихий ніж ВИМК: ", de="Silent-Messer AUS: "},
+    ["ScriptMM2 | Mobile  •  "] = {ru="ScriptMM2 | Телефон  •  ", uk="ScriptMM2 | Телефон  •  ", de="ScriptMM2 | Mobil  •  "},
+    ["ScriptMM2 | PC  •  "] = {ru="ScriptMM2 | ПК  •  ", uk="ScriptMM2 | ПК  •  ", de="ScriptMM2 | PC  •  "},
+    ["Real replicated roots, not preview hitboxes:"] = {ru="Настоящие позиции игроков, не предпросмотр хитбоксов:", uk="Справжні позиції гравців, не попередній перегляд хітбоксів:", de="Echte replizierte Positionen, keine Vorschau-Hitboxen:"},
+    ["No living player roots currently replicated."] = {ru="Сейчас нет доступных позиций живых игроков.", uk="Зараз немає доступних позицій живих гравців.", de="Derzeit keine Positionen lebender Spieler repliziert."},
+    ["Server registration / damage: UNKNOWN (not observed)"] = {ru="Регистрация попаданий сервером / урон: НЕИЗВЕСТНО (не наблюдается)", uk="Реєстрація влучань сервером / шкода: НЕВІДОМО (не спостерігається)", de="Servertreffer / Schaden: UNBEKANNT (nicht beobachtet)"},
+    [" • local contact attempt"] = {ru=" • локальная попытка столкновения", uk=" • локальна спроба зіткнення", de=" • lokaler Kontaktversuch"},
+    ["TP Player error: "] = {ru="Ошибка ТП к игроку: ", uk="Помилка ТП до гравця: ", de="Spieler-TP-Fehler: "},
+}
+local TEXT_FRAGMENTS = {}
+for english, translations in pairs(TEXT_TRANSLATIONS) do
+    if string.sub(english, 1, 1) == " " or string.sub(english, -1) == " "
+        or string.sub(english, -1) == "=" then
+        table.insert(TEXT_FRAGMENTS, {source = english, translated = translations})
+    end
+end
+table.sort(TEXT_FRAGMENTS, function(left, right) return #left.source > #right.source end)
+local function translateText(source)
+    if Localization.language == "en" or type(source) ~= "string" then return source end
+    local lang = Localization.language
+    local exact = TEXT_TRANSLATIONS[source]
+    if exact then return exact[lang] or source end
+    -- Dynamic labels: translate stable prefixes/suffixes, not usernames or numbers.
+    local result = source
+    local base, switch = string.match(source, "^(.-)(%s+%[ON%])$")
+    if not base then base, switch = string.match(source, "^(.-)(%s+%[OFF%])$") end
+    if base and TEXT_TRANSLATIONS[base] then
+        result = (TEXT_TRANSLATIONS[base][lang] or base) .. switch
+    end
+    -- Dynamic role button labels retain their ON/OFF suffix and remain translatable.
+    if result == source then
+        for _, prefix in ipairs({"Spectate Murderer", "Spectate Sheriff", "Fling Selected", "Bring All"}) do
+            if string.sub(source, 1, #prefix) == prefix and TEXT_TRANSLATIONS[prefix] then
+                result = TEXT_TRANSLATIONS[prefix][lang] .. string.sub(source, #prefix + 1)
+                break
+            end
+        end
+    end
+    for _, entry in ipairs(TEXT_FRAGMENTS) do
+        local replacement = entry.translated[lang]
+        if replacement then
+            local from = 1
+            while true do
+                local first, last = string.find(result, entry.source, from, true)
+                if not first then break end
+                result = string.sub(result, 1, first - 1) .. replacement .. string.sub(result, last + 1)
+                from = first + #replacement
+            end
+        end
+    end
+    return result
+end
+local function renderLocalized(object)
+    if Localization.busy[object] then return end
+    local original = Localization.sources[object]
+    if original == nil or not object.Parent then return end
+    local translated = translateText(original)
+    Localization.busy[object] = true
+    Localization.rendered[object] = translated
+    if object.Text ~= translated then object.Text = translated end
+    Localization.busy[object] = nil
+end
+function Localization.track(object)
+    if not (object:IsA("TextLabel") or object:IsA("TextButton")) then return end
+    if not UIRefs.ScriptMM2 or not object:IsDescendantOf(UIRefs.ScriptMM2) then return end
+    if Localization.sources[object] ~= nil then return end
+    Localization.sources[object] = object.Text
+    renderLocalized(object)
+    addConnection(object:GetPropertyChangedSignal("Text"):Connect(function()
+        if Localization.busy[object] then return end
+        local current = object.Text
+        if current == Localization.rendered[object] then return end
+        Localization.sources[object] = current
+        renderLocalized(object)
+    end))
+end
+function Localization.setLanguage(language)
+    if language ~= "en" and language ~= "ru" and language ~= "uk" and language ~= "de" then return end
+    Localization.language = language
+    for object in pairs(Localization.sources) do renderLocalized(object) end
+    if UIRefs.updateLanguageButtons then UIRefs.updateLanguageButtons() end
+end
+
+end
 local function create(className, properties, parent)
     local object = Instance.new(className)
     for property, value in pairs(properties) do
         object[property] = value
     end
     object.Parent = parent
+    Localization.track(object)
     return object
 end
 
@@ -590,19 +906,27 @@ do
     }, UIRefs.Main)
     UIRefs.mainTabButton = create("TextButton", {
         Name = "MainTab", Position = UDim2.fromScale(0, 0),
-        Size = UDim2.new(0.5, -3, 1, 0), Text = "MAIN", LayoutOrder = 1,
+        Size = UDim2.new(1/3, -4, 1, 0), Text = "MAIN", LayoutOrder = 1,
         Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
         AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(38, 115, 72),
         TextColor3 = Color3.fromRGB(240, 255, 245),
     }, UIRefs.TabBar)
     UIRefs.spectateTabButton = create("TextButton", {
-        Name = "SpectateTab", Position = UDim2.new(0.5, 3, 0, 0),
-        Size = UDim2.new(0.5, -3, 1, 0), Text = "SPECTATE", LayoutOrder = 2,
+        Name = "SpectateTab", Position = UDim2.new(1/3, 2, 0, 0),
+        Size = UDim2.new(1/3, -4, 1, 0), Text = "SPECTATE", LayoutOrder = 2,
+        Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
+        AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+        TextColor3 = Color3.fromRGB(220, 220, 225),
+    }, UIRefs.TabBar)
+    UIRefs.languageTabButton = create("TextButton", {
+        Name = "LanguageTab", Position = UDim2.new(2/3, 2, 0, 0),
+        Size = UDim2.new(1/3, -4, 1, 0), Text = "LANGUAGE", LayoutOrder = 3,
         Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0,
         AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(37, 37, 43),
         TextColor3 = Color3.fromRGB(220, 220, 225),
     }, UIRefs.TabBar)
     create("UICorner", { CornerRadius = UDim.new(0, 7) }, UIRefs.mainTabButton)
+    create("UICorner", { CornerRadius = UDim.new(0, 7) }, UIRefs.languageTabButton)
     create("UICorner", { CornerRadius = UDim.new(0, 7) }, UIRefs.spectateTabButton)
     UIRefs.SpectateContent = create("ScrollingFrame", {
         Name = "SpectateContent", Position = UDim2.fromOffset(10, 100),
@@ -619,17 +943,76 @@ do
         PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5),
         PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 6),
     }, UIRefs.SpectateContent)
+    UIRefs.LanguageContent = create("ScrollingFrame", {
+        Name = "LanguageContent", Position = UDim2.fromOffset(10, 100),
+        Size = UDim2.new(1, -20, 1, -110), Visible = false,
+        BackgroundTransparency = 1, BorderSizePixel = 0,
+        ScrollBarThickness = 4, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+    }, UIRefs.Main)
+    create("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder}, UIRefs.LanguageContent)
+    create("UIPadding", {PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5),
+        PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 6)}, UIRefs.LanguageContent)
     UIRefs.setPage = function(page)
         if state.unloaded then return end
         local showSpectate = page == "spectate"
-        UIRefs.Content.Visible = not showSpectate
+        local showLanguage = page == "language"
+        UIRefs.Content.Visible = not showSpectate and not showLanguage
         UIRefs.SpectateContent.Visible = showSpectate
-        setButtonVisual(UIRefs.mainTabButton, not showSpectate)
+        UIRefs.LanguageContent.Visible = showLanguage
+        setButtonVisual(UIRefs.mainTabButton, not showSpectate and not showLanguage)
         setButtonVisual(UIRefs.spectateTabButton, showSpectate)
+        setButtonVisual(UIRefs.languageTabButton, showLanguage)
         if showSpectate and UIRefs.rebuildSpectatorList then UIRefs.rebuildSpectatorList() end
     end
     addConnection(UIRefs.mainTabButton.MouseButton1Click:Connect(function() UIRefs.setPage("main") end))
     addConnection(UIRefs.spectateTabButton.MouseButton1Click:Connect(function() UIRefs.setPage("spectate") end))
+    addConnection(UIRefs.languageTabButton.MouseButton1Click:Connect(function() UIRefs.setPage("language") end))
+end
+
+--// Language tab (English is default; changes also apply to later status updates).
+do
+    create("TextLabel", {
+        Name = "LanguageTitle", LayoutOrder = 1, Size = UDim2.new(1, -4, 0, 34),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 17,
+        TextColor3 = Color3.fromRGB(225, 225, 235),
+        TextXAlignment = Enum.TextXAlignment.Left, Text = "Language / Язык / Мова / Sprache",
+    }, UIRefs.LanguageContent)
+    create("TextLabel", {
+        Name = "LanguageDescription", LayoutOrder = 2, Size = UDim2.new(1, -4, 0, 48),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 13,
+        TextWrapped = true, TextColor3 = Color3.fromRGB(180, 185, 195),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Choose interface language. Changes apply immediately.",
+    }, UIRefs.LanguageContent)
+    local options = {{"en", "English (default)"}, {"ru", "Russian / Русский"},
+        {"uk", "Ukrainian / Українська"}, {"de", "German / Deutsch"}}
+    local buttons = {}
+    UIRefs.languageStatus = create("TextLabel", {
+        Name = "LanguageStatus", LayoutOrder = 8, Size = UDim2.new(1, -4, 0, 34),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamSemibold, TextSize = 13,
+        TextColor3 = Color3.fromRGB(165, 225, 185), TextXAlignment = Enum.TextXAlignment.Left,
+        Text = "Current language: English",
+    }, UIRefs.LanguageContent)
+    UIRefs.updateLanguageButtons = function()
+        local labels = {en = "Current language: English", ru = "Current language: Russian",
+            uk = "Current language: Ukrainian", de = "Current language: German"}
+        UIRefs.languageStatus.Text = labels[Localization.language]
+        for code, button in pairs(buttons) do setButtonVisual(button, code == Localization.language) end
+    end
+    for index, option in ipairs(options) do
+        local code, name = option[1], option[2]
+        local button = create("TextButton", {
+            Name = "Language_" .. code, LayoutOrder = 2 + index,
+            Size = UDim2.new(1, -4, 0, 44), BackgroundColor3 = Color3.fromRGB(37, 37, 43),
+            BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamSemibold,
+            TextSize = 14, TextColor3 = Color3.fromRGB(220, 220, 225), Text = name,
+        }, UIRefs.LanguageContent)
+        create("UICorner", {CornerRadius = UDim.new(0, 8)}, button)
+        buttons[code] = button
+        addConnection(button.MouseButton1Click:Connect(function() Localization.setLanguage(code) end))
+    end
+    UIRefs.updateLanguageButtons()
 end
 
 UIRefs.Layout = create("UIListLayout", {
@@ -1033,6 +1416,11 @@ end)
 --// V0.9.31: velocity-based B AimLock lead; zero disables prediction.
 UIRefs._unused, UIRefs.setAimLead = addSlider("B AimLock prediction (ms)", 0, 300, values.aimLeadMs, 14.109, function(v)
     values.aimLeadMs = v
+end)
+
+--// V0.9.34: separate airborne Y lead, so bunny-hopping does not trail the torso.
+UIRefs._unused, UIRefs.setJumpAimLead = addSlider("B Jump prediction (ms)", 0, 250, values.jumpLeadMs, 14.1095, function(v)
+    values.jumpLeadMs = v
 end)
 
 UIRefs._unused, UIRefs.setAimRadius = addSlider("Aim circle radius (px)", 35, 350, values.aimRadius, 14.11, function(v)
@@ -3168,22 +3556,33 @@ updateAimLock = function()
 
     local cameraPosition = camera.CFrame.Position
     local targetPosition = targetPart.Position
-    -- The replicated torso location is already behind a moving target by the time
-    -- the local camera tracks it. Look ahead using the target assembly's velocity.
-    -- Only camera tracking is changed: this does not intercept gun or server hits.
+    local targetChar = targetPart.Parent
+    local root = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+    local targetHumanoid = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
+    local velocity = (root and root:IsA("BasePart") and root.AssemblyLinearVelocity)
+        or targetPart.AssemblyLinearVelocity
+    local distance = (targetPosition - cameraPosition).Magnitude
+
+    -- Predict horizontal motion separately. This only controls the local camera;
+    -- actual hit registration remains with the MM2 server.
     if values.aimLeadMs > 0 then
-        local root = targetPart.Parent and targetPart.Parent:FindFirstChild("HumanoidRootPart")
-        local velocity = (root and root:IsA("BasePart") and root.AssemblyLinearVelocity)
-            or targetPart.AssemblyLinearVelocity
         local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
         local speed = flatVelocity.Magnitude
         if speed > 1 then
-            -- Slight extra lead for distance; cap it to prevent extreme overshoot.
-            local distance = (targetPosition - cameraPosition).Magnitude
             local leadSeconds = math.clamp(values.aimLeadMs / 1000 + distance / 650, 0, 0.40)
-            local displacement = flatVelocity.Unit * math.min(speed * leadSeconds, 8)
-            targetPosition = targetPosition + displacement
+            targetPosition = targetPosition + flatVelocity.Unit * math.min(speed * leadSeconds, 8)
         end
+    end
+
+    -- Jump spam: torso Y is a delayed snapshot. Approximate a short airborne arc
+    -- from the replicated vertical velocity and gravity; never extrapolate far.
+    -- Disable when grounded and bound the correction to avoid large snap/overshoot.
+    if values.jumpLeadMs > 0 and targetHumanoid and targetHumanoid.Health > 0
+        and targetHumanoid.FloorMaterial == Enum.Material.Air then
+        local ySpeed = math.clamp(velocity.Y, -75, 75)
+        local t = math.clamp(values.jumpLeadMs / 1000 + distance / 1200, 0, 0.22)
+        local predictedY = ySpeed * t - 0.5 * Workspace.Gravity * t * t
+        targetPosition = targetPosition + Vector3.new(0, math.clamp(predictedY, -3.5, 4), 0)
     end
     if (targetPosition - cameraPosition).Magnitude > 0.001 then
         camera.CFrame = CFrame.lookAt(cameraPosition, targetPosition)
@@ -3915,12 +4314,12 @@ local function flingAllPlayers()
     local player = UIRefs.selectedFlingPlayer
     if not player or player == LocalPlayer or player.Parent ~= Players then
         UIRefs.Status.Text = "Fling Selected: choose a player in SPECTATE first"
-        UIRefs.flingSelectStatus.Text = UIRefs.Status.Text
+        UIRefs.flingSelectStatus.Text = Localization.sources[UIRefs.Status] or UIRefs.Status.Text
         return
     end
     if not roleAlive(player.Name) then
         UIRefs.Status.Text = "Fling Selected: chosen player is not alive / available"
-        UIRefs.flingSelectStatus.Text = UIRefs.Status.Text
+        UIRefs.flingSelectStatus.Text = Localization.sources[UIRefs.Status] or UIRefs.Status.Text
         return
     end
     flingAllActive = true -- retained internal lifecycle flag for the Player mode
@@ -3928,7 +4327,7 @@ local function flingAllPlayers()
     local generation = flingAllGeneration
     paintSelectedFlingAction(true)
     UIRefs.Status.Text = "Fling Selected: " .. player.DisplayName .. " • local contact attempt"
-    UIRefs.flingSelectStatus.Text = UIRefs.Status.Text
+    UIRefs.flingSelectStatus.Text = Localization.sources[UIRefs.Status] or UIRefs.Status.Text
     task.spawn(function()
         -- The role fling routine owns the physics and restores it on every exit.
         -- Keep a single target, never iterate other players.
@@ -5073,120 +5472,139 @@ local function unload()
     end
 end
 
---// Travel locations: use verified replicated landmarks/players, never fixed map coordinates.
+--// Travel: explicit spawn markers only. Never choose a random floor or another player.
 do
     local function normalized(name)
         return string.lower(name):gsub("[^%w]", "")
     end
 
-    local function safeSurface(part)
-        return part and part:IsA("BasePart") and part.CanCollide
-            and part.Anchored and part.CFrame.UpVector.Y > 0.91
-            and part.Size.X >= 5 and part.Size.Z >= 5
+    local mapContainerNames = {
+        map = true, currentmap = true, activemap = true,
+        roundmap = true, gamemap = true,
+    }
+    local lobbyContainerNames = {
+        lobby = true, mainlobby = true, lobbymap = true,
+    }
+    local mapSpawnNames = {
+        spawn = true, spawnpoint = true, playerspawn = true,
+        playerspawnpoint = true, mapspawn = true, mapspawnpoint = true,
+        gamespawn = true, roundspawn = true, spawnlocation = true,
+    }
+    local lobbySpawnNames = {
+        lobbyspawn = true, lobbyspawnpoint = true,
+        spawnlobby = true, lobbyspawnlocation = true,
+        spawn = true, spawnpoint = true, playerspawn = true,
+        playerspawnpoint = true, spawnlocation = true,
+    }
+    local spawnFolderNames = {
+        spawns = true, spawnpoints = true, spawnlocations = true,
+        playerspawns = true, playerspawnpoints = true,
+    }
+    local forbiddenSpawnNames = {
+        coinspawn = true, gunspawn = true, knifespawn = true,
+        itemspawn = true, weapons = true, weaponspawn = true,
+        dropspawn = true, coins = true, spectator = true,
+    }
+
+    local function findTopLevel(names)
+        for _, item in ipairs(Workspace:GetChildren()) do
+            if (item:IsA("Model") or item:IsA("Folder")) and names[normalized(item.Name)] then
+                return item
+            end
+        end
+        return nil
     end
 
-    local function bestLandmark(container)
-        -- Prefer an actual spawn, then a stable horizontal floor. Never use
-        -- arbitrary decorations or roofs as travel destinations.
-        local floor, area = nil, 0
+    local function isSpawnPart(part, kind, withinNamedContainer)
+        if not part:IsA("BasePart") then return false end
+        local partName = normalized(part.Name)
+        if forbiddenSpawnNames[partName] then return false end
+        if kind == "lobby" and not withinNamedContainer then
+            -- Never select a generic Workspace.Spawn; it could belong to the map.
+            return partName == "lobbyspawn" or partName == "lobbyspawnpoint"
+                or partName == "spawnlobby" or partName == "lobbyspawnlocation"
+        end
+        local names = kind == "map" and mapSpawnNames or lobbySpawnNames
+        if names[partName] then return true end
+        -- Some maps use arbitrary numbered SpawnLocation parts or Spawn1, Spawn2.
+        if part:IsA("SpawnLocation") then return true end
+        if partName:match("^spawn%d+$") or partName:match("^playerspawn%d+$") then return true end
+        return false
+    end
+
+    local function findSpawn(container, kind, withinNamedContainer)
+        if not container then return nil end
+        local candidates = {}
         for _, part in ipairs(container:GetDescendants()) do
-            if part:IsA("SpawnLocation") and safeSurface(part) then return part end
-            if safeSurface(part) and part.Size.Y <= 18 then
-                local footprint = part.Size.X * part.Size.Z
-                if footprint > area and footprint >= 100 then
-                    floor, area = part, footprint
+            if isSpawnPart(part, kind, withinNamedContainer) then
+                -- Do not confuse a spawn in a nested Lobby with a round spawn.
+                local nestedLobby, nestedMap, excludedGroup = false, false, false
+                local ancestor = part.Parent
+                while ancestor and ancestor ~= container do
+                    local ancestorName = normalized(ancestor.Name)
+                    if lobbyContainerNames[ancestorName] then nestedLobby = true end
+                    if mapContainerNames[ancestorName] then nestedMap = true end
+                    if forbiddenSpawnNames[ancestorName] then excludedGroup = true end
+                    ancestor = ancestor.Parent
+                end
+                if not excludedGroup and not (kind == "map" and nestedLobby)
+                    and not (kind == "lobby" and not withinNamedContainer and nestedMap) then
+                    local name = normalized(part.Name)
+                    local priority = part:IsA("SpawnLocation") and 0 or 1
+                    if (kind == "map" and (name == "mapspawn" or name == "playerspawn"))
+                        or (kind == "lobby" and (name == "lobbyspawn" or name == "lobbyspawnpoint")) then
+                        priority = -1
+                    end
+                    table.insert(candidates, {part = part, priority = priority, path = part:GetFullName()})
                 end
             end
         end
-        return floor
+        table.sort(candidates, function(a, b)
+            if a.priority ~= b.priority then return a.priority < b.priority end
+            return a.path < b.path
+        end)
+        return candidates[1] and candidates[1].part or nil
     end
 
-    local function lobbySpawn()
-        for _, child in ipairs(Workspace:GetChildren()) do
-            local name = normalized(child.Name)
-            if (child:IsA("Model") or child:IsA("Folder")) and
-                (name == "lobby" or name == "mainlobby" or name == "lobbymap") then
-                local part = bestLandmark(child)
-                if part then return part end
-            end
+    local function resolveTravelSpawn(kind)
+        if kind == "map" then
+            local activeMap = findTopLevel(mapContainerNames)
+            if not activeMap then return nil, nil, "TP Map: active map model not found" end
+            local marker = findSpawn(activeMap, "map", true)
+            if not marker then return nil, nil, "TP Map: spawn not found in active map" end
+            return marker, activeMap
         end
-        for _, part in ipairs(Workspace:GetDescendants()) do
-            if safeSurface(part) then
-                local name = normalized(part.Name)
-                if name == "lobbyspawn" or name == "lobbyspawnpoint"
-                    or name == "spawnlobby" then return part end
-            end
+
+        local lobby = findTopLevel(lobbyContainerNames)
+        if lobby then
+            local marker = findSpawn(lobby, "lobby", true)
+            if marker then return marker, lobby end
         end
-        return nil
+        -- Only explicitly named lobby spawns, not an arbitrary global spawn/floor.
+        local marker = findSpawn(Workspace, "lobby", false)
+        if marker then return marker, nil end
+        return nil, nil, "TP Lobby: lobby spawn not found"
     end
 
-    local function activeMapLandmark()
-        -- Replicated map models provide a fallback when role remotes are stale.
-        -- Explicit current-map names are preferred to any guessed coordinates.
-        for _, child in ipairs(Workspace:GetChildren()) do
-            local name = normalized(child.Name)
-            if (child:IsA("Model") or child:IsA("Folder")) and
-                (name == "map" or name == "currentmap" or name == "activemap"
-                    or name == "roundmap" or name == "gamemap") then
-                local part = bestLandmark(child)
-                if part then return part end
-            end
-        end
-        return nil
-    end
-
-    local function mapPlayer()
-        -- Prefer a real participant in the active round, but never jump to our
-        -- own lobby character when roles have not replicated.
-        if not refreshRoles() or not rolesAvailable then return nil end
-        local names = {Murder, Sheriff, Hero}
-        for playerName, data in pairs(roles) do
-            if type(data) == "table" and data.Role and data.Role ~= "Spectator" then
-                table.insert(names, playerName)
-            end
-        end
-        for _, name in ipairs(names) do
-            if type(name) == "string" and name ~= "" and name ~= LocalPlayer.Name
-                and roleAlive(name) then
-                local player = Players:FindFirstChild(name)
-                local char = player and player.Character
-                local root = char and char:FindFirstChild("HumanoidRootPart")
-                if root and not root.Anchored then return root end
-            end
-        end
-        return nil
-    end
-
-    local function groundedDestination(char, root, hum, landmark, isPlayer)
+    local function spawnDestination(char, root, hum, marker, container)
+        local standingHeight = hum.HipHeight + root.Size.Y * 0.5 + 1.25
+        local center = marker.Position
         local params = RaycastParams.new()
         params.FilterType = Enum.RaycastFilterType.Exclude
-        local exclusions = {char}
-        if isPlayer then table.insert(exclusions, landmark.Parent) end
-        params.FilterDescendantsInstances = exclusions
+        params.FilterDescendantsInstances = {char}
         params.IgnoreWater = true
-        local samples = isPlayer and {
-            Vector3.new(5, 0, 0), Vector3.new(-5, 0, 0),
-            Vector3.new(0, 0, 5), Vector3.new(0, 0, -5),
-        } or {Vector3.zero, Vector3.new(4, 0, 0), Vector3.new(-4, 0, 0)}
-        for _, offset in ipairs(samples) do
-            local proposed = landmark.Position + offset
-            local ground = Workspace:Raycast(proposed + Vector3.new(0, 18, 0),
-                Vector3.new(0, -65, 0), params)
-            if ground and ground.Instance and ground.Instance.CanCollide and ground.Normal.Y >= 0.75 then
-                if not isPlayer and ground.Instance ~= landmark
-                    and not ground.Instance:IsDescendantOf(landmark.Parent) then
-                    -- Do not accidentally land outside the identified map/lobby.
-                    continue
-                end
-                local standingHeight = hum.HipHeight + root.Size.Y * 0.5 + 1.25
-                return Vector3.new(proposed.X, ground.Position.Y + standingHeight, proposed.Z)
-            end
+        local hit = Workspace:Raycast(center + Vector3.new(0, 12, 0),
+            Vector3.new(0, -45, 0), params)
+        if hit and hit.Instance and hit.Instance.CanCollide and hit.Normal.Y >= 0.75
+            and hit.Position.Y <= center.Y + marker.Size.Y * 0.5 + 3
+            and hit.Position.Y >= center.Y - 20
+            and (not container or hit.Instance:IsDescendantOf(container)) then
+            -- The landing X/Z is ALWAYS the spawn marker's X/Z, not a sampled floor point.
+            return Vector3.new(center.X, hit.Position.Y + standingHeight, center.Z)
         end
-        -- SpawnLocations may have a transparent/no-query top face; the explicit
-        -- landmark is still a reasonable fallback if it is a verified floor.
-        if not isPlayer and safeSurface(landmark) then
-            return landmark.Position + Vector3.new(0,
-                landmark.Size.Y * 0.5 + hum.HipHeight + root.Size.Y * 0.5 + 1.25, 0)
+        -- Valid collidable SpawnLocation can be used even if CanQuery is disabled.
+        if marker:IsA("SpawnLocation") and marker.CanCollide and marker.Anchored then
+            return Vector3.new(center.X, center.Y + marker.Size.Y * 0.5 + standingHeight, center.Z)
         end
         return nil
     end
@@ -5204,29 +5622,19 @@ do
         end
         teleportBusy = true
         local ok, err = pcall(function()
-            local target, targetIsPlayer
-            if kind == "map" then
-                target = mapPlayer()
-                targetIsPlayer = target ~= nil
-                if not target then target = activeMapLandmark() end
-            else
-                target = lobbySpawn()
-                targetIsPlayer = false
-            end
-            if not target or not target.Parent then
-                UIRefs.Status.Text = kind == "map" and "TP Map: round map / player not replicated"
-                    or "TP Lobby: lobby spawn not replicated"
+            local marker, container, reason = resolveTravelSpawn(kind)
+            if not marker or not marker.Parent then
+                UIRefs.Status.Text = reason or "TP: spawn not replicated"
                 return
             end
             if state.unloaded or LocalPlayer.Character ~= char or hum.Health <= 0 then return end
-            local destination = groundedDestination(char, root, hum, target, targetIsPlayer)
+            local destination = spawnDestination(char, root, hum, marker, container)
             if not destination then
-                UIRefs.Status.Text = "TP " .. kind .. ": no safe landing surface"
+                UIRefs.Status.Text = "TP " .. kind .. ": no safe floor at spawn"
                 return
             end
-            -- Stop the farm only after a valid landing point was found.
+            -- Disable movement controllers only after finding an actual spawn and landing.
             if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
-            -- Do not let an existing Fly body mover drag the character away.
             if state.fly and UIRefs.setFlyToggle then UIRefs.setFlyToggle(false) end
             clearLongJump()
             local rootToPivot = root.CFrame:ToObjectSpace(char:GetPivot())
@@ -5237,8 +5645,8 @@ do
             char:PivotTo(desiredRoot * rootToPivot)
             antiFlingGuard.safePivot = char:GetPivot()
             antiFlingGuard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
-            UIRefs.Status.Text = kind == "map" and (targetIsPlayer and "TP Map: landed near round player" or "TP Map: landed on active map")
-                or "TP Lobby: landed at lobby"
+            UIRefs.Status.Text = kind == "map" and "TP Map: moved to map spawn"
+                or "TP Lobby: moved to lobby spawn"
         end)
         teleportBusy = false
         if not ok then
@@ -5403,7 +5811,9 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     values.aimRadius = 115
     values.aimSmooth = 9
     values.aimLeadMs = 140
+    values.jumpLeadMs = 115
     if UIRefs.setAimLead then UIRefs.setAimLead(140) end
+    if UIRefs.setJumpAimLead then UIRefs.setJumpAimLead(115) end
     if UIRefs.setAimRadius then UIRefs.setAimRadius(115) end
     if UIRefs.setAimSmooth then UIRefs.setAimSmooth(9) end
     if UIRefs.setAimVisibleToggle then UIRefs.setAimVisibleToggle(true) end
