@@ -1,4 +1,16 @@
---// ScriptMM2 V1.0.2 PC — YARHM task.wait cycle and reload cleanup
+-- ScriptMM2 V1.0.3 PC: self-contained installer + complete current program.
+-- Spin Speed update: adjustable rotation; Spin keeps turning while walking in Shift Lock.
+-- Run this file once. Settings > Auto Run on Rejoin saves ON/OFF.
+-- For fresh Roblox joins, move the generated ScriptMM2_AutoRun.lua from your
+-- executor's workspace into its Autoexec folder. Executor attachment is required.
+-- The long string contains the editable full program, used for its local cache.
+local program = [====[
+--// ScriptMM2 V1.0.3 PC — saved, cancellable auto-run on rejoin
+--// Spin Speed: 5-120 rad/s; preserves movement when Shift Lock is on.
+--// Fresh joins: run once, move the generated workspace/ScriptMM2_AutoRun.lua
+--// into your executor's Autoexec folder; leave its source/settings in workspace.
+--// Settings > Auto Run on Rejoin controls persistence. X / Unload saves OFF.
+--// Previous YARHM task.wait cycle and reload cleanup are preserved.
 --// Separate Heartbeat detection and self-recovery; normal players stay collidable.
 --// No Anchor; preserving keyboard movement; client-only mitigation.
 --// ScriptMM2 V1.0 PC
@@ -21,9 +33,11 @@
 --// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
 --// Client menu. Body AimLock; YARHM Fling for roles and a selected player.
 
-local VERSION = "V1.0.2"
+local VERSION = "V1.0.3"
 local PC_ONLY_BUILD = true -- V1.0: Android/mobile branch retired
 local UIRefs = {}
+UIRefs.AutoRunSource, UIRefs.AutomaticLaunch = ...
+if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
@@ -132,6 +146,7 @@ local function setupMenuAudio()
     end
 end
 
+while not Players.LocalPlayer do task.wait() end
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
@@ -139,9 +154,10 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 do
     for _, oldGui in ipairs(PlayerGui:GetChildren()) do
         if oldGui:IsA("ScreenGui") and oldGui.Name == "ModMenuFromZero" then
+            if UIRefs.AutomaticLaunch then return end -- another loader already started the menu
             local previousUnload = oldGui:FindFirstChild("ScriptMM2Unload")
             if previousUnload and previousUnload:IsA("BindableFunction") then
-                pcall(function() previousUnload:Invoke() end)
+                pcall(function() previousUnload:Invoke("reload") end)
             elseif type(getconnections) == "function" then
                 -- Compatibility with V1.0/V1.0.1, which only expose an Unload button.
                 local button = oldGui:FindFirstChild("Unload", true)
@@ -170,6 +186,188 @@ do
 end
 
 task.spawn(setupMenuAudio)
+
+--// Saved auto-run. Queued/Autoexec loaders read OFF again in the next session.
+--// BEGIN SCRIPTMM2 AUTORUN
+do
+    local scope = tostring(LocalPlayer.UserId) .. "_" .. tostring(game.GameId > 0 and game.GameId or game.PlaceId)
+    local settingsPath = "ScriptMM2_AutoRun_" .. scope .. ".txt"
+    local sourcePath = "ScriptMM2_AutoRun_" .. scope .. "_source.lua"
+    local loaderPath = "ScriptMM2_AutoRun.lua"
+    local env = type(shared) == "table" and shared or getfenv(0)
+    if type(getgenv) == "function" then
+        local ok, value = pcall(getgenv)
+        if ok and type(value) == "table" then env = value end
+    end
+    if type(env.ScriptMM2AutoRun) ~= "table" then env.ScriptMM2AutoRun = {} end
+    local runtime = env.ScriptMM2AutoRun[scope]
+    if type(runtime) ~= "table" then
+        runtime = {}
+        env.ScriptMM2AutoRun[scope] = runtime
+    end
+    local A = {enabled = false, desired = false, busy = false, revision = 0,
+        ready = false, disposed = false, status = "Auto Run is OFF.", runtime = runtime}
+    UIRefs.AutoRun = A
+
+    -- This stays small: the current complete source is cached locally, not fetched
+    -- from an older GitHub revision. Scope checks avoid loading in another game/account.
+    A.bootstrap = string.format([==[
+-- ScriptMM2 automatic bootstrap v1
+do
+    if not game:IsLoaded() then game.Loaded:Wait() end
+    local expectedGame, expectedPlace, expectedUser = %s, %s, %s
+    if expectedGame > 0 then
+        if game.GameId ~= expectedGame then return end
+    elseif game.PlaceId ~= expectedPlace then return end
+    local players = game:GetService("Players")
+    while not players.LocalPlayer do task.wait() end
+    local player = players.LocalPlayer
+    if player.UserId ~= expectedUser or type(readfile) ~= "function" then return end
+    local function allowed()
+        local ok, saved = pcall(readfile, %q)
+        return ok and saved == "1"
+    end
+    if not allowed() then return end
+    local env = type(shared) == "table" and shared or getfenv(0)
+    if type(getgenv) == "function" then
+        local ok, value = pcall(getgenv)
+        if ok and type(value) == "table" then env = value end
+    end
+    if type(env.ScriptMM2AutoRun) ~= "table" then env.ScriptMM2AutoRun = {} end
+    local key = %q
+    local runtime = env.ScriptMM2AutoRun[key]
+    if type(runtime) ~= "table" then
+        runtime = {}
+        env.ScriptMM2AutoRun[key] = runtime
+    end
+    if runtime.loading or runtime.enabled == false then return end
+    local gui = player:WaitForChild("PlayerGui")
+    if gui:FindFirstChild("ModMenuFromZero") or not allowed() then return end
+    -- Check again after WaitForChild, which can let another loader start first.
+    if runtime.loading or runtime.enabled == false then return end
+    runtime.loading = true
+    local ok, err = pcall(function()
+        local source = readfile(%q)
+        if type(source) ~= "string" or source == "" then error("Cached source is missing") end
+        local run, compileError = loadstring(source, "@ScriptMM2_AutoRun")
+        if type(run) ~= "function" then error(compileError or "Could not compile cached source") end
+        if allowed() and runtime.enabled ~= false then run(source, true) end
+    end)
+    runtime.loading = false
+    if not ok then warn("[ScriptMM2 AUTO] " .. tostring(err)) end
+end
+]==], tostring(game.GameId), tostring(game.PlaceId), tostring(LocalPlayer.UserId),
+        settingsPath, scope, sourcePath)
+
+    local queue = type(queue_on_teleport) == "function" and queue_on_teleport
+        or type(queueonteleport) == "function" and queueonteleport or nil
+    if not queue and type(syn) == "table" and type(syn.queue_on_teleport) == "function" then
+        queue = syn.queue_on_teleport
+    end
+    if not queue and type(fluxus) == "table" and type(fluxus.queue_on_teleport) == "function" then
+        queue = fluxus.queue_on_teleport
+    end
+
+    local function paint()
+        if A.disposed then return end
+        if UIRefs.autoRunButton then
+            UIRefs.autoRunButton.Text = "Auto Run on Rejoin" .. (A.enabled and "   [ON]" or "   [OFF]")
+            if UIRefs.paintAutoRun then UIRefs.paintAutoRun(A.enabled) end
+        end
+        if UIRefs.autoRunStatus then UIRefs.autoRunStatus.Text = A.status end
+    end
+    A.paint = paint
+
+    local function save(path, value)
+        if type(writefile) ~= "function" or type(readfile) ~= "function" then
+            return false, "Auto Run needs readfile and writefile in your executor."
+        end
+        local ok, result = pcall(writefile, path, value)
+        if not ok or result == false then return false, "Auto Run could not save its files." end
+        local readOK, saved = pcall(readfile, path)
+        if not readOK or saved ~= value then return false, "Auto Run could not verify its saved files." end
+        return true
+    end
+
+    function A.setEnabled(enabled)
+        A.desired = enabled == true
+        A.revision = A.revision + 1
+        -- OFF takes effect in this VM immediately, including a waiting bootstrap.
+        if not A.desired then A.enabled = false; runtime.enabled = false end
+        if A.busy or A.disposed then return end
+        A.busy = true
+        repeat
+            local revision, wanted = A.revision, A.desired
+            A.status = "Saving Auto Run..."
+            paint()
+            local ok, message = true, nil
+            if wanted and not A.ready then
+                if type(UIRefs.AutoRunSource) ~= "string" or #UIRefs.AutoRunSource < 128 then
+                    ok, message = false, "Auto Run needs this complete .lua file."
+                else
+                    ok, message = save(sourcePath, UIRefs.AutoRunSource)
+                    if ok and not A.disposed and revision == A.revision then
+                        ok, message = save(loaderPath, A.bootstrap)
+                    end
+                    A.ready = ok and not A.disposed and revision == A.revision
+                end
+            end
+            if A.disposed then break end
+            if revision == A.revision then
+                if ok then ok, message = save(settingsPath, wanted and "1" or "0") end
+                if A.disposed then break end
+                if revision == A.revision then
+                    A.enabled = ok and wanted
+                    runtime.enabled = A.enabled
+                    if not ok then
+                        A.status = message
+                        warn("[ScriptMM2 AUTO] " .. tostring(message))
+                    elseif not wanted then
+                        A.status = "Auto Run is OFF. Future joins will skip this menu."
+                    else
+                        local queued = runtime.queued == A.bootstrap
+                        if queue and not queued then
+                            local queueOK, result = pcall(queue, A.bootstrap)
+                            queued = queueOK and result ~= false
+                            if queued then runtime.queued = A.bootstrap end
+                        end
+                        if A.disposed then break end
+                        if revision == A.revision then
+                            A.status = queued and "ON: server transfers are queued. Fresh joins need Autoexec."
+                                or "ON: saved loader is ready. Put it in your executor's Autoexec."
+                        end
+                    end
+                end
+            end
+        until A.disposed or revision == A.revision
+        A.busy = false
+        if A.stopRequested then A.disposed = true end
+        paint()
+    end
+
+    function A.start()
+        local ok, saved = false, nil
+        if type(readfile) == "function" then ok, saved = pcall(readfile, settingsPath) end
+        local wanted = ok and saved == "1"
+        if not ok and type(isfile) == "function" then
+            local existsOK, exists = pcall(isfile, settingsPath)
+            wanted = existsOK and exists == false -- first run defaults to ON
+        end
+        A.setEnabled(wanted)
+    end
+
+    function A.stop(preserveSetting)
+        if preserveSetting then
+            A.disposed = true -- a manual script reload preserves the saved preference
+        else
+            A.stopRequested = true
+            A.setEnabled(false)
+            -- A worker already saving ON finishes by writing the newest OFF request.
+            if not A.busy then A.disposed = true end
+        end
+    end
+end
+--// END SCRIPTMM2 AUTORUN
 
 local CONFIG = {
     DefaultWalkSpeed = 16,
@@ -280,6 +478,7 @@ local values = {
     aimSmooth = 9, -- higher = faster camera tracking
     aimLeadMs = 140, -- B AimLock: predictive horizontal lead (0 disables)
     jumpLeadMs = 115, -- B AimLock: airborne vertical prediction (0 disables)
+    spinSpeed = 15, -- ordinary Spin Y-axis rad/s; configurable in PLAYER
 }
 
 local connections = {}
@@ -329,6 +528,7 @@ UIRefs.setCoinFarmSpeedSlider = nil
 UIRefs.setFOVSlider = nil
 UIRefs.setStrafeSpeedSlider = nil
 UIRefs.setLongJumpSpeedSlider = nil
+UIRefs.setSpinSpeedSlider = nil
 
 local enableFullBright
 local disableFullBright
@@ -665,10 +865,18 @@ local function getRoot()
 end
 
 local function stopRegularSpin()
-    if spinState.root and spinState.root.Parent and not flingBusy then
-        pcall(function() spinState.root.AssemblyAngularVelocity = spinState.velocity end)
+    if not flingBusy then
+        if spinState.root and spinState.root.Parent then
+            pcall(function() spinState.root.AssemblyAngularVelocity = spinState.velocity or Vector3.zero end)
+        end
+        -- Shift Lock's camera rotation should work normally after Spin is OFF.
+        -- Do not override Fly/Fling ownership of AutoRotate during their transitions.
+        if spinState.humanoid and spinState.humanoid.Parent and not state.fly then
+            pcall(function() spinState.humanoid.AutoRotate = spinState.autoRotate end)
+        end
     end
     spinState.root, spinState.velocity = nil, nil
+    spinState.humanoid, spinState.autoRotate = nil, nil
 end
 
 local function isAliveCharacter(player)
@@ -762,6 +970,17 @@ local Localization = {language = "en", sources = setmetatable({}, {__mode = "k"}
     rendered = setmetatable({}, {__mode = "k"}), busy = setmetatable({}, {__mode = "k"})}
 do
 local TEXT_TRANSLATIONS = {
+    ["Auto Run on Rejoin"] = {ru="Автозапуск при перезаходе", uk="Автозапуск при повторному вході", de="Autostart beim erneuten Beitritt"},
+    ["Auto Run is OFF."] = {ru="Автозапуск выключен.", uk="Автозапуск вимкнено.", de="Autostart ist AUS."},
+    ["Auto Run is OFF. Future joins will skip this menu."] = {ru="Автозапуск выключен. При следующем входе меню не запустится.", uk="Автозапуск вимкнено. При наступному вході меню не запуститься.", de="Autostart ist AUS. Bei künftigen Beitritten bleibt das Menü aus."},
+    ["Saving Auto Run..."] = {ru="Сохраняю автозапуск...", uk="Зберігаю автозапуск...", de="Autostart wird gespeichert..."},
+    ["Auto Run needs readfile and writefile in your executor."] = {ru="Для автозапуска исполнителю нужны readfile и writefile.", uk="Для автозапуску виконавцю потрібні readfile та writefile.", de="Autostart benötigt readfile und writefile im Executor."},
+    ["Auto Run could not save its files."] = {ru="Не удалось сохранить файлы автозапуска.", uk="Не вдалося зберегти файли автозапуску.", de="Autostart-Dateien konnten nicht gespeichert werden."},
+    ["Auto Run could not verify its saved files."] = {ru="Не удалось проверить сохранение автозапуска.", uk="Не вдалося перевірити збереження автозапуску.", de="Gespeicherte Autostart-Dateien konnten nicht überprüft werden."},
+    ["Auto Run needs this complete .lua file."] = {ru="Для автозапуска нужен этот .lua файл целиком.", uk="Для автозапуску потрібен цей .lua файл повністю.", de="Autostart benötigt diese vollständige .lua-Datei."},
+    ["ON: server transfers are queued. Fresh joins need Autoexec."] = {ru="ВКЛ: переходы между серверами готовы. Для нового входа нужен Autoexec.", uk="УВІМК: переходи між серверами готові. Для нового входу потрібен Autoexec.", de="AN: Serverwechsel vorbereitet. Neue Beitritte benötigen Autoexec."},
+    ["ON: saved loader is ready. Put it in your executor's Autoexec."] = {ru="ВКЛ: загрузчик сохранён. Перенеси его в Autoexec исполнителя.", uk="УВІМК: завантажувач збережено. Перенеси його в Autoexec виконавця.", de="AN: Loader gespeichert. Lege ihn im Autoexec-Ordner ab."},
+    ["For a fresh join: move ScriptMM2_AutoRun.lua from the executor's workspace to its Autoexec folder once. Keep the cached source/settings in workspace. The executor must attach after joining. X / Unload Menu also saves OFF."] = {ru="Для нового входа один раз перенеси ScriptMM2_AutoRun.lua из workspace исполнителя в его Autoexec. Кэш и настройки оставь в workspace. После входа подключи исполнитель. X / Выгрузить меню тоже сохраняют ВЫКЛ.", uk="Для нового входу один раз перенеси ScriptMM2_AutoRun.lua з workspace виконавця до його Autoexec. Кеш і налаштування залиш у workspace. Після входу підключи виконавець. X / Вивантажити меню також зберігають ВИМК.", de="Für neue Beitritte ScriptMM2_AutoRun.lua einmal von workspace nach Autoexec verschieben. Quelltext/Einstellungen in workspace lassen und Executor nach dem Beitritt verbinden. X / Menü entladen speichert AUS."},
     ["MAIN"] = {ru="ГЛАВНАЯ", uk="ГОЛОВНА", de="START"},
     ["PLAYER"] = {ru="ИГРОК", uk="ГРАВЕЦЬ", de="SPIELER"},
     ["UTILITIES"] = {ru="УТИЛИТЫ", uk="УТИЛІТИ", de="TOOLS"},
@@ -925,6 +1144,7 @@ local TEXT_TRANSLATIONS = {
     ["FullBright"] = {ru="Полная яркость", uk="Повна яскравість", de="Volle Helligkeit"},
     ["Low Gravity"] = {ru="Низкая гравитация", uk="Низька гравітація", de="Niedrige Schwerkraft"},
     ["Spin"] = {ru="Вращение", uk="Обертання", de="Drehen"},
+    ["Spin Speed"] = {ru="Скорость вращения", uk="Швидкість обертання", de="Drehgeschwindigkeit"},
     ["ESP Players"] = {ru="ESP игроков", uk="ESP гравців", de="Spieler-ESP"},
     ["Role ESP"] = {ru="ESP ролей", uk="ESP ролей", de="Rollen-ESP"},
     ["Role HUD"] = {ru="HUD моей роли", uk="HUD моєї ролі", de="Rollen-HUD"},
@@ -2162,6 +2382,10 @@ UIRefs.spinButton, UIRefs.setSpinToggle = addToggle("Spin", 23, function(enabled
     state.spin = enabled
     if not enabled then stopRegularSpin() end
 end)
+-- Movement control (reparented to PLAYER along with Spin below).
+UIRefs._unused, UIRefs.setSpinSpeedSlider = addSlider("Spin Speed", 5, 120, values.spinSpeed, 12.35, function(v)
+    values.spinSpeed = v
+end)
 
 UIRefs.espButton = nil
 UIRefs.setESPToggle = nil
@@ -2661,6 +2885,36 @@ UIRefs.unloadButton = create("TextButton", {
 }, UIRefs.Content)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.unloadButton)
 
+--// Auto-run belongs to Settings, independently of gameplay toggles.
+do
+    UIRefs.autoRunButton = create("TextButton", {
+        Name = "AutoRunOnRejoin", LayoutOrder = 10,
+        Size = UDim2.new(1, -4, 0, 40), BackgroundColor3 = UITheme.item,
+        BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamSemibold,
+        TextSize = 13, TextColor3 = UITheme.text, Text = "Auto Run on Rejoin   [OFF]",
+    }, UIRefs.SettingsContent)
+    create("UICorner", {CornerRadius = UDim.new(0, 9)}, UIRefs.autoRunButton)
+    create("UIStroke", {Color = UITheme.border, Thickness = 1, Transparency = 0.45}, UIRefs.autoRunButton)
+    UIRefs.paintAutoRun = function(enabled) setButtonVisual(UIRefs.autoRunButton, enabled) end
+    UIRefs.autoRunStatus = create("TextLabel", {
+        Name = "AutoRunStatus", LayoutOrder = 11, Size = UDim2.new(1, -4, 0, 43),
+        BackgroundTransparency = 1, Font = Enum.Font.GothamSemibold, TextSize = 12,
+        TextColor3 = UITheme.accent, TextXAlignment = Enum.TextXAlignment.Left,
+        TextWrapped = true, Text = "Auto Run is OFF.",
+    }, UIRefs.SettingsContent)
+    create("TextLabel", {
+        Name = "AutoRunHint", LayoutOrder = 12, Size = UDim2.new(1, -4, 0, 92),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham, TextSize = 12,
+        TextColor3 = UITheme.muted, TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
+        Text = "For a fresh join: move ScriptMM2_AutoRun.lua from the executor's workspace to its Autoexec folder once. Keep the cached source/settings in workspace. The executor must attach after joining. X / Unload Menu also saves OFF.",
+    }, UIRefs.SettingsContent)
+    addConnection(UIRefs.autoRunButton.MouseButton1Click:Connect(function()
+        if state.unloaded then return end
+        UIRefs.AutoRun.setEnabled(not UIRefs.AutoRun.desired)
+        playMenuSound(UIRefs.AutoRun.enabled and "toggleOn" or "toggleOff")
+    end))
+    UIRefs.AutoRun.paint()
+end
 --// Reparent the existing MAIN controls into their category pages. No callbacks
 --// are recreated; UIRefs still point to the original controls and slider states.
 do
@@ -5387,12 +5641,17 @@ local function updateMovement(deltaTime)
         Workspace.Gravity = 60
     end
 
-    if root and humanoid and humanoid.Health > 0 and not root.Anchored and state.spin and not state.fly then
-        if spinState.root ~= root then
+    if root and humanoid and humanoid.Health > 0 and not root.Anchored and state.spin
+        and not state.fly and not flingBusy and not humanoid.Sit and not humanoid.PlatformStand then
+        if spinState.root ~= root or spinState.humanoid ~= humanoid then
             stopRegularSpin()
             spinState.root, spinState.velocity = root, root.AssemblyAngularVelocity
+            spinState.humanoid, spinState.autoRotate = humanoid, humanoid.AutoRotate
         end
-        root.AssemblyAngularVelocity = Vector3.new(0, 15, 0) -- V1.0: slightly faster ordinary Spin
+        -- Shift Lock/normal movement may otherwise keep turning the root toward the camera.
+        -- Preserve Humanoid movement; disable only its automatic character orientation.
+        humanoid.AutoRotate = false
+        root.AssemblyAngularVelocity = Vector3.new(0, values.spinSpeed, 0)
     elseif spinState.root then
         stopRegularSpin()
     end
@@ -5841,10 +6100,11 @@ do
     end))
 end
 
-local function unload()
+local function unload(reason)
     if state.unloaded then
         return
     end
+    if UIRefs.AutoRun then UIRefs.AutoRun.stop(reason == "reload") end
     if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
     if UIRefs.stopBring then UIRefs.stopBring() end
     if UIRefs.clearAttackSelection then UIRefs.clearAttackSelection() end
@@ -6350,10 +6610,14 @@ end))
 -- X plays the same deflation before unloading all active features.
 addConnection(UIRefs.Close.MouseButton1Click:Connect(function()
     if state.unloaded then return end
+    if UIRefs.AutoRun then UIRefs.AutoRun.stop(false) end
     setMainVisible(false)
     task.delay(0.32, unload)
 end))
 addConnection(UIRefs.unloadButton.MouseButton1Click:Connect(unload))
+
+--// Persist/arm after all UI and cleanup callbacks exist, before role RPCs can yield.
+UIRefs.AutoRun.start()
 
 --// PC-only UI
 UIRefs.Title.Text = "SCRIPTMM2   /   " .. VERSION .. "  •  PC"
@@ -6370,3 +6634,7 @@ setCharacterMovement()
 refreshRoles()
 
 print("[ScriptMM2 PC] " .. VERSION .. " loaded successfully. PC-only build; YARHM SkidFling ready.")
+]====]
+local run, compileError = loadstring(program, "@ScriptMM2_V1.0.3")
+if type(run) ~= "function" then error(compileError or "Could not compile ScriptMM2", 0) end
+run(program, false)
