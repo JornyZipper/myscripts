@@ -1,3 +1,6 @@
+--// ScriptMM2 V1.0.2 PC — YARHM task.wait cycle and reload cleanup
+--// Separate Heartbeat detection and self-recovery; normal players stay collidable.
+--// No Anchor; preserving keyboard movement; client-only mitigation.
 --// ScriptMM2 V1.0 PC
 --// PC UPDATE
 --// • Restored selected-player Fling in SPECTATE.
@@ -6,14 +9,19 @@
 --// • Existing PC Silent Revolver, Role HUD, Coin Farm, ESP and TP fixes preserved.
 
 --// ScriptMM2
---// V1.0 PC: AntiFling ground-safe fix (reduced collision pairs; preserves vertical floor physics).
+--// V1.0 PC: YARHM-style two-loop AntiFling; no Stone/Contact Lock.
+--// V1.0.2 PC: original-style SkidFling cycle; no forced PlatformStand/root collider.
+--// Previous menu instances are unloaded before creating a new one.
+--// Active Fling displays actual step count and observed target/own motion.
+--// Fling restores the click position, camera, void height, collisions and Fly state.
+--// AntiFling detection/neutralization pause during own Fling to avoid self-interference.
 --// V0.9.37: adaptive B AimLock prediction for jump spam and rapid direction changes.
 --// V0.9.36: four-language interface, English default, hot-switch Language tab.
 --// UI and callback references are grouped to keep the root chunk below Luau register limits.
 --// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
---// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
+--// Client menu. Body AimLock; YARHM Fling for roles and a selected player.
 
-local VERSION = "V1.0"
+local VERSION = "V1.0.2"
 local PC_ONLY_BUILD = true -- V1.0: Android/mobile branch retired
 local UIRefs = {}
 
@@ -124,10 +132,44 @@ local function setupMenuAudio()
     end
 end
 
-task.spawn(setupMenuAudio)
-
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+--// Stop our earlier copy before its AntiFling/Fly callbacks can fight this one.
+do
+    for _, oldGui in ipairs(PlayerGui:GetChildren()) do
+        if oldGui:IsA("ScreenGui") and oldGui.Name == "ModMenuFromZero" then
+            local previousUnload = oldGui:FindFirstChild("ScriptMM2Unload")
+            if previousUnload and previousUnload:IsA("BindableFunction") then
+                pcall(function() previousUnload:Invoke() end)
+            elseif type(getconnections) == "function" then
+                -- Compatibility with V1.0/V1.0.1, which only expose an Unload button.
+                local button = oldGui:FindFirstChild("Unload", true)
+                if button and button:IsA("TextButton") then
+                    local listOK, list = pcall(getconnections, button.MouseButton1Click)
+                    if listOK and type(list) == "table" then
+                        for _, connection in ipairs(list) do
+                            local fnOK, callback = pcall(function() return connection.Function end)
+                            if fnOK and type(callback) == "function" then pcall(callback) end
+                            if not oldGui.Parent then break end
+                        end
+                    end
+                end
+            end
+            if oldGui.Parent then
+                local message = "Close the previous ScriptMM2 with X, then run this file again."
+                pcall(function()
+                    game:GetService("StarterGui"):SetCore("SendNotification", {
+                        Title = "ScriptMM2", Text = message, Duration = 8,
+                    })
+                end)
+                error(message, 0)
+            end
+        end
+    end
+end
+
+task.spawn(setupMenuAudio)
 
 local CONFIG = {
     DefaultWalkSpeed = 16,
@@ -169,33 +211,24 @@ local CONFIG = {
     -- Revolver pickup uses H to avoid a bind conflict.
     RevolverPickupKey = Enum.KeyCode.H,
     RevolverPickupTimeout = 1.8,
-    -- Local physics contact only: the server retains authority over other players.
-    -- Very large angular/linear velocities tunnel through collision geometry.
-    FlingSpeed = 440,
-    FlingContactSpeed = 110,
-    FlingLinearForce = 1e7,
-    FlingResponseSpeed = 32,
-    FlingResponseGrace = 2.0,
-    FlingSpinSpeed = 1900,
-    FlingInsideRealignInterval = 0.20,
-    FlingInsideMaxDrift = 2.4,
-    FlingInsideFollowSpeed = 90,
-    FlingSpinTorque = 1e8,
-    FlingMapSearchRadius = 120,
-    FlingMapMaxSpan = 2048,
-    FlingExitMargin = 20,
-    FlingRoofMargin = 12,
-    FlingExitConfirmTime = 0.15,
+    -- SkidFling parameters from YARHM; actual remote motion depends on server physics.
+    FlingAttemptDuration = 0, -- 0: until stopped / target launched; >0: timeout in seconds
+    FlingLinearSpeed = 9e7,
+    FlingLiftMultiplier = 10,
+    FlingBodySpeed = 9e8,
+    FlingSpinSpeed = 9e8,
+    FlingSlowTargetSpeed = 50,
+    FlingLaunchedSpeed = 500,
+    FlingStatusInterval = 0.25,
     FlingRoleWait = 3.0,
     FlingTargetWait = 3.0,
-    FlingNoContactTimeout = 3.0,
-    FlingNoResponseTimeout = 7.0,
-    FlingRealignInterval = 0.55, -- legacy edge-mode setting (unused in Inside Fling)
-    -- A bounded final lunge on manual release; extreme velocities tunnel through bodies.
-    FlingReleaseSpeed = 390,
-    FlingReleaseTime = 0.16,
-    AntiFlingScanInterval = 0.25, -- avoid building collision constraints for distant players
+    AntiFlingScanInterval = 0.04, -- fast nearby-player threat scan
     AntiFlingNearbyRadius = 85,
+    AntiFlingStoneRadius = 18, -- monitor fast/spinning players before contact
+    AntiFlingStoneContactRadius = 7.0, -- close range only raises sensitivity; proximity alone never locks
+    AntiFlingStoneLinearThreat = 52,
+    AntiFlingStoneAngularThreat = 24,
+    AntiFlingStoneHoldTime = 0.55,
     AntiFlingTeleportDistance = 12,
     AntiFlingTeleportGrace = 0.45,
 }
@@ -770,8 +803,8 @@ local TEXT_TRANSLATIONS = {
     ["Aim visibility check"] = {ru="Проверка видимости", uk="Перевірка видимості", de="Sichtprüfung"},
     ["Wallbang (experimental)"] = {ru="Стрельба через стены (эксперимент)", uk="Стрільба крізь стіни (експеримент)", de="Wallbang (experimentell)"},
     ["AntiFling"] = {ru="Антифлинг", uk="Антифлінг", de="Anti-Fling"},
-    ["Inside Fling Murderer"] = {ru="Флинг убийцы", uk="Флінг убивці", de="Mörder wegschleudern"},
-    ["Inside Fling Sheriff"] = {ru="Флинг шерифа", uk="Флінг шерифа", de="Sheriff wegschleudern"},
+    ["YARHM Fling Murderer"] = {ru="YARHM: флинг убийцы", uk="YARHM: флінг убивці", de="YARHM: Mörder schleudern"},
+    ["YARHM Fling Sheriff"] = {ru="YARHM: флинг шерифа", uk="YARHM: флінг шерифа", de="YARHM: Sheriff schleudern"},
     ["WATCH A ROLE"] = {ru="НАБЛЮДЕНИЕ ЗА РОЛЬЮ", uk="СПОСТЕРЕЖЕННЯ ЗА РОЛЛЮ", de="ROLLE BEOBACHTEN"},
     ["Spectate Murderer"] = {ru="Смотреть за убийцей", uk="Дивитися за вбивцею", de="Mörder beobachten"},
     ["Spectate Sheriff"] = {ru="Смотреть за шерифом", uk="Дивитися за шерифом", de="Sheriff beobachten"},
@@ -787,7 +820,7 @@ local TEXT_TRANSLATIONS = {
     ["Select a player. No arbitrary instant kill or server bypass."] = {ru="Выбери игрока. Мгновенное убийство и обход сервера недоступны.", uk="Обери гравця. Миттєве вбивство й обхід сервера недоступні.", de="Wähle einen Spieler. Kein sofortiger Kill oder Server-Bypass."},
     ["Select a player. Normal weapon only."] = {ru="Выбери игрока. Только обычное оружие.", uk="Обери гравця. Лише звичайна зброя.", de="Wähle einen Spieler. Nur normale Waffen."},
     ["Attack Selected [K]"] = {ru="Атаковать выбранного [K]", uk="Атакувати вибраного [K]", de="Ausgewählten angreifen [K]"},
-    ["FLING: SELECT ONE PLAYER"] = {ru="ФЛИНГ: ВЫБЕРИ ОДНОГО ИГРОКА", uk="ФЛІНГ: ОБЕРИ ОДНОГО ГРАВЦЯ", de="FLING: EINEN SPIELER WÄHLEN"},
+    ["YARHM FLING: SELECT ONE PLAYER"] = {ru="ФЛИНГ: ВЫБЕРИ ОДНОГО ИГРОКА", uk="ФЛІНГ: ОБЕРИ ОДНОГО ГРАВЦЯ", de="FLING: EINEN SPIELER WÄHLEN"},
     ["Refresh Roles"] = {ru="Обновить роли", uk="Оновити ролі", de="Rollen aktualisieren"},
     ["Grab Revolver (return if collected)"] = {ru="Взять револьвер (вернуться после подбора)", uk="Взяти револьвер (повернутися після підбору)", de="Revolver holen (zurück bei Aufnahme)"},
     ["Grab Revolver (return if collected) [H]"] = {ru="Взять револьвер (возврат при подборе) [H]", uk="Взяти револьвер (повернення при підборі) [H]", de="Revolver holen (zurück bei Aufnahme) [H]"},
@@ -954,6 +987,30 @@ local TEXT_TRANSLATIONS = {
     ["No living player roots currently replicated."] = {ru="Сейчас нет доступных позиций живых игроков.", uk="Зараз немає доступних позицій живих гравців.", de="Derzeit keine Positionen lebender Spieler repliziert."},
     ["Server registration / damage: UNKNOWN (not observed)"] = {ru="Регистрация попаданий сервером / урон: НЕИЗВЕСТНО (не наблюдается)", uk="Реєстрація влучань сервером / шкода: НЕВІДОМО (не спостерігається)", de="Servertreffer / Schaden: UNBEKANNT (nicht beobachtet)"},
     [" • local contact attempt"] = {ru=" • локальная попытка столкновения", uk=" • локальна спроба зіткнення", de=" • lokaler Kontaktversuch"},
+    ["YARHM Fling Selected"] = {ru="YARHM: флинг выбранного", uk="YARHM: флінг обраного", de="YARHM: gewähltes Ziel schleudern"},
+    ["Stop Fling Selected"] = {ru="Остановить флинг выбранного", uk="Зупинити флінг обраного", de="Gewählten Fling stoppen"},
+    ["Stop Murderer Fling"] = {ru="Остановить флинг убийцы", uk="Зупинити флінг убивці", de="Mörder-Fling stoppen"},
+    ["Stop Sheriff Fling"] = {ru="Остановить флинг шерифа", uk="Зупинити флінг шерифа", de="Sheriff-Fling stoppen"},
+    ["Select a player below, then press YARHM Fling Selected."] = {ru="Выбери игрока ниже и нажми YARHM: флинг выбранного.", uk="Обери гравця нижче й натисни YARHM: флінг обраного.", de="Wähle unten einen Spieler und starte YARHM-Fling."},
+    ["YARHM FLING: SELECT ONE PLAYER"] = {ru="YARHM ФЛИНГ: ВЫБЕРИ ИГРОКА", uk="YARHM ФЛІНГ: ОБЕРИ ГРАВЦЯ", de="YARHM-FLING: SPIELER WÄHLEN"},
+    ["Fling: finish teleport / weapon action first"] = {ru="Флинг: дождись окончания ТП / действия с оружием", uk="Флінг: дочекайся завершення ТП / дії зі зброєю", de="Fling: erst TP / Waffenaktion beenden"},
+    ["Fling: target is seated"] = {ru="Флинг: цель сидит", uk="Флінг: ціль сидить", de="Fling: Ziel sitzt"},
+    ["Fling stopped • returned"] = {ru="Флинг остановлен • вернулся", uk="Флінг зупинено • повернувся", de="Fling gestoppt • zurückgekehrt"},
+    ["Fling stopped"] = {ru="Флинг остановлен", uk="Флінг зупинено", de="Fling gestoppt"},
+    ["Fling stopped: own character needs recovery"] = {ru="Флинг остановлен: персонажу нужно восстановление", uk="Флінг зупинено: персонажу потрібне відновлення", de="Fling gestoppt: eigener Charakter muss sich erholen"},
+    ["Fling: target left / died / role changed"] = {ru="Флинг: цель вышла / погибла / сменила роль", uk="Флінг: ціль вийшла / загинула / змінила роль", de="Fling: Ziel weg / tot / Rolle geändert"},
+    ["Fling: target became anchored / seated"] = {ru="Флинг: цель закреплена / села", uk="Флінг: ціль закріплена / сіла", de="Fling: Ziel verankert / sitzt"},
+    ["Fling: target accelerated (observed locally)"] = {ru="Флинг: цель резко ускорилась (видно на клиенте)", uk="Флінг: ціль різко прискорилася (видно на клієнті)", de="Fling: Ziel beschleunigt (lokal beobachtet)"},
+    ["Fling: target reached the void (observed locally)"] = {ru="Флинг: цель упала за карту (видно на клиенте)", uk="Флінг: ціль упала за карту (видно на клієнті)", de="Fling: Ziel im Void (lokal beobachtet)"},
+    ["Steps: "] = {ru="Шаги: ", uk="Кроки: ", de="Schritte: "},
+    [" steps • shift "] = {ru=" шагов • смещение ", uk=" кроків • зміщення ", de=" Schritte • Versatz "},
+    [" • shift: "] = {ru=" • смещение: ", uk=" • зміщення: ", de=" • Versatz: "},
+    [" • target "] = {ru=" • цель ", uk=" • ціль ", de=" • Ziel "},
+    [" • target: "] = {ru=" • цель: ", uk=" • ціль: ", de=" • Ziel: "},
+    ["No target motion observed • "] = {ru="Движения цели не видно • ", uk="Руху цілі не видно • ", de="Keine Zielbewegung • "},
+    ["Target motion observed • "] = {ru="Видно движение цели • ", uk="Видно рух цілі • ", de="Zielbewegung erkannt • "},
+    ["own: "] = {ru="моя скорость: ", uk="моя швидкість: ", de="eigenes Tempo: "},
+    [" • spin: "] = {ru=" • вращение: ", uk=" • обертання: ", de=" • Drehung: "},
     ["TP Player error: "] = {ru="Ошибка ТП к игроку: ", uk="Помилка ТП до гравця: ", de="Spieler-TP-Fehler: "},
 }
 local TEXT_FRAGMENTS = {}
@@ -1912,7 +1969,7 @@ UIRefs.flingMurdererButton = create("TextButton", {
     BackgroundColor3 = Color3.fromRGB(95, 44, 48),
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
-    Text = "Inside Fling Murderer",
+    Text = "YARHM Fling Murderer",
     TextColor3 = Color3.fromRGB(255, 235, 235),
     TextSize = 13,
     AutoButtonColor = false,
@@ -1926,7 +1983,7 @@ UIRefs.flingSheriffButton = create("TextButton", {
     BackgroundColor3 = Color3.fromRGB(42, 66, 100),
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
-    Text = "Inside Fling Sheriff",
+    Text = "YARHM Fling Sheriff",
     TextColor3 = Color3.fromRGB(235, 240, 255),
     TextSize = 13,
     AutoButtonColor = false,
@@ -2046,17 +2103,17 @@ do
     create("TextLabel", {
         Name = "FlingSelectTitle", Size = UDim2.new(1, -4, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = "FLING: SELECT ONE PLAYER", TextColor3 = UITheme.muted,
+        Text = "YARHM FLING: SELECT ONE PLAYER", TextColor3 = UITheme.muted,
         TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 19,
     }, UIRefs.SpectateContent)
     UIRefs.flingSelectStatus = create("TextLabel", {
-        Name = "FlingSelectStatus", Size = UDim2.new(1, -4, 0, 44),
+        Name = "FlingSelectStatus", Size = UDim2.new(1, -4, 0, 64),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-        Text = "Select a player below, then press Fling Selected.",
+        Text = "Select a player below, then press YARHM Fling Selected.",
         TextColor3 = Color3.fromRGB(180, 185, 195), TextSize = 12,
         TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 20,
     }, UIRefs.SpectateContent)
-    UIRefs.flingSelectButton = spectateButton("FlingSelectedAction", "Fling Selected [OFF]", 21)
+    UIRefs.flingSelectButton = spectateButton("FlingSelectedAction", "YARHM Fling Selected [OFF]", 21)
     UIRefs.flingPlayerList = create("Frame", {
         Name = "FlingPlayerList", Size = UDim2.new(1, -4, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
@@ -4268,405 +4325,246 @@ do
     end))
 end
 
---// Infer the active map from nearby anchored, collidable geometry. Characters,
---// loose items, oversized backgrounds, and the whole Workspace are excluded.
-local function getFlingMapBounds(position)
-    local candidates, nearbyParts, characters = {}, {}, {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player.Character then characters[player.Character] = true end
-    end
-
-    local function isGeometry(part)
-        return part:IsA("BasePart") and part.Anchored and part.CanCollide
-            and math.max(part.Size.X, part.Size.Y, part.Size.Z) <= CONFIG.FlingMapMaxSpan
-            and not isInCharacter(part, characters)
-    end
-    for _, part in ipairs(Workspace:GetDescendants()) do
-        if isGeometry(part) and (part.Position - position).Magnitude
-            <= CONFIG.FlingMapSearchRadius + part.Size.Magnitude * 0.5 then
-            table.insert(nearbyParts, part)
-            local ancestor = part.Parent
-            while ancestor and ancestor ~= Workspace do
-                if ancestor:IsA("Model") or ancestor:IsA("Folder") then
-                    candidates[ancestor] = (candidates[ancestor] or 0) + 1
-                end
-                ancestor = ancestor.Parent
-            end
-        end
-    end
-
-    local function measure(parts, skipPositionCheck)
-        local low, high, count = nil, nil, 0
-        for _, part in ipairs(parts) do
-            if isGeometry(part) then
-                local half = part.Size * 0.5
-                local right, up, look = part.CFrame.RightVector, part.CFrame.UpVector, part.CFrame.LookVector
-                local extent = Vector3.new(
-                    math.abs(right.X) * half.X + math.abs(up.X) * half.Y + math.abs(look.X) * half.Z,
-                    math.abs(right.Y) * half.X + math.abs(up.Y) * half.Y + math.abs(look.Y) * half.Z,
-                    math.abs(right.Z) * half.X + math.abs(up.Z) * half.Y + math.abs(look.Z) * half.Z
-                )
-                local a, b = part.Position - extent, part.Position + extent
-                low = low and Vector3.new(math.min(low.X, a.X), math.min(low.Y, a.Y), math.min(low.Z, a.Z)) or a
-                high = high and Vector3.new(math.max(high.X, b.X), math.max(high.Y, b.Y), math.max(high.Z, b.Z)) or b
-                count = count + 1
-            end
-        end
-        if not low then return nil end
-        local size = high - low
-        if size.X < 8 or size.Z < 8 or size.X + size.Z < 60
-            or math.max(size.X, size.Z) > CONFIG.FlingMapMaxSpan or size.Y > 1024 then
-            return nil
-        end
-        if not skipPositionCheck and (position.X < low.X - 32 or position.X > high.X + 32
-            or position.Z < low.Z - 32 or position.Z > high.Z + 32
-            or position.Y < low.Y - 32 or position.Y > high.Y + 32) then
-            return nil
-        end
-        return {low = low, high = high, count = count}
-    end
-
-    local ranked = {}
-    local names = {map = true, currentmap = true, activemap = true, normal = true, roundmap = true}
-    for container, hits in pairs(candidates) do
-        local name = string.lower(container.Name):gsub("[^%w]", "")
-        table.insert(ranked, {
-            container = container,
-            score = hits + (names[name] and 500 or 0) + (container:IsA("Model") and 10 or 0),
-        })
-    end
-    table.sort(ranked, function(a, b) return a.score > b.score end)
-    for index = 1, math.min(8, #ranked) do
-        local candidate = ranked[index]
-        local bounds = measure(candidate.container:GetDescendants())
-        if bounds then
-            bounds.name = candidate.container.Name
-            bounds.estimated = Workspace.StreamingEnabled == true
-            if bounds.estimated then
-                bounds.refresh = function()
-                    if not candidate.container.Parent then return end
-                    local updated = measure(candidate.container:GetDescendants(), true)
-                    if updated then
-                        -- New streamed sections can expand the bounds, but
-                        -- unloading old sections must never shrink them.
-                        bounds.low = Vector3.new(math.min(bounds.low.X, updated.low.X),
-                            math.min(bounds.low.Y, updated.low.Y), math.min(bounds.low.Z, updated.low.Z))
-                        bounds.high = Vector3.new(math.max(bounds.high.X, updated.high.X),
-                            math.max(bounds.high.Y, updated.high.Y), math.max(bounds.high.Z, updated.high.Z))
-                    end
-                end
-            end
-            return bounds
-        end
-    end
-    local fallback = measure(nearbyParts)
-    if fallback then
-        fallback.name = "nearby map geometry"
-        fallback.estimated = true
-    end
-    return fallback
-end
-
-local function getFlingExitDirection(bounds, position)
-    local exits = {
-        {distance = math.abs(position.X - bounds.low.X), direction = Vector3.new(-1, 0, 0)},
-        {distance = math.abs(bounds.high.X - position.X), direction = Vector3.new(1, 0, 0)},
-        {distance = math.abs(position.Z - bounds.low.Z), direction = Vector3.new(0, 0, -1)},
-        {distance = math.abs(bounds.high.Z - position.Z), direction = Vector3.new(0, 0, 1)},
-    }
-    table.sort(exits, function(a, b) return a.distance < b.distance end)
-    return exits[1].direction
-end
-
-local function isOutsideFlingMap(bounds, position)
-    local margin = CONFIG.FlingExitMargin
-    -- Height and speed alone do not mean the murderer left the map.
-    return position.X < bounds.low.X - margin or position.X > bounds.high.X + margin
-        or position.Z < bounds.low.Z - margin or position.Z > bounds.high.Z + margin
-end
-
---// Role-based Inside Fling: local spin at target center until user release.
---// Only the server can decide whether another player is displaced.
-stopRoleFling = function(releaseBurst)
+--// SkidFling motion/impulses as used by YARHM 1.20 (Joystickplays).
+--// Reference: https://github.com/Joystickplays/psychic-octo-invention/blob/main/source/yarhm/1.20/yarhm.lua
+--// Independently integrated with this menu's cancellation and character cleanup.
+--// All velocity writes and movers belong to OUR character.
+stopRoleFling = function(_releaseBurst)
     local trip = flingTrip
-    if not trip or trip.finished then
-        return
-    end
+    if not trip or trip.finished then return false end
     trip.finished = true
     if trip.stepConnection then
         trip.stepConnection:Disconnect()
+        trip.stepConnection = nil
     end
-    -- On an intentional button release, make one final bounded contact attempt
-    -- before resetting our own character. This cannot set another player's
-    -- authoritative velocity; the server decides whether a collision moves them.
-    if releaseBurst and trip.active and not state.unloaded
-        and LocalPlayer.Character == trip.character and trip.root.Parent
-        and trip.humanoid.Health > 0 and trip.targetRoot and trip.targetRoot.Parent
-        and trip.targetCharacter and trip.targetRoot:IsDescendantOf(trip.targetCharacter)
-        and not trip.targetRoot.Anchored and trip.releaseDirection then
-        local releaseOK, releaseErr = pcall(function()
-            UIRefs.Status.Text = "Fling: final contact burst • returning shortly"
-            local dir = trip.releaseDirection
-            local targetPosition = trip.targetRoot.Position
-            -- Position once near the contact edge, not repeatedly inside the target.
-            local offset = math.max(1.3, math.min(2.0,
-                (trip.targetRoot.Size.X + trip.root.Size.X) * 0.45))
-            local rootToPivot = trip.root.CFrame:ToObjectSpace(trip.character:GetPivot())
-            local contact = CFrame.new(targetPosition - dir * offset) * trip.root.CFrame.Rotation
-            trip.character:PivotTo(contact * rootToPivot)
-            local finalVelocity = dir * CONFIG.FlingReleaseSpeed
-                + Vector3.new(0, CONFIG.FlingReleaseSpeed * 0.08, 0)
-            if trip.launchConstraint and trip.launchConstraint.Parent then
-                trip.launchConstraint.VectorVelocity = finalVelocity
-            end
-            trip.root.AssemblyLinearVelocity = finalVelocity
-            -- Allow at least a few normal physics steps before restoring position.
-            local untilTime = os.clock() + CONFIG.FlingReleaseTime
-            repeat
-                RunService.Heartbeat:Wait()
-            until os.clock() >= untilTime or state.unloaded
-                or LocalPlayer.Character ~= trip.character or not trip.root.Parent
-            print("[ScriptMM2 FLING] Release contact attempted; server displacement not verified")
-        end)
-        if not releaseOK then warn("[ScriptMM2 FLING] Release burst: " .. tostring(releaseErr)) end
+    if trip.velocityController then
+        pcall(function() trip.velocityController:Destroy() end)
+        trip.velocityController = nil
     end
-    if trip.spinConstraint then
-        pcall(function() trip.spinConstraint:Destroy() end)
-    end
-    if trip.launchConstraint then
-        pcall(function() trip.launchConstraint:Destroy() end)
-    end
-    if trip.spinAttachment then
-        pcall(function() trip.spinAttachment:Destroy() end)
-    end
-
     local returned, returnError = false, nil
     if trip.active then
-        for part, saved in pairs(trip.physics) do
-            if part.Parent then
-                pcall(function() part.CollisionGroup = saved.collisionGroup end)
-                pcall(function() part.CustomPhysicalProperties = saved.properties end)
-                pcall(function() part.Massless = saved.massless end)
-            end
-        end
         for part, saved in pairs(trip.collisions) do
             if part.Parent then
-                pcall(function()
-                    part.CanCollide = saved
-                end)
-                if originalCollisions[part] ~= nil then
-                    originalCollisions[part] = saved
+                pcall(function() part.CanCollide = saved end)
+                if originalCollisions[part] ~= nil then originalCollisions[part] = saved end
+            end
+        end
+        local function clearVelocity()
+            for _, part in ipairs(trip.character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    pcall(function()
+                        part.AssemblyLinearVelocity = Vector3.zero
+                        part.AssemblyAngularVelocity = Vector3.zero
+                    end)
                 end
             end
         end
-
-        if trip.root.Parent then
-            pcall(function()
-                trip.root.AssemblyLinearVelocity = Vector3.zero
-                trip.root.AssemblyAngularVelocity = Vector3.zero
-            end)
-        end
+        clearVelocity()
         if LocalPlayer.Character == trip.character and trip.character.Parent
             and trip.root.Parent and trip.humanoid.Health > 0 then
-            local ok, err = pcall(function()
+            returned, returnError = pcall(function()
                 trip.character:PivotTo(trip.returnPivot)
-                if state.fly then
+            end)
+            clearVelocity()
+        end
+        -- Restore state even if returning failed or a different character spawned.
+        if trip.humanoid.Parent then
+            pcall(function()
+                local resumeFly = LocalPlayer.Character == trip.character and state.fly
+                if resumeFly then
                     trip.humanoid.PlatformStand = true
                     trip.humanoid.AutoRotate = false
-                elseif trip.startedFlying then
-                    trip.humanoid.PlatformStand = false
-                    trip.humanoid.AutoRotate = true
                 else
                     trip.humanoid.PlatformStand = trip.platformStand
                     trip.humanoid.AutoRotate = trip.autoRotate
                 end
-                if not trip.humanoid.PlatformStand then
+                trip.humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, trip.seatedEnabled)
+                if trip.humanoid.Health > 0 and not trip.humanoid.PlatformStand then
                     trip.humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
                 end
             end)
-            returned, returnError = ok, err
         end
-
         if trip.flyVelocity and trip.flyVelocity.Parent and trip.flyMaxForce then
-            trip.flyVelocity.MaxForce = trip.flyMaxForce
+            pcall(function() trip.flyVelocity.MaxForce = trip.flyMaxForce end)
         end
         if trip.flyGyro and trip.flyGyro.Parent and trip.flyMaxTorque then
-            trip.flyGyro.MaxTorque = trip.flyMaxTorque
+            pcall(function() trip.flyGyro.MaxTorque = trip.flyMaxTorque end)
         end
     end
-
+    if trip.voidProtectionSet then
+        pcall(function()
+            local height = Workspace.FallenPartsDestroyHeight
+            -- Leave a later change by the game/another script in place.
+            if height ~= height then Workspace.FallenPartsDestroyHeight = trip.destroyHeight end
+        end)
+    end
+    if trip.camera then
+        pcall(function()
+            if trip.camera.CameraSubject == trip.cameraTarget then
+                local subject = trip.cameraSubject
+                if subject == trip.humanoid and LocalPlayer.Character ~= trip.character then
+                    subject = getHumanoid()
+                end
+                trip.camera.CameraSubject = subject
+            end
+        end)
+    end
+    if pauseAntiFling then pauseAntiFling() end
     flingTrip = nil
     flingBusy = false
     if state.noclip then applyNoclip() else restoreNoclip() end
     if not state.unloaded then
-        UIRefs.flingMurdererButton.Text = "Inside Fling Murderer"
-        UIRefs.flingSheriffButton.Text = "Inside Fling Sheriff"
+        UIRefs.flingMurdererButton.Text = "YARHM Fling Murderer"
+        UIRefs.flingSheriffButton.Text = "YARHM Fling Sheriff"
         setButtonVisual(UIRefs.flingMurdererButton, false)
         setButtonVisual(UIRefs.flingSheriffButton, false)
     end
     return returned, returnError
 end
 
-local function flingRole(roleName, chosenPlayer)
+local function flingRole(roleName, chosenPlayer, selectedGeneration)
+    if state.unloaded then return end
     if flingAllActive and roleName ~= "Player" then
         UIRefs.Status.Text = "Fling: stop selected fling first"
         return
     end
-    local isMurderer = roleName == "Murderer"
     local isPlayer = roleName == "Player"
-    if isPlayer and not flingAllActive then return end
-    local function targetMatches(player)
-        if isPlayer then
-            return player == chosenPlayer and chosenPlayer ~= LocalPlayer and chosenPlayer.Parent == Players
-        end
-        return (isMurderer and Murder or Sheriff) == player.Name
-    end
-    if state.unloaded then return end
+    local isMurderer = roleName == "Murderer"
+    if isPlayer and (not flingAllActive or selectedGeneration ~= flingAllGeneration) then return end
     if flingBusy then
         if flingTrip and flingTrip.roleName == roleName then
-            local returned, returnError = stopRoleFling(true)
-            UIRefs.Status.Text = returnError and ("Fling return error: " .. tostring(returnError))
+            local returned, err = stopRoleFling(false)
+            UIRefs.Status.Text = err and ("Fling return error: " .. tostring(err))
                 or (returned and "Fling stopped • returned" or "Fling stopped")
         else
-            UIRefs.Status.Text = "Fling: stop current target before switching roles"
+            UIRefs.Status.Text = "Fling: finish current fling first"
         end
         return
     end
-    if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
-    if teleportBusy then
-        UIRefs.Status.Text = "Fling: wait for the revolver pickup to finish"
+    if teleportBusy or shootMurdererBusy then
+        UIRefs.Status.Text = "Fling: finish teleport / weapon action first"
         return
     end
+    if state.bringActive and UIRefs.stopBring then UIRefs.stopBring() end
+    if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
     if pauseAntiFling then pauseAntiFling() end
-
-    local character = getCharacter()
-    local root = getRoot()
-    local humanoid = getHumanoid()
+    local character, root, humanoid = getCharacter(), getRoot(), getHumanoid()
     if not character or not root or not humanoid or humanoid.Health <= 0
         or root.Anchored or humanoid.Sit then
         UIRefs.Status.Text = "Fling: character not ready / leave the seat first"
         return
     end
-
     local trip = {
-        character = character, root = root, humanoid = humanoid,
-        returnPivot = character:GetPivot(), rootCFrame = root.CFrame,
-        platformStand = humanoid.PlatformStand, autoRotate = humanoid.AutoRotate,
-        startedFlying = state.fly, collisions = {}, physics = {}, active = false, finished = false,
-        roleName = roleName,
-        flyVelocity = flyObjects.flyVelocity, flyGyro = flyObjects.flyGyro,
+        character=character, root=root, humanoid=humanoid,
+        returnPivot=character:GetPivot(), roleName=roleName,
+        collisions={}, active=false, finished=false,
     }
-    flingTrip = trip
-    flingBusy = true
-    local activeButton = isMurderer and UIRefs.flingMurdererButton or UIRefs.flingSheriffButton
+    flingTrip, flingBusy = trip, true
     if not isPlayer then
-        activeButton.Text = "Release " .. roleName .. " Inside Fling [ON]"
-        setButtonVisual(activeButton, true)
+        local button = isMurderer and UIRefs.flingMurdererButton or UIRefs.flingSheriffButton
+        button.Text = "Stop " .. roleName .. " Fling [ON]"
+        setButtonVisual(button, true)
     end
-    UIRefs.Status.Text = "Fling: checking " .. roleName .. "..."
-
-    local outcome = "Fling stopped • returned"
+    local function cancelled()
+        return trip.finished or flingTrip ~= trip or state.unloaded
+            or LocalPlayer.Character ~= character
+            or (isPlayer and (not flingAllActive or selectedGeneration ~= flingAllGeneration))
+    end
+    local function targetMatches(player)
+        if not player or player == LocalPlayer or player.Parent ~= Players then return false end
+        if isPlayer then return player == chosenPlayer end
+        return (isMurderer and Murder or Sheriff) == player.Name
+    end
+    local outcome = "Fling: attempt ended; server result unverified"
     local ok, err = pcall(function()
-        -- Role data may arrive after the round starts. Never activate physics
-        -- until a living target is confirmed, and keep the wait cancellable.
-        local target, targetName
+        local target
         local roleDeadline = os.clock() + CONFIG.FlingRoleWait
         repeat
-            if trip.finished or state.unloaded or LocalPlayer.Character ~= character
-                or (isPlayer and not flingAllActive) then return end
+            if cancelled() then return end
             if not isPlayer then refreshRoles() end
-            targetName = isPlayer and (chosenPlayer and chosenPlayer.Name or "")
+            -- Role lookup can yield. A cancelled worker must not acquire physics again.
+            if cancelled() then return end
+            local name = isPlayer and (chosenPlayer and chosenPlayer.Name or "")
                 or (isMurderer and Murder or Sheriff)
-            target = isPlayer and chosenPlayer or (targetName ~= "" and Players:FindFirstChild(targetName) or nil)
-            if target and target ~= LocalPlayer and roleAlive(target.Name) then break end
-            UIRefs.Status.Text = "Fling: waiting for living " .. roleName .. " / round..."
-            task.wait(0.35)
+            target = isPlayer and chosenPlayer or (name ~= "" and Players:FindFirstChild(name) or nil)
+            if targetMatches(target) and roleAlive(target.Name) then break end
+            UIRefs.Status.Text = "Fling: waiting for living " .. roleName
+            task.wait(0.2)
         until os.clock() >= roleDeadline
-        if not target or target == LocalPlayer or not roleAlive(target.Name) then
-            outcome = "Fling: no living " .. roleName .. " after role wait"
+        if cancelled() then return end
+        if not targetMatches(target) or not roleAlive(target.Name) then
+            outcome = "Fling: living target unavailable"
             return
         end
-
-        -- Character parts and the role snapshot can arrive on different frames.
-        -- Wait briefly rather than treating a still-streaming target as a failed fling.
-        local targetCharacter, targetRoot
+        local targetCharacter, targetRoot, targetHumanoid, contactPart
         local readyDeadline = os.clock() + CONFIG.FlingTargetWait
         repeat
-            if trip.finished or state.unloaded or LocalPlayer.Character ~= character
-                or (isPlayer and not flingAllActive) then return end
+            if cancelled() then return end
             if not targetMatches(target) then
-                outcome = "Fling: target changed while waiting"
+                outcome = "Fling: target changed"
                 return
             end
             targetCharacter = target.Character
-            targetRoot = targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart")
-            if targetRoot and targetRoot.Parent and not targetRoot.Anchored and roleAlive(target.Name) then break end
-            UIRefs.Status.Text = "Fling: waiting for " .. roleName .. " character..."
+            targetHumanoid = targetCharacter and targetCharacter:FindFirstChildOfClass("Humanoid")
+            targetRoot = targetHumanoid and targetHumanoid.RootPart
+                or (targetCharacter and targetCharacter:FindFirstChild("HumanoidRootPart"))
+            local head = targetCharacter and targetCharacter:FindFirstChild("Head")
+            local accessory = targetCharacter and targetCharacter:FindFirstChildOfClass("Accessory")
+            local handle = accessory and accessory:FindFirstChild("Handle")
+            contactPart = targetRoot or head or handle
+            if targetRoot and head and (targetRoot.Position - head.Position).Magnitude > 5 then
+                contactPart = head
+            end
+            if contactPart and contactPart:IsA("BasePart") and targetHumanoid
+                and targetHumanoid.Health > 0 and not contactPart.Anchored then break end
             RunService.Heartbeat:Wait()
         until os.clock() >= readyDeadline
-        if not targetRoot or not targetRoot.Parent or targetRoot.Anchored or not roleAlive(target.Name) then
-            outcome = "Fling: target not ready / alive (retry after round starts)"
+        if cancelled() then return end
+        if not contactPart or not contactPart:IsA("BasePart") or not targetHumanoid
+            or targetHumanoid.Health <= 0 or contactPart.Anchored
+            or (targetRoot and targetRoot.Anchored) then
+            outcome = "Fling: target root unavailable / anchored"
             return
         end
-        if LocalPlayer.Character ~= character or not root.Parent or humanoid.Health <= 0 then
-            outcome = "Fling cancelled: character changed/dead"
+        if targetHumanoid.Sit then
+            outcome = "Fling: target is seated"
             return
         end
-
-        local bounds = getFlingMapBounds(targetRoot.Position)
-        local direction
-        if bounds then
-            direction = getFlingExitDirection(bounds, targetRoot.Position)
-        else
-            -- Spinning remains available outside the map or before its geometry
-            -- streams in. Without bounds, do not claim a confirmed map exit.
-            local forward = targetRoot.CFrame.LookVector
-            local horizontal = Vector3.new(forward.X, 0, forward.Z)
-            direction = horizontal.Magnitude > 0.001 and horizontal.Unit or Vector3.new(1, 0, 0)
-        end
-        local rootToPivot = trip.rootCFrame:ToObjectSpace(trip.returnPivot)
-        local boundsRefreshTime = os.clock()
-        local outsideSince = nil
-        local outsideConfirmed = false
-        local runningStatus = "Inside Fling: spinning inside target • Release = burst / return"
-        local attemptStarted = os.clock()
-        local collisionCheckTime = -math.huge
-        local collisionAllowed = false
-        local collisionProbeOK = true
-        local noContactSince = nil
-        local lastResponseAt = os.clock()
-        local previousTargetPosition = targetRoot.Position
-        local lastAlignment = -math.huge
-        local initialTargetPosition = targetRoot.Position
-        local bestOutwardTravel = 0
-        -- Role lookup can yield while the user changes Fly. Capture the current
-        -- controllers immediately before pausing them, not before that request.
-        trip.flyVelocity, trip.flyGyro = flyObjects.flyVelocity, flyObjects.flyGyro
-        trip.startedFlying = state.fly
+        if not root.Parent or root.Anchored or humanoid.Health <= 0 or humanoid.Sit then return end
+        local motionPart = targetRoot or contactPart
+        trip.targetCharacter, trip.targetRoot = targetCharacter, motionPart
+        trip.initialHealth = humanoid.Health
         trip.platformStand, trip.autoRotate = humanoid.PlatformStand, humanoid.AutoRotate
-        trip.targetCharacter = targetCharacter
-        trip.targetRoot = targetRoot
-        trip.releaseDirection = direction
+        trip.seatedEnabled = humanoid:GetStateEnabled(Enum.HumanoidStateType.Seated)
+        trip.flyVelocity, trip.flyGyro = flyObjects.flyVelocity, flyObjects.flyGyro
         trip.active = true
-        UIRefs.Status.Text = runningStatus
-
-        for _, part in ipairs(character:GetChildren()) do
+        for _, part in ipairs(character:GetDescendants()) do
             if part:IsA("BasePart") then
                 local saved = originalCollisions[part]
                 if saved == nil then saved = part.CanCollide end
                 trip.collisions[part] = saved
-                trip.physics[part] = {
-                    collisionGroup = part.CollisionGroup,
-                    properties = part.CustomPhysicalProperties,
-                    massless = part.Massless,
-                }
-                part.CanCollide = true
-                -- CanCollide alone does not override non-colliding groups.
-                -- Change only our body and restore its settings on every exit.
-                part.CollisionGroup = "Default"
-                part.CustomPhysicalProperties = PhysicalProperties.new(100, 0, 1, 100, 100)
-                part.Massless = false
+                -- Temporarily recover normal body contact when NoClip is enabled.
+                part.CanCollide = saved
             end
+        end
+        local physicsService = game:GetService("PhysicsService")
+        local canContact = false
+        for _, part in ipairs(targetCharacter:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                for ownPart, collidable in pairs(trip.collisions) do
+                    if collidable and ownPart.Parent then
+                        local groupOK, collide = pcall(function()
+                            return physicsService:CollisionGroupsAreCollidable(ownPart.CollisionGroup, part.CollisionGroup)
+                        end)
+                        if not groupOK or collide then canContact = true; break end
+                    end
+                end
+                if canContact then break end
+            end
+        end
+        if not canContact then
+            outcome = "Fling unavailable: target avatar / game collision groups block contact"
+            return
         end
         if trip.flyVelocity and trip.flyVelocity.Parent then
             trip.flyMaxForce = trip.flyVelocity.MaxForce
@@ -4677,209 +4575,146 @@ local function flingRole(roleName, chosenPlayer)
             trip.flyMaxTorque = trip.flyGyro.MaxTorque
             trip.flyGyro.MaxTorque = Vector3.zero
         end
-        humanoid.PlatformStand = true
-        humanoid.AutoRotate = false
+        -- YARHM runs the normal humanoid; Fly's PlatformStand must not persist.
+        humanoid.PlatformStand = false
+        humanoid.AutoRotate = true
+        if trip.platformStand then humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+        trip.destroyHeight = Workspace.FallenPartsDestroyHeight
+        trip.voidProtectionSet = pcall(function()
+            -- YARHM temporarily disables local fallen-part deletion during the impulse.
+            Workspace.FallenPartsDestroyHeight = 0 / 0
+        end)
+        trip.camera = Workspace.CurrentCamera
+        if trip.camera then
+            trip.cameraSubject = trip.camera.CameraSubject
+            trip.cameraTarget = targetCharacter:FindFirstChild("Head") or contactPart
+            trip.camera.CameraSubject = trip.cameraTarget
+        end
+        trip.velocityController = Instance.new("BodyVelocity")
+        trip.velocityController.Name = "ScriptMM2YARHMFlingVelocity"
+        trip.velocityController.Velocity = Vector3.new(CONFIG.FlingBodySpeed, CONFIG.FlingBodySpeed, CONFIG.FlingBodySpeed)
+        trip.velocityController.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+        trip.velocityController.Parent = root
 
-        local spinVelocity = Vector3.new(CONFIG.FlingSpinSpeed, CONFIG.FlingSpinSpeed, CONFIG.FlingSpinSpeed)
-        -- Keep applying torque throughout the attempt, rather than giving
-        -- one angular impulse that collisions can slow down.
-        trip.spinAttachment = Instance.new("Attachment")
-        trip.spinAttachment.Name = "ScriptMM2FlingSpinAttachment"
-        trip.spinAttachment.Parent = root
-        trip.spinConstraint = Instance.new("AngularVelocity")
-        trip.spinConstraint.Name = "ScriptMM2FlingSpin"
-        trip.spinConstraint.Attachment0 = trip.spinAttachment
-        trip.spinConstraint.RelativeTo = Enum.ActuatorRelativeTo.World
-        trip.spinConstraint.AngularVelocity = spinVelocity
-        trip.spinConstraint.MaxTorque = CONFIG.FlingSpinTorque
-        trip.spinConstraint.ReactionTorqueEnabled = false
-        trip.spinConstraint.Enabled = true
-        trip.spinConstraint.Parent = root
-
-        -- Maintain the contact velocity throughout the physics step. A one-off
-        -- velocity assignment can be cancelled by the first wall/body contact.
-        trip.launchConstraint = Instance.new("LinearVelocity")
-        trip.launchConstraint.Name = "ScriptMM2FlingLaunch"
-        trip.launchConstraint.Attachment0 = trip.spinAttachment
-        trip.launchConstraint.RelativeTo = Enum.ActuatorRelativeTo.World
-        trip.launchConstraint.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
-        trip.launchConstraint.ForceLimitsEnabled = true
-        trip.launchConstraint.ForceLimitMode = Enum.ForceLimitMode.Magnitude
-        trip.launchConstraint.MaxForce = CONFIG.FlingLinearForce
-        trip.launchConstraint.VectorVelocity = Vector3.zero
-        trip.launchConstraint.Enabled = true
-        trip.launchConstraint.Parent = root
-
-        local function hasCollisionPair()
-            -- HumanoidRootPart is sometimes non-collidable even when torso/limbs
-            -- can transmit a real contact. Check all of our actual body parts.
-            for _, ownPart in ipairs(character:GetChildren()) do
-                if ownPart:IsA("BasePart") and ownPart.CanCollide then
-                    for _, targetPart in ipairs(targetCharacter:GetChildren()) do
-                        if targetPart:IsA("BasePart") and targetPart.CanCollide
-                            and ownPart:CanCollideWith(targetPart) then
-                            local blocked = false
-                            -- Some clients do not expose this optional inspection method.
-                            -- A failed diagnostic must not terminate the physics loop.
-                            local constraintsOK, constraints = pcall(function()
-                                return ownPart:GetNoCollisionConstraints()
-                            end)
-                            if constraintsOK and type(constraints) == "table" then
-                                for _, constraint in ipairs(constraints) do
-                                    if constraint.Enabled and ((constraint.Part0 == ownPart and constraint.Part1 == targetPart)
-                                        or (constraint.Part1 == ownPart and constraint.Part0 == targetPart)) then
-                                        blocked = true
-                                        break
-                                    end
-                                end
-                            end
-                            if not blocked then return true end
-                        end
-                    end
-                end
+        local rootToPivot = root.CFrame:ToObjectSpace(character:GetPivot())
+        local started = os.clock()
+        local initialTargetPosition = motionPart.Position
+        local contactSteps, maxTargetDisplacement, maxTargetSpeed = 0, 0, 0
+        local phase, angle, slowMode = 0, 0, nil
+        local lastStatusAt = -math.huge
+        local function shouldStop()
+            if cancelled() then return true end
+            if not root.Parent or humanoid.Health <= 0 then
+                outcome = "Fling: character changed/dead"; return true
             end
+            if root.Anchored or humanoid.Health < trip.initialHealth then
+                outcome = "Fling stopped: own character needs recovery"; return true
+            end
+            if not targetMatches(target) or target.Character ~= targetCharacter
+                or not contactPart:IsDescendantOf(targetCharacter) or not motionPart.Parent
+                or targetHumanoid.Health <= 0 or not roleAlive(target.Name) then
+                outcome = "Fling: target left / died / role changed"; return true
+            end
+            if contactPart.Anchored or motionPart.Anchored or targetHumanoid.Sit then
+                outcome = "Fling: target became anchored / seated"; return true
+            end
+            maxTargetDisplacement = math.max(maxTargetDisplacement,
+                (motionPart.Position - initialTargetPosition).Magnitude)
+            maxTargetSpeed = math.max(maxTargetSpeed, motionPart.AssemblyLinearVelocity.Magnitude,
+                contactPart.AssemblyLinearVelocity.Magnitude)
+            if maxTargetSpeed > CONFIG.FlingLaunchedSpeed then
+                outcome = "Fling: target accelerated (observed locally)"; return true
+            end
+            if motionPart.Position.Y <= trip.destroyHeight + 40 then
+                outcome = "Fling: target reached the void (observed locally)"; return true
+            end
+            -- 0 keeps the user's manual duration: stop with the same button.
+            if CONFIG.FlingAttemptDuration > 0
+                and os.clock() - started >= CONFIG.FlingAttemptDuration then return true end
             return false
         end
-
-        local function canMaintainContact()
-            return not trip.finished and not trip.error and not state.unloaded
-                and (not isPlayer or flingAllActive)
-                and LocalPlayer.Character == character and target.Character == targetCharacter
-                and root.Parent and targetRoot.Parent and humanoid.Health > 0
-                and not targetRoot.Anchored and (isPlayer or rolesAvailable)
-                and targetMatches(target) and roleAlive(target.Name)
+        local function showMotion()
+            if cancelled() or os.clock() - lastStatusAt < CONFIG.FlingStatusInterval then return end
+            lastStatusAt = os.clock()
+            local displacement = (motionPart.Position - initialTargetPosition).Magnitude
+            local targetSpeed = motionPart.AssemblyLinearVelocity.Magnitude
+            local ownSpeed = root.AssemblyLinearVelocity.Magnitude
+            local ownSpin = root.AssemblyAngularVelocity.Magnitude
+            trip.metrics = {steps=contactSteps, targetShift=displacement, targetSpeed=targetSpeed,
+                ownSpeed=ownSpeed, ownSpin=ownSpin}
+            UIRefs.Status.Text = string.format("Fling: %d steps • shift %.1f • target %.0f/s",
+                contactSteps, displacement, targetSpeed)
+            if isPlayer and UIRefs.flingSelectStatus then
+                local motion = (displacement > 0.5 or targetSpeed > 1)
+                    and "Target motion observed" or "No target motion observed"
+                UIRefs.flingSelectStatus.Text = string.format("Steps: %d • shift: %.1f • target: %.0f/s\n%s • own: %.1e/s • spin: %.1e",
+                    contactSteps, displacement, targetSpeed, motion, ownSpeed, ownSpin)
+            end
         end
-        local function alignWithTarget()
-            -- Inside mode: place OUR pivot at the target root rather than orbiting
-            -- around its perimeter. Only realign at bounded intervals/drift;
-            -- never teleport in PostSimulation, which erases collision impulses.
-            local center = targetRoot.Position
-            local inside = CFrame.new(center) * root.CFrame.Rotation
-            character:PivotTo(inside * rootToPivot)
-        end
-        alignWithTarget()
-        lastAlignment = os.clock()
-
-        trip.stepConnection = RunService.PreSimulation:Connect(function(deltaTime)
-            if not canMaintainContact() then return end
-            local stepOK, stepError = pcall(function()
-                if os.clock() - collisionCheckTime >= 0.25 then
-                    -- Optional physics APIs may not be implemented by every client.
-                    -- Record a diagnostic instead of crashing the connection.
-                    local probeOK, allowed = pcall(hasCollisionPair)
-                    collisionProbeOK = probeOK
-                    collisionAllowed = probeOK and allowed or false
-                    collisionCheckTime = os.clock()
-                end
-                local targetVelocity = targetRoot.AssemblyLinearVelocity
-                local outwardSpeed = targetVelocity:Dot(direction)
-                -- Collision impulses must run for a full simulation step. Do NOT
-                -- teleport us again in PostSimulation: that cancelled the solver.
-                local now = os.clock()
-                local displacement = targetRoot.Position - root.Position
-                local distance = displacement.Magnitude
-                -- Follow the target's center instead of driving toward a map edge.
-                -- The high angular velocity supplies the rotational contact.
-                -- Translational correction is bounded to avoid tunneling.
-                if distance > CONFIG.FlingInsideMaxDrift
-                    or now - lastAlignment >= CONFIG.FlingInsideRealignInterval then
-                    alignWithTarget()
-                    lastAlignment = now
-                    displacement = targetRoot.Position - root.Position
-                    distance = displacement.Magnitude
-                end
-                local follow = distance > 0.08
-                    and displacement.Unit * math.min(CONFIG.FlingInsideFollowSpeed, distance * 35)
-                    or Vector3.zero
-                local carry = targetVelocity
-                if carry.Magnitude > 180 then carry = carry.Unit * 180 end
-                humanoid:Move(Vector3.zero, false)
-                trip.launchConstraint.VectorVelocity = carry + follow
-                root.AssemblyLinearVelocity = trip.launchConstraint.VectorVelocity
-                root.AssemblyAngularVelocity = spinVelocity
-            end)
-            if not stepOK then trip.error = stepError end
-        end)
-
-        repeat
-            if trip.finished or state.unloaded or trip.error
-                or (isPlayer and not flingAllActive) then break end
-            if LocalPlayer.Character ~= character or not root.Parent or humanoid.Health <= 0 then
-                outcome = "Fling cancelled: character changed/dead"
-                break
-            end
-            if (not isPlayer and not rolesAvailable) or not targetMatches(target) then
-                outcome = "Fling: " .. roleName .. " target changed / unavailable"
-                break
-            end
-            if target.Character ~= targetCharacter or not targetRoot.Parent or not roleAlive(target.Name) then
-                outcome = "Fling: target left / died"
-                break
-            end
-            if targetRoot.Anchored then
-                outcome = "Fling: target became anchored"
-                break
-            end
-            local currentTime = os.clock()
-            -- A client-side position reading is not proof of a server fling.
-            -- Abort a futile attempt rather than leaving the player spinning forever.
-            if not collisionAllowed then
-                noContactSince = noContactSince or currentTime
-            else
-                noContactSince = nil
-            end
-            local targetDelta = (targetRoot.Position - previousTargetPosition).Magnitude
-            previousTargetPosition = targetRoot.Position
-            if collisionAllowed and (targetDelta > 0.35
-                or targetRoot.AssemblyLinearVelocity.Magnitude >= CONFIG.FlingResponseSpeed) then
-                lastResponseAt = currentTime
-            end
-            -- No-response is diagnostic only. The ON state remains controlled by
-            -- the user; a stationary target must not silently stop the fling.
-            if bounds and bounds.refresh and currentTime - boundsRefreshTime >= 0.15 then
-                bounds.refresh()
-                boundsRefreshTime = currentTime
-            end
-            if bounds and isOutsideFlingMap(bounds, targetRoot.Position) then
-                outsideSince = outsideSince or currentTime
-                if not outsideConfirmed and currentTime - outsideSince >= CONFIG.FlingExitConfirmTime then
-                    outsideConfirmed = true
-                    UIRefs.Status.Text = bounds.estimated and "Inside Fling: target outside estimated bounds • Release = return"
-                        or "Inside Fling: target outside bounds • Release = return"
-                end
-            else
-                outsideSince = nil
-                if outsideConfirmed then
-                    outsideConfirmed = false
-                    UIRefs.Status.Text = runningStatus
-                end
-            end
-            if not outsideConfirmed then
-                local traveled = (targetRoot.Position - initialTargetPosition):Dot(direction)
-                bestOutwardTravel = math.max(bestOutwardTravel, traveled)
-                local outwardSpeed = targetRoot.AssemblyLinearVelocity:Dot(direction)
-                if not collisionAllowed and currentTime - attemptStarted >= 0.25 then
-                    UIRefs.Status.Text = "Inside Fling: checking collision pairs • server response unverified"
-                elseif bestOutwardTravel >= 8 and outwardSpeed >= CONFIG.FlingResponseSpeed then
-                    UIRefs.Status.Text = "Inside Fling: target displacement observed (client) • Release = burst"
-                elseif currentTime - attemptStarted >= CONFIG.FlingResponseGrace then
-                    UIRefs.Status.Text = "Inside Fling: target stationary locally • Release = burst / return"
+        UIRefs.Status.Text = "Fling: " .. target.DisplayName .. " • YARHM SkidFling"
+        -- Use YARHM's yielding worker. Each pose survives a simulation step;
+        -- stopping/respawning invalidates this worker before it writes again.
+        while not shouldStop() do
+                local speed = contactPart.AssemblyLinearVelocity.Magnitude
+                if phase == 0 or phase >= (slowMode and 6 or 10) then
+                    slowMode = speed < CONFIG.FlingSlowTargetSpeed
+                    phase = 1
+                    if slowMode then angle = (angle + 100) % 360 end
+                else phase += 1 end
+                local offset, lead, rotation = Vector3.zero, Vector3.zero, 0
+                if slowMode then
+                    rotation = angle
+                    if phase == 3 then offset = Vector3.new(2.25, 1.5, -2.25)
+                    elseif phase == 4 then offset = Vector3.new(-2.25, -1.5, 2.25)
+                    else offset = Vector3.new(0, phase % 2 == 1 and 1.5 or -1.5, 0) end
+                    lead = targetHumanoid.MoveDirection * (phase <= 4 and speed / 1.25 or 1)
                 else
-                    UIRefs.Status.Text = runningStatus
+                    local walkSpeed = targetHumanoid.WalkSpeed
+                    local travel = motionPart.AssemblyLinearVelocity.Magnitude / 1.25
+                    if phase <= 3 then
+                        offset = Vector3.new(0, phase == 2 and -1.5 or 1.5,
+                            phase == 2 and -walkSpeed or walkSpeed)
+                    elseif phase <= 6 then
+                        offset = Vector3.new(0, phase == 5 and -1.5 or 1.5,
+                            phase == 5 and -travel or travel)
+                    else offset = Vector3.new(0, -1.5, 0) end
+                    rotation = (phase == 1 or phase == 3 or phase == 4 or phase == 6 or phase == 7)
+                        and 90 or (phase == 9 and -90 or 0)
                 end
-            end
-            RunService.Heartbeat:Wait()
-        until false
-        if trip.error then error(trip.error) end
+                local destination = CFrame.new(contactPart.Position + offset + lead)
+                    * CFrame.Angles(math.rad(rotation), 0, 0)
+                if character.PrimaryPart == root then
+                    root.CFrame = destination
+                    character:SetPrimaryPartCFrame(destination)
+                else character:PivotTo(destination * rootToPivot) end
+                local linearVelocity = Vector3.new(CONFIG.FlingLinearSpeed,
+                    CONFIG.FlingLinearSpeed * CONFIG.FlingLiftMultiplier, CONFIG.FlingLinearSpeed)
+                local angularVelocity = Vector3.new(CONFIG.FlingSpinSpeed, CONFIG.FlingSpinSpeed, CONFIG.FlingSpinSpeed)
+                local legacyOK = pcall(function()
+                    root.Velocity = linearVelocity
+                    root.RotVelocity = angularVelocity
+                end)
+                if not legacyOK then
+                    root.AssemblyLinearVelocity = linearVelocity
+                    root.AssemblyAngularVelocity = angularVelocity
+                end
+                contactSteps += 1
+                task.wait()
+                showMotion()
+        end
+        if outcome == "Fling: attempt ended; server result unverified" then
+            outcome = string.format("Fling: %d steps • target shift %.1f studs, peak %.0f studs/s (observed locally)",
+                contactSteps, maxTargetDisplacement, maxTargetSpeed)
+        end
     end)
-
     if trip.finished then return end
-    local returned, returnError = stopRoleFling()
+    local returned, returnErr = stopRoleFling(false)
     if state.unloaded then return end
     if not ok then
         UIRefs.Status.Text = "Fling error: " .. tostring(err)
-    elseif returnError then
-        UIRefs.Status.Text = "Fling return error: " .. tostring(returnError)
+    elseif returnErr then
+        UIRefs.Status.Text = "Fling return error: " .. tostring(returnErr)
     elseif trip.active and not returned then
         UIRefs.Status.Text = "Fling cancelled: character changed/dead"
     else
@@ -4888,7 +4723,7 @@ local function flingRole(roleName, chosenPlayer)
 end
 
 --// PC V1.0: restore explicit one-player Fling selection.
---// The existing flingRole("Player", target) physics path is reused; no duplicate fling engine.
+--// All target buttons share the YARHM SkidFling engine and cleanup.
 UIRefs.paintFlingSelection = function()
     for player, button in pairs(UIRefs.flingPlayerButtons or {}) do
         if button and button.Parent then
@@ -4899,7 +4734,7 @@ end
 
 local function paintSelectedFlingAction(active)
     if not UIRefs.flingSelectButton then return end
-    UIRefs.flingSelectButton.Text = active and "Stop Fling Selected [ON]" or "Fling Selected [OFF]"
+    UIRefs.flingSelectButton.Text = active and "Stop Fling Selected [ON]" or "YARHM Fling Selected [OFF]"
     setButtonVisual(UIRefs.flingSelectButton, active)
 end
 
@@ -4936,30 +4771,14 @@ local function flingSelectedPlayer()
     UIRefs.Status.Text = "Fling Selected: " .. player.DisplayName .. " • local contact attempt"
     if UIRefs.flingSelectStatus then UIRefs.flingSelectStatus.Text = UIRefs.Status.Text end
     task.spawn(function()
-        task.spawn(flingRole, "Player", player)
-        local deadline = os.clock() + CONFIG.FlingRoleWait + CONFIG.FlingTargetWait + 1
-        repeat
-            RunService.Heartbeat:Wait()
-        until not flingAllActive or generation ~= flingAllGeneration or state.unloaded
-            or (flingTrip and flingTrip.roleName == "Player")
-            or os.clock() >= deadline
-        if flingAllActive and generation == flingAllGeneration and not state.unloaded then
-            local trip = flingTrip
-            if trip and trip.roleName == "Player" then
-                while flingAllActive and generation == flingAllGeneration and not state.unloaded
-                    and flingTrip == trip and not trip.finished do
-                    RunService.Heartbeat:Wait()
-                end
-            end
-        end
+        if not flingAllActive or generation ~= flingAllGeneration or state.unloaded then return end
+        flingRole("Player", player, generation)
+        -- A stopped worker cannot clear a newer target/attempt.
         if generation ~= flingAllGeneration then return end
         flingAllActive = false
-        if flingBusy then stopRoleFling(false) end
         if not state.unloaded then
             paintSelectedFlingAction(false)
-            if UIRefs.flingSelectStatus then
-                UIRefs.flingSelectStatus.Text = "Fling Selected: attempt finished; server result unverified."
-            end
+            if UIRefs.flingSelectStatus then UIRefs.flingSelectStatus.Text = UIRefs.Status.Text end
         end
     end)
 end
@@ -5317,196 +5136,146 @@ clearESP = function()
     end
 end
 
---// AntiFling changes only our collision pairs. Map collisions remain active.
-local antiFlingGuard = {pairs = {}, scanTime = -math.huge, jumpUntil = 0, teleportUntil = 0}
+--// V1.0 PC AntiFling: YARHM-inspired two independent heartbeat guards.
+--// Ordinary character collisions are untouched, so standing on players still works.
+--// No anchoring: only abnormal motion is neutralized. Server results are unverified.
+local antiFlingGuard = {
+    character = nil, root = nil, humanoid = nil,
+    remoteParts = setmetatable({}, {__mode = "k"}),
+    suspiciousUntil = setmetatable({}, {__mode = "k"}),
+    safePivot = nil, teleportUntil = 0, jumpUntil = 0,
+    lastSafeAt = 0, lastLogAt = -math.huge,
+}
 
-local function releaseAntiFlingHold(preserveVelocity)
-    local guard = antiFlingGuard
-    if guard.holding and guard.root and guard.root.Parent and not preserveVelocity then
-        guard.root.AssemblyLinearVelocity = Vector3.zero
-        guard.root.AssemblyAngularVelocity = Vector3.zero
+local function antiFlingLog(message)
+    local g = antiFlingGuard
+    if os.clock() - g.lastLogAt < 0.7 then return end
+    g.lastLogAt = os.clock()
+    warn("[ScriptMM2 AntiFling] " .. message)
+end
+
+local function restoreAntiFlingRemoteParts()
+    local g = antiFlingGuard
+    for part, original in pairs(g.remoteParts) do
+        if part and part.Parent then
+            pcall(function() part.CanCollide = original end)
+        end
+        g.remoteParts[part] = nil
     end
-    guard.holding = false
-    guard.idlePivot = nil
 end
 
 pauseAntiFling = function()
-    releaseAntiFlingHold()
-    for _, targets in pairs(antiFlingGuard.pairs) do
-        for _, constraint in pairs(targets) do
-            pcall(function() constraint:Destroy() end)
-        end
-    end
-    if antiFlingGuard.folder then
-        pcall(function() antiFlingGuard.folder:Destroy() end)
-    end
-    antiFlingGuard.pairs = {}
-    antiFlingGuard.folder = nil
-    antiFlingGuard.character, antiFlingGuard.root, antiFlingGuard.humanoid = nil, nil, nil
-    antiFlingGuard.safePivot = nil
-    antiFlingGuard.scanTime = -math.huge
-    antiFlingGuard.teleportUntil = 0
+    restoreAntiFlingRemoteParts()
+    local g = antiFlingGuard
+    g.character, g.root, g.humanoid, g.safePivot = nil, nil, nil, nil
+    g.lastSafeAt = 0
+    g.suspiciousUntil = setmetatable({}, {__mode = "k"})
+    g.teleportUntil = 0
 end
 
--- Accept a discrete relocation with ordinary velocity before restoring any
--- held position. This is a teleport heuristic, not proof of server authority.
--- Player contact remains blocked throughout the short landing grace period.
-local function acceptAntiFlingTeleport()
-    local guard = antiFlingGuard
-    local baseline = guard.idlePivot or guard.safePivot
-    if not baseline or not guard.character or not guard.root or guard.root.Anchored then return false end
-    local current = guard.character:GetPivot()
-    if (current.Position - baseline.Position).Magnitude < CONFIG.AntiFlingTeleportDistance then return false end
-    local velocity = guard.root.AssemblyLinearVelocity
-    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
-    if horizontal.Magnitude > math.max(80, guard.humanoid.WalkSpeed * 2)
-        or math.abs(velocity.Y) > 100 or guard.root.AssemblyAngularVelocity.Magnitude > 80 then return false end
-    releaseAntiFlingHold(true)
-    guard.safePivot = current
-    guard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
-    return true
+local function antiFlingAvailable()
+    return state.antiFling and not state.unloaded and not flingBusy
 end
 
-local function refreshAntiFlingPairs(character)
-    local guard = antiFlingGuard
-    if not guard.folder then
-        guard.folder = Instance.new("Folder")
-        guard.folder.Name = "ScriptMM2AntiFling"
-        guard.folder.Parent = character
-    end
-
-    -- V1.0 ground-safe AntiFling: the old implementation created a full
-    -- body-to-body constraint matrix. On thin floors / ledges that could add
-    -- unnecessary solver work and make the local character look slightly sunk.
-    -- Fling physics is normally driven by the other player's root / torso, so
-    -- protect only our core body against their core body. Map/floor collisions
-    -- are never disabled.
-    local wanted = {}
-    local ownRoot = character:FindFirstChild("HumanoidRootPart")
-    if not ownRoot then return end
-
-    local ownCore = {ownRoot}
-    local ownTorso = character:FindFirstChild("UpperTorso")
-        or character:FindFirstChild("Torso")
-        or character:FindFirstChild("LowerTorso")
-    if ownTorso and ownTorso:IsA("BasePart") then table.insert(ownCore, ownTorso) end
-
-    local function addPair(part, targetPart)
-        if not part or not targetPart or not part:IsA("BasePart") or not targetPart:IsA("BasePart") then return end
-        wanted[part] = wanted[part] or {}
-        wanted[part][targetPart] = true
-        guard.pairs[part] = guard.pairs[part] or {}
-        local constraint = guard.pairs[part][targetPart]
-        if not constraint or not constraint.Parent then
-            constraint = Instance.new("NoCollisionConstraint")
-            constraint.Name = "AntiFlingPlayerContact"
-            constraint.Part0, constraint.Part1 = part, targetPart
-            constraint.Enabled = true
-            constraint.Parent = guard.folder
-            guard.pairs[part][targetPart] = constraint
-        end
-    end
-
-    for _, player in ipairs(Players:GetPlayers()) do
-        local theirCharacter = player.Character
-        local theirRoot = theirCharacter and theirCharacter:FindFirstChild("HumanoidRootPart")
-        if player ~= LocalPlayer and theirRoot
-            and (theirRoot.Position - ownRoot.Position).Magnitude <= CONFIG.AntiFlingNearbyRadius then
-            local theirTorso = theirCharacter:FindFirstChild("UpperTorso")
-                or theirCharacter:FindFirstChild("Torso")
-                or theirCharacter:FindFirstChild("LowerTorso")
-            for _, ownPart in ipairs(ownCore) do
-                addPair(ownPart, theirRoot)
-                if theirTorso and theirTorso:IsA("BasePart") then addPair(ownPart, theirTorso) end
-            end
-        end
-    end
-
-    for part, targets in pairs(guard.pairs) do
-        for targetPart, constraint in pairs(targets) do
-            if not wanted[part] or not wanted[part][targetPart] then
-                pcall(function() constraint:Destroy() end)
-                targets[targetPart] = nil
-            end
-        end
-        if not next(targets) then guard.pairs[part] = nil end
-    end
-end
-
+-- YARHM detector: inspect all other characters for excessive linear/angular motion.
+-- Only offenders lose their collisions. Ordinary players remain solid/standable.
 updateAntiFling = function()
-    if state.unloaded or not state.antiFling or teleportBusy or flingBusy then
-        if antiFlingGuard.character then pauseAntiFling() end
+    if not antiFlingAvailable() then
+        if antiFlingGuard.character or next(antiFlingGuard.remoteParts) then pauseAntiFling() end
         return
     end
-    local character, root, humanoid = getCharacter(), getRoot(), getHumanoid()
-    if not character or not root or not humanoid or humanoid.Health <= 0 or humanoid.Sit then
-        pauseAntiFling()
+    local g = antiFlingGuard
+    local char, root, humanoid = getCharacter(), getRoot(), getHumanoid()
+    if not char or not root or not humanoid or humanoid.Health <= 0 then
+        if g.character then pauseAntiFling() end
         return
     end
-    if antiFlingGuard.character ~= character or antiFlingGuard.root ~= root then
+    if char ~= g.character or root ~= g.root then
         pauseAntiFling()
-        if root.Anchored then return end
-        antiFlingGuard.character, antiFlingGuard.root, antiFlingGuard.humanoid = character, root, humanoid
-        antiFlingGuard.safePivot = character:GetPivot()
+        g.character, g.root, g.humanoid = char, root, humanoid
+        g.safePivot = char:GetPivot()
+        g.lastSafeAt = os.clock()
     end
-    if root.Anchored then
-        pauseAntiFling()
-        return
+    local wanted = {}
+    local now = os.clock()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character ~= char then
+            local other = player.Character
+            local otherRoot = other and other:FindFirstChild("HumanoidRootPart")
+            local otherHum = other and other:FindFirstChildOfClass("Humanoid")
+            if other and otherRoot and otherRoot:IsA("BasePart") and otherHum
+                and otherHum.Health > 0 and other:IsDescendantOf(Workspace) then
+                local linear = otherRoot.AssemblyLinearVelocity.Magnitude
+                local angular = otherRoot.AssemblyAngularVelocity.Magnitude
+                if linear > 100 or angular > 50 then
+                    if not g.suspiciousUntil[other] or g.suspiciousUntil[other] < now then
+                        antiFlingLog("Suspected flinger: " .. player.Name .. " (linear=" .. math.floor(linear)
+                            .. ", angular=" .. math.floor(angular) .. ")")
+                    end
+                    g.suspiciousUntil[other] = now + 0.45
+                end
+                if (g.suspiciousUntil[other] or 0) > now then
+                    for _, part in ipairs(other:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            wanted[part] = true
+                            if g.remoteParts[part] == nil then g.remoteParts[part] = part.CanCollide end
+                            -- As in the public YARHM backup, neutralize suspicious
+                            -- character physics locally (network ownership may limit effect).
+                            pcall(function()
+                                part.CanCollide = false
+                                part.AssemblyLinearVelocity = Vector3.zero
+                                part.AssemblyAngularVelocity = Vector3.zero
+                            end)
+                        end
+                    end
+                end
+            end
+        end
     end
-    if os.clock() - antiFlingGuard.scanTime >= CONFIG.AntiFlingScanInterval then
-        refreshAntiFlingPairs(character)
-        antiFlingGuard.scanTime = os.clock()
+    for part, original in pairs(g.remoteParts) do
+        if not wanted[part] then
+            if part and part.Parent then pcall(function() part.CanCollide = original end) end
+            g.remoteParts[part] = nil
+        end
     end
-    -- A saved-pivot idle lock used to undo normal server round teleports.
-    -- Never PivotTo an old position as part of AntiFling. Contact protection
-    -- stays active and the character remains under the game's movement code.
-    antiFlingGuard.safePivot = character:GetPivot()
 end
 
+-- Independent self-protection: never rely on detecting a nearby attacker first.
+-- The public YARHM backup uses 250 studs/s or 250 rad/s on the local root.
 guardAntiFling = function()
-    local guard = antiFlingGuard
-    if not state.antiFling or state.unloaded or teleportBusy or flingBusy
-        or not guard.character or LocalPlayer.Character ~= guard.character
-        or not guard.root.Parent or guard.humanoid.Health <= 0 then return end
-    if guard.root.Anchored or guard.humanoid.Sit then return end
-
-    -- Detect relocation rather than fighting it. Even high-velocity server
-    -- teleports must not be snapped back to the previous spawn/lobby point.
-    local current = guard.character:GetPivot()
-    local previous = guard.safePivot
-    guard.safePivot = current
-    if previous and (current.Position - previous.Position).Magnitude >= CONFIG.AntiFlingTeleportDistance then
-        local lv = guard.root.AssemblyLinearVelocity.Magnitude
-        local av = guard.root.AssemblyAngularVelocity.Magnitude
-        local permittedTeleport = state.fly and math.max(180, values.coinFarmSpeed * 2.5, values.flySpeed * 2.5)
-            or math.max(110, guard.humanoid.WalkSpeed * 4, (longJumpState.active and (state.ultraLongJump and CONFIG.UltraJumpSpeed or values.longJumpSpeed) * 1.35 or 0))
-        if lv <= permittedTeleport and av <= 160 then
-            guard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
-            return
+    if not antiFlingAvailable() then return end
+    local g = antiFlingGuard
+    local char, root, humanoid = g.character, g.root, g.humanoid
+    if not char or char ~= LocalPlayer.Character or not root or not root.Parent
+        or not humanoid or humanoid.Health <= 0 or humanoid.Sit or root.Anchored then return end
+    -- Do not fight intentional movement features or scripted round/TP transitions.
+    if teleportBusy or flingBusy or state.fly or state.coinFarm or state.strafe
+        or longJumpState.active or os.clock() < g.teleportUntil then return end
+    local linear, angular = root.AssemblyLinearVelocity, root.AssemblyAngularVelocity
+    local now = os.clock()
+    local excessive = linear.Magnitude > 250 or angular.Magnitude > 250
+    if excessive then
+        local prior = g.safePivot
+        -- Do not keep a contaminated, already-flung position as the safe point.
+        -- Only recover from a recent valid sample, and never freeze/anchor the root.
+        if prior and now - g.lastSafeAt <= 6 then
+            pcall(function() char:PivotTo(prior) end)
         end
-        -- Suspicious physics fling: fall through to recovery below.
+        local move = humanoid.MoveDirection
+        local horizontal = Vector3.new(move.X, 0, move.Z)
+        if horizontal.Magnitude > 1 then horizontal = horizontal.Unit end
+        horizontal *= humanoid.WalkSpeed
+        root.AssemblyLinearVelocity = Vector3.new(horizontal.X, 0, horizontal.Z)
+        root.AssemblyAngularVelocity = Vector3.zero
+        antiFlingLog("Neutralized own extreme physics (linear=" .. math.floor(linear.Magnitude)
+            .. ", angular=" .. math.floor(angular.Magnitude) .. ")")
+        return
     end
-    if os.clock() < guard.teleportUntil then return end
-
-    -- AntiFling must remain operational while Coin Farm owns Fly/NoClip.
-    -- Respect the configured movement speed and ignore discrete normal-speed
-    -- game teleports (handled by the teleport-grace branch above).
-    local velocity = guard.root.AssemblyLinearVelocity
-    local angular = guard.root.AssemblyAngularVelocity
-    local permitted = state.fly and math.max(180, values.coinFarmSpeed * 2.5, values.flySpeed * 2.5)
-        or math.max(110, guard.humanoid.WalkSpeed * 4, (longJumpState.active and (state.ultraLongJump and CONFIG.UltraJumpSpeed or values.longJumpSpeed) * 1.35 or 0))
-    -- Ground-safe recovery: never PivotTo the old full character transform and
-    -- never clamp normal Y motion. That old recovery could push the avatar a
-    -- little into thin floors / ramps. Only kill suspicious spin and cap the
-    -- horizontal launch while Roblox keeps control of jumping/falling/grounding.
-    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
-    local abnormal = horizontal.Magnitude > permitted or angular.Magnitude > 160
-    if abnormal then
-        guard.root.AssemblyAngularVelocity = Vector3.zero
-        if horizontal.Magnitude > permitted then
-            local cappedHorizontal = horizontal.Unit * math.min(permitted * 0.5, 65)
-            guard.root.AssemblyLinearVelocity = Vector3.new(cappedHorizontal.X, velocity.Y, cappedHorizontal.Z)
-        end
+    -- Update safe position only during ordinary movement, not while already being thrown.
+    if linear.Magnitude < 100 and angular.Magnitude < 50
+        and (humanoid.FloorMaterial ~= Enum.Material.Air or not g.safePivot) then
+        g.safePivot = char:GetPivot()
+        g.lastSafeAt = now
     end
 end
 
@@ -5699,20 +5468,23 @@ local function updateMovement(deltaTime)
     end
 
 end
-addConnection(RunService.PreSimulation:Connect(function(deltaTime)
+-- Independent YARHM-style Heartbeat connections: detector and neutralizer.
+addConnection(RunService.Heartbeat:Connect(function()
     local ok, err = pcall(updateAntiFling)
     if not ok then
         UIRefs.setAntiFlingToggle(false)
-        UIRefs.Status.Text = "AntiFling error: " .. tostring(err)
+        UIRefs.Status.Text = "AntiFling detector error: " .. tostring(err)
     end
-    updateMovement(deltaTime)
 end))
-addConnection(RunService.PostSimulation:Connect(function()
+addConnection(RunService.Heartbeat:Connect(function()
     local ok, err = pcall(guardAntiFling)
     if not ok then
         UIRefs.setAntiFlingToggle(false)
-        UIRefs.Status.Text = "AntiFling error: " .. tostring(err)
+        UIRefs.Status.Text = "AntiFling neutralizer error: " .. tostring(err)
     end
+end))
+addConnection(RunService.PreSimulation:Connect(function(deltaTime)
+    updateMovement(deltaTime)
 end))
 
 -- Release an idle hold before the normal jump or Infinite Jump is processed.
@@ -6136,6 +5908,12 @@ local function unload()
         end)
     end
 end
+
+-- Publish a synchronous stop entry only after all cleanup functions are ready.
+UIRefs.reloadStop = Instance.new("BindableFunction")
+UIRefs.reloadStop.Name = "ScriptMM2Unload"
+UIRefs.reloadStop.OnInvoke = unload
+UIRefs.reloadStop.Parent = UIRefs.ScriptMM2
 
 --// Travel: explicit spawn markers only. Never choose a random floor or another player.
 do
@@ -6591,4 +6369,4 @@ setMainVisible(true)
 setCharacterMovement()
 refreshRoles()
 
-print("[ScriptMM2 PC] " .. VERSION .. " loaded successfully. PC-only build; selected-player Fling restored.")
+print("[ScriptMM2 PC] " .. VERSION .. " loaded successfully. PC-only build; YARHM SkidFling ready.")
