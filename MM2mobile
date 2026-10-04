@@ -6,7 +6,7 @@
 --// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
 
 local VERSION = "V1.0"
-local MOBILE_BUILD = true
+local MOBILE_BUILD = true -- V1.0 mobile: safe toggle audio
 local UIRefs = {}
 
 local Players = game:GetService("Players")
@@ -47,6 +47,30 @@ local MenuAudio = {
 local function playMenuSound(which)
     local sound = MenuAudio.ready[which]
     if not sound or not sound.Parent then return end
+    pcall(function()
+        sound:Stop()
+        sound.TimePosition = 0
+        sound:Play()
+    end)
+end
+
+--// Android safety: some executors can register local MP3 assets but crash the
+--// Roblox client when those custom assets are played from rapid UI toggles.
+--// Keep toggle feedback on Roblox's built-in sound, independent from GitHub MP3s.
+local MobileToggleSounds = {}
+local function playSafeToggleSound(enabled)
+    local key = enabled and "on" or "off"
+    local sound = MobileToggleSounds[key]
+    if not sound or not sound.Parent then
+        sound = Instance.new("Sound")
+        sound.Name = "ScriptMM2_MobileSafeToggle_" .. key
+        sound.SoundId = "rbxasset://sounds/electronicpingshort.wav"
+        sound.PlaybackSpeed = enabled and 1.18 or 0.82
+        sound.Volume = enabled and 0.42 or 0.65
+        sound.Looped = false
+        sound.Parent = SoundService
+        MobileToggleSounds[key] = sound
+    end
     pcall(function()
         sound:Stop()
         sound.TimePosition = 0
@@ -1660,7 +1684,9 @@ local function addToggle(name, order, callback)
         local wasEnabled = enabled
         setEnabled(not enabled)
         if wasEnabled ~= enabled then
-            playMenuSound(enabled and "toggleOn" or "toggleOff")
+            -- Never play executor-local MP3 assets from toggle clicks on Android.
+            -- This avoids the native client freeze/crash seen on Delta/Xeno-like mobile executors.
+            playSafeToggleSound(enabled)
         end
     end))
 
