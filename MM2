@@ -1,4 +1,12 @@
+--// ScriptMM2 V1.0 PC
+--// PC UPDATE
+--// • Restored selected-player Fling in SPECTATE.
+--// • Choose one player, then use Fling Selected to start/stop that target.
+--// • Android/mobile UI branch retired; dedicated touch controls removed.
+--// • Existing PC Silent Revolver, Role HUD, Coin Farm, ESP and TP fixes preserved.
+
 --// ScriptMM2
+--// V1.0 PC: AntiFling ground-safe fix (reduced collision pairs; preserves vertical floor physics).
 --// V0.9.37: adaptive B AimLock prediction for jump spam and rapid direction changes.
 --// V0.9.36: four-language interface, English default, hot-switch Language tab.
 --// UI and callback references are grouped to keep the root chunk below Luau register limits.
@@ -6,6 +14,7 @@
 --// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
 
 local VERSION = "V1.0"
+local PC_ONLY_BUILD = true -- V1.0: Android/mobile branch retired
 local UIRefs = {}
 
 local Players = game:GetService("Players")
@@ -119,7 +128,6 @@ task.spawn(setupMenuAudio)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-local IsMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
 
 local CONFIG = {
     DefaultWalkSpeed = 16,
@@ -211,18 +219,14 @@ local state = {
     espLines = false,
     espNames = true,
     espInfoCards = true, -- controls ESP name/role/distance billboard independently of highlights
+    roleHud = false, -- compact on-screen local role card
     aimLock = false,
-    smoothAim = false,
     fovIndicator = false, -- read-only FOV target preview, never alters camera or shot
-    xenoShotSnap = false, -- opt-in J key; camera briefly moves, NOT Silent Aim
     silentGun = false, -- desired setting; remains ON while Gun is absent / during respawn
     silentKnife = false,
     aimVisibleOnly = true,
-    aimTeamCheck = true,
-    aimMurdererOnly = true,
-    aimHead = false,
+    wallbang = false, -- experimental: ignore client LOS checks for Silent Revolver/FOV
     antiFling = false,
-    hitRegistrationDiagnostic = false, -- read-only client position/LOS diagnostics
     bringActive = false, -- local attempt only; server replication is not guaranteed
     coinFarm = false,
     spectateMurderer = false, -- compatibility flag: any spectator mode active
@@ -306,7 +310,6 @@ local Hero = ""
 local rolesAvailable = false
 local rolesUpdatedAt = -math.huge
 local updateAimLock
-local updateSmoothAim
 local findRevolver
 local flingBusy = false
 local flingTrip = nil
@@ -322,7 +325,6 @@ local roleAlive
 local shootMurdererBusy = false
 local finishMurdererShot
 local aimLockBindingName = "ScriptMM2AimLock_" .. tostring(LocalPlayer.UserId) .. "_" .. tostring(os.clock())
-local smoothAimBindingName = "ScriptMM2SmoothAim_" .. tostring(LocalPlayer.UserId) .. "_" .. tostring(os.clock())
 
 --// Experimental remote-argument Silent Aim based on the supplied readable MM2 script.
 --// Does not turn the camera, fire weapons automatically, or promise server acceptance.
@@ -458,34 +460,55 @@ function Silent.xenoTargetCFrame()
     if not camera or not mine or not target then return nil end
     local hum = mine:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return nil end
+    local targetHumanoid = target.Parent and target.Parent:FindFirstChildOfClass("Humanoid")
     local point, visible = camera:WorldToViewportPoint(target.Position)
     if not visible or point.Z <= 0 then return nil end
     local center = camera.ViewportSize * 0.5
     if (Vector2.new(point.X, point.Y) - center).Magnitude > values.aimRadius then return nil end
-    if state.aimVisibleOnly then
+    if state.aimVisibleOnly and not state.wallbang then
         local params = RaycastParams.new()
         params.FilterType = Enum.RaycastFilterType.Exclude
         params.FilterDescendantsInstances = {mine, target.Parent}
         params.IgnoreWater = true
         if Workspace:Raycast(camera.CFrame.Position, target.Position - camera.CFrame.Position, params) then return nil end
     end
+
+    -- V1.0: adaptive Silent Revolver prediction. Airborne targets used to feel
+    -- sluggish because vertical lead was capped to a short fixed window. Keep
+    -- the correction bounded, but react faster to Jumping/Freefall and range.
     local velocity = target.AssemblyLinearVelocity
-    local horizontalLead = math.clamp(values.aimLeadMs / 1000, 0, 0.22)
+    local distance = (target.Position - camera.CFrame.Position).Magnitude
+    local horizontalLead = math.clamp(values.aimLeadMs / 1000 + distance / 2600, 0, 0.24)
     local offset = Vector3.new(velocity.X, 0, velocity.Z) * horizontalLead
-    if offset.Magnitude > 5 then offset = offset.Unit * 5 end
+    if offset.Magnitude > 5.5 then offset = offset.Unit * 5.5 end
     local predicted = target.Position + offset
-    if math.abs(velocity.Y) > 4 then
-        local t = math.clamp(values.jumpLeadMs / 1000, 0, 0.16)
-        predicted += Vector3.new(0, math.clamp(velocity.Y * t - 0.5 * Workspace.Gravity * t * t, -3, 3.5), 0)
+
+    local airborne = math.abs(velocity.Y) > 3.5
+    if targetHumanoid and targetHumanoid.Health > 0 then
+        local targetState = targetHumanoid:GetState()
+        airborne = airborne
+            or targetHumanoid.FloorMaterial == Enum.Material.Air
+            or targetState == Enum.HumanoidStateType.Jumping
+            or targetState == Enum.HumanoidStateType.Freefall
     end
+
+    if airborne then
+        local t = values.jumpLeadMs / 1000 + distance / 1900
+        if velocity.Y > 8 then
+            t += 0.018 -- rising target: catch the jump sooner
+        elseif velocity.Y < -8 then
+            t += 0.010 -- falling target: small extra fall compensation
+        end
+        t = math.clamp(t, 0.035, 0.22)
+        local vertical = velocity.Y * t - 0.5 * Workspace.Gravity * t * t
+        predicted += Vector3.new(0, math.clamp(vertical, -5.0, 5.5), 0)
+    end
+
     return CFrame.new(predicted)
 end
 
 function Silent.installXeno()
     if Silent.xenoInstalled then return true end
-    if UIS.PreferredInput == Enum.PreferredInput.Touch then
-        return false, "PC mouse mode only; touch fire signature differs"
-    end
     if type(getconnections) ~= "function" then return false, "Xeno getconnections unavailable" end
     local char, bag = LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")
     local gun = (char and char:FindFirstChild("Gun")) or (bag and bag:FindFirstChild("Gun"))
@@ -673,15 +696,13 @@ local function restoreCameraFOV()
 end
 
 local function isPointerMove(input, source)
-    return source and ((source.UserInputType == Enum.UserInputType.Touch and input == source)
-        or (source.UserInputType == Enum.UserInputType.MouseButton1
-            and input.UserInputType == Enum.UserInputType.MouseMovement))
+    return source and source.UserInputType == Enum.UserInputType.MouseButton1
+        and input.UserInputType == Enum.UserInputType.MouseMovement
 end
 
 local function isPointerEnd(input, source)
-    return source and ((source.UserInputType == Enum.UserInputType.Touch and input == source)
-        or (source.UserInputType == Enum.UserInputType.MouseButton1
-            and input.UserInputType == Enum.UserInputType.MouseButton1))
+    return source and source.UserInputType == Enum.UserInputType.MouseButton1
+        and input.UserInputType == Enum.UserInputType.MouseButton1
 end
 
 -- V1.0: restrained graphite / mint design; common style for toggles and selected tabs.
@@ -734,28 +755,23 @@ local TEXT_TRANSLATIONS = {
     ["StrafeSpeed"] = {ru="Скорость стрейфа", uk="Швидкість стрейфу", de="Strafe-Tempo"},
     ["Long Jump Speed"] = {ru="Скорость дальнего прыжка", uk="Швидкість далекого стрибка", de="Weitsprungtempo"},
     ["AimLock Murderer [B]"] = {ru="Наводка на убийцу [B]", uk="Наведення на вбивцю [B]", de="Zielerfassung Mörder [B]"},
-    ["Smooth Aim (camera only)"] = {ru="Плавная наводка (камера)", uk="Плавне наведення (камера)", de="Sanftes Zielen (Kamera)"},
     ["Silent Revolver (experimental)"] = {ru="Тихий револьвер (эксперимент)", uk="Тихий револьвер (експеримент)", de="Silent-Revolver (experimentell)"},
     ["Xeno Silent Revolver (FOV experimental)"] = {ru="Xeno тихий револьвер (FOV, эксперимент)", uk="Xeno тихий револьвер (FOV, експеримент)", de="Xeno Silent-Revolver (FOV, experimentell)"},
     ["Silent Revolver (paused: HUD safety)"] = {ru="Тихий револьвер (пауза: защита HUD)", uk="Тихий револьвер (пауза: захист HUD)", de="Silent-Revolver (Pause: HUD-Schutz)"},
-    ["Silent Revolver V2 (GunClient test)"] = {ru="Сайлент револьвер V2 (тест GunClient)", uk="Сайлент револьвер V2 (тест GunClient)", de="Silent-Revolver V2 (GunClient-Test)"},
+    ["Silent Revolver"] = {ru="Тихий револьвер", uk="Тихий револьвер", de="Silent-Revolver"},
     ["Silent V2 armed: one client shot; server hit unverified"] = {ru="Silent V2 включён: один выстрел; серверное попадание не проверено", uk="Silent V2 увімкнено: один постріл; серверне влучання не перевірено", de="Silent V2 aktiv: ein Schuss; Servertreffer ungeprüft"},
     ["Xeno Silent Gun: FOV target enabled • server hit unverified"] = {ru="Xeno Silent Gun: цель в FOV • попадание сервером не проверено", uk="Xeno Silent Gun: ціль у FOV • влучання сервером не перевірене", de="Xeno Silent Gun: FOV-Ziel aktiv • Servertreffer ungeprüft"},
     ["Silent Knife Throw (short lead)"] = {ru="Тихий бросок ножа (упреждение)", uk="Тихий кидок ножа (випередження)", de="Silent-Messerwurf (kurzer Vorhalt)"},
-    ["Xeno Shot Snap [J] (camera moves)"] = {ru="Быстрый выстрел Xeno [J] (двигает камеру)", uk="Швидкий постріл Xeno [J] (рухає камеру)", de="Xeno-Schnellschuss [J] (Kamera bewegt sich)"},
     ["B AimLock prediction (ms)"] = {ru="Упреждение AimLock B (мс)", uk="Випередження AimLock B (мс)", de="AimLock-B-Vorhalt (ms)"},
     ["B Jump prediction (ms)"] = {ru="Упреждение прыжка B (мс)", uk="Випередження стрибка B (мс)", de="B-Sprungvorhersage (ms)"},
+    ["Air prediction (ms)"] = {ru="Упреждение в воздухе (мс)", uk="Випередження в повітрі (мс)", de="Luft-Vorhersage (ms)"},
     ["Aim circle radius (px)"] = {ru="Радиус прицела (пкс)", uk="Радіус прицілу (пкс)", de="Zielkreisradius (px)"},
     ["Aim tracking speed"] = {ru="Скорость отслеживания цели", uk="Швидкість стеження за ціллю", de="Zielverfolgungstempo"},
     ["Aim visibility check"] = {ru="Проверка видимости", uk="Перевірка видимості", de="Sichtprüfung"},
-    ["Aim team check"] = {ru="Проверка команды", uk="Перевірка команди", de="Teamprüfung"},
-    ["Aim Murderer only (MM2)"] = {ru="Цель — только убийца (MM2)", uk="Ціль — лише вбивця (MM2)", de="Nur Mörder anvisieren (MM2)"},
-    ["Aim at Head (OFF = body)"] = {ru="Целиться в голову (ВЫКЛ = тело)", uk="Цілитися в голову (ВИМК = тіло)", de="Auf Kopf zielen (AUS = Körper)"},
+    ["Wallbang (experimental)"] = {ru="Стрельба через стены (эксперимент)", uk="Стрільба крізь стіни (експеримент)", de="Wallbang (experimentell)"},
     ["AntiFling"] = {ru="Антифлинг", uk="Антифлінг", de="Anti-Fling"},
     ["Inside Fling Murderer"] = {ru="Флинг убийцы", uk="Флінг убивці", de="Mörder wegschleudern"},
     ["Inside Fling Sheriff"] = {ru="Флинг шерифа", uk="Флінг шерифа", de="Sheriff wegschleudern"},
-    ["Fling Selected"] = {ru="Флинг выбранного", uk="Флінг вибраного", de="Ausgewählten wegschleudern"},
-    ["Release Fling / Return"] = {ru="Остановить флинг / Вернуться", uk="Зупинити флінг / Повернутися", de="Fling stoppen / Zurück"},
     ["WATCH A ROLE"] = {ru="НАБЛЮДЕНИЕ ЗА РОЛЬЮ", uk="СПОСТЕРЕЖЕННЯ ЗА РОЛЛЮ", de="ROLLE BEOBACHTEN"},
     ["Spectate Murderer"] = {ru="Смотреть за убийцей", uk="Дивитися за вбивцею", de="Mörder beobachten"},
     ["Spectate Sheriff"] = {ru="Смотреть за шерифом", uk="Дивитися за шерифом", de="Sheriff beobachten"},
@@ -772,7 +788,6 @@ local TEXT_TRANSLATIONS = {
     ["Select a player. Normal weapon only."] = {ru="Выбери игрока. Только обычное оружие.", uk="Обери гравця. Лише звичайна зброя.", de="Wähle einen Spieler. Nur normale Waffen."},
     ["Attack Selected [K]"] = {ru="Атаковать выбранного [K]", uk="Атакувати вибраного [K]", de="Ausgewählten angreifen [K]"},
     ["FLING: SELECT ONE PLAYER"] = {ru="ФЛИНГ: ВЫБЕРИ ОДНОГО ИГРОКА", uk="ФЛІНГ: ОБЕРИ ОДНОГО ГРАВЦЯ", de="FLING: EINEN SPIELER WÄHLEN"},
-    ["Select a player below, then press Fling Selected."] = {ru="Выбери игрока ниже и нажми «Флинг выбранного».", uk="Обери гравця нижче й натисни «Флінг вибраного».", de="Wähle unten einen Spieler und drücke „Ausgewählten wegschleudern“."},
     ["Refresh Roles"] = {ru="Обновить роли", uk="Оновити ролі", de="Rollen aktualisieren"},
     ["Grab Revolver (return if collected)"] = {ru="Взять револьвер (вернуться после подбора)", uk="Взяти револьвер (повернутися після підбору)", de="Revolver holen (zurück bei Aufnahme)"},
     ["Grab Revolver (return if collected) [H]"] = {ru="Взять револьвер (возврат при подборе) [H]", uk="Взяти револьвер (повернення при підборі) [H]", de="Revolver holen (zurück bei Aufnahme) [H]"},
@@ -807,15 +822,10 @@ local TEXT_TRANSLATIONS = {
     ["Revolver collected • returned to starting point"] = {ru="Револьвер подобран • вернулся в исходную точку", uk="Револьвер підібрано • повернувся у вихідну точку", de="Revolver aufgenommen • zurück zum Ausgangspunkt"},
     ["Revolver not collected • staying at the drop"] = {ru="Револьвер не подобран • остаюсь возле него", uk="Револьвер не підібрано • залишаюся біля нього", de="Revolver nicht aufgenommen • bleibe beim Fundort"},
     ["Waiting for your living character..."] = {ru="Ожидание живого персонажа...", uk="Очікування живого персонажа...", de="Warte auf deinen lebenden Charakter..."},
-    ["OFF: no tracking or hit requests."] = {ru="ВЫКЛ: нет отслеживания и запросов попадания.", uk="ВИМК: немає стеження й запитів влучання.", de="AUS: keine Verfolgung oder Trefferanfragen."},
-    ["OFF: observes replicated player positions only; no server hit confirmation."] = {ru="ВЫКЛ: только позиции игроков; нет подтверждения попаданий сервером.", uk="ВИМК: лише позиції гравців; немає підтвердження влучань сервером.", de="AUS: nur replizierte Spielerpositionen; keine Trefferbestätigung."},
     ["Selected player left. Choose another player."] = {ru="Игрок вышел. Выбери другого.", uk="Гравець вийшов. Обери іншого.", de="Spieler hat verlassen. Wähle einen anderen."},
     ["Stop current fling before changing target."] = {ru="Останови текущий флинг перед сменой цели.", uk="Зупини поточний флінг перед зміною цілі.", de="Stoppe den Fling vor dem Zielwechsel."},
     ["Stopped. Choose a target to retry."] = {ru="Остановлено. Выбери цель для повтора.", uk="Зупинено. Обери ціль для повтору.", de="Gestoppt. Wähle ein Ziel für einen neuen Versuch."},
     ["Spectate stopped for shot"] = {ru="Просмотр остановлен для выстрела", uk="Перегляд зупинено для пострілу", de="Zuschauen für Schuss beendet"},
-    ["Fling Selected: choose a player in SPECTATE first"] = {ru="Флинг: сначала выбери игрока в НАБЛЮДЕНИИ", uk="Флінг: спершу обери гравця у СПОСТЕРЕЖЕННІ", de="Fling: Wähle zuerst einen Spieler unter ZUSCHAUEN"},
-    ["Fling Selected: attempt finished; server result unverified."] = {ru="Флинг: попытка закончена; результат сервера неизвестен.", uk="Флінг: спробу завершено; результат сервера невідомий.", de="Fling: Versuch abgeschlossen; Serverergebnis unbestätigt."},
-    ["Fling Selected: stopped • returned"] = {ru="Флинг остановлен • возврат выполнен", uk="Флінг зупинено • повернення виконано", de="Fling gestoppt • zurückgekehrt"},
     ["Coin Farm: ON • round ended; waiting for next coins"] = {ru="Фарм монет: раунд окончен • ждём новые монеты", uk="Фарм монет: раунд завершено • чекаємо нові монети", de="Münzfarm: Runde beendet • warte auf neue Münzen"},
     ["Coin Farm: new round • waiting for coin spawn"] = {ru="Фарм монет: новый раунд • ждём появления монет", uk="Фарм монет: новий раунд • чекаємо появи монет", de="Münzfarm: neue Runde • warte auf Münzen"},
     ["Coin Farm: ON • defeated; waiting for next round"] = {ru="Фарм монет: ВКЛ • погиб; ожидание следующего раунда", uk="Фарм монет: УВІМК • загинув; очікування наступного раунду", de="Münzfarm: AN • besiegt; warte auf nächste Runde"},
@@ -832,12 +842,8 @@ local TEXT_TRANSLATIONS = {
     ["Revolver detected • return cancelled: character changed/dead"] = {ru="Револьвер обнаружен • возврат отменён: смена персонажа/смерть", uk="Револьвер виявлено • повернення скасовано: зміна персонажа/смерть", de="Revolver erkannt • Rückkehr abgebrochen: Charakter gewechselt/tot"},
     ["AimLock: ON • B = OFF"] = {ru="Наводка: ВКЛ • B = ВЫКЛ", uk="Наведення: УВІМК • B = ВИМК", de="Zielerfassung: AN • B = AUS"},
     ["AimLock: OFF • B = ON"] = {ru="Наводка: ВЫКЛ • B = ВКЛ", uk="Наведення: ВИМК • B = УВІМК", de="Zielerfassung: AUS • B = AN"},
-    ["Smooth Aim: camera assistance ON (not Silent Aim)"] = {ru="Плавная наводка: ВКЛ (двигает камеру, не Silent Aim)", uk="Плавне наведення: УВІМК (рухає камеру, не Silent Aim)", de="Sanftes Zielen: AN (Kamera bewegt sich, kein Silent Aim)"},
-    ["Smooth Aim: OFF"] = {ru="Плавная наводка: ВЫКЛ", uk="Плавне наведення: ВИМК", de="Sanftes Zielen: AUS"},
     ["Silent Revolver armed • server hit unverified"] = {ru="Тихий револьвер включён • попадание сервером не подтверждено", uk="Тихий револьвер увімкнено • влучання сервером не підтверджено", de="Silent-Revolver bereit • Servertreffer unbestätigt"},
     ["Silent Knife armed • no auto throw • server unverified"] = {ru="Тихий нож включён • без автоброска • сервер не проверен", uk="Тихий ніж увімкнено • без автокидка • сервер не перевірено", de="Silent-Messer bereit • kein automatischer Wurf • Server unbestätigt"},
-    ["Xeno Snap: OFF"] = {ru="Быстрый выстрел Xeno: ВЫКЛ", uk="Швидкий постріл Xeno: ВИМК", de="Xeno-Schnellschuss: AUS"},
-    ["Xeno Snap: ON • J = quick camera shot • NOT Silent Aim"] = {ru="Быстрый выстрел Xeno: ВКЛ • J = движение камеры • НЕ Silent Aim", uk="Швидкий постріл Xeno: УВІМК • J = рух камери • НЕ Silent Aim", de="Xeno-Schnellschuss: AN • J = Kamera-Schuss • KEIN Silent Aim"},
     ["Role ESP: GetPlayerData not found"] = {ru="ESP ролей: GetPlayerData не найден", uk="ESP ролей: GetPlayerData не знайдено", de="Rollen-ESP: GetPlayerData nicht gefunden"},
     ["Role ESP: failed to read roles"] = {ru="ESP ролей: не удалось прочитать роли", uk="ESP ролей: не вдалося зчитати ролі", de="Rollen-ESP: Rollen konnten nicht gelesen werden"},
     ["Role: Murderer"] = {ru="Роль: Убийца", uk="Роль: Вбивця", de="Rolle: Mörder"},
@@ -861,7 +867,6 @@ local TEXT_TRANSLATIONS = {
     [" [OFF]"] = {ru=" [ВЫКЛ]", uk=" [ВИМК]", de=" [AUS]"},
     [" [WATCHING]"] = {ru=" [СМОТРЮ]", uk=" [ДИВЛЮСЯ]", de=" [BEOBACHTET]"},
     ["Coin Farm: "] = {ru="Фарм монет: ", uk="Фарм монет: ", de="Münzfarm: "},
-    ["Fling Selected: "] = {ru="Флинг выбранного: ", uk="Флінг вибраного: ", de="Ausgewählter Fling: "},
     ["TP Player: "] = {ru="ТП к игроку: ", uk="ТП до гравця: ", de="Spieler-TP: "},
     ["Shoot: "] = {ru="Выстрел: ", uk="Постріл: ", de="Schuss: "},
     ["Attack: "] = {ru="Атака: ", uk="Атака: ", de="Angriff: "},
@@ -889,12 +894,13 @@ local TEXT_TRANSLATIONS = {
     ["Spin"] = {ru="Вращение", uk="Обертання", de="Drehen"},
     ["ESP Players"] = {ru="ESP игроков", uk="ESP гравців", de="Spieler-ESP"},
     ["Role ESP"] = {ru="ESP ролей", uk="ESP ролей", de="Rollen-ESP"},
+    ["Role HUD"] = {ru="HUD моей роли", uk="HUD моєї ролі", de="Rollen-HUD"},
+    ["YOUR ROLE"] = {ru="ТВОЯ РОЛЬ", uk="ТВОЯ РОЛЬ", de="DEINE ROLLE"},
     ["Innocent ESP"] = {ru="ESP мирных", uk="ESP мирних", de="Unschuldigen-ESP"},
     ["ESP Lines"] = {ru="Линии ESP", uk="Лінії ESP", de="ESP-Linien"},
     ["ESP Names"] = {ru="Имена ESP", uk="Імена ESP", de="ESP-Namen"},
     ["ESP Info Cards"] = {ru="Таблички ESP", uk="Таблички ESP", de="ESP-Infokarten"},
     ["FOV"] = {ru="Поле зрения", uk="Поле зору", de="Sichtfeld"},
-    ["Hit Position Diagnostic (READ ONLY)"] = {ru="Диагностика попаданий (ТОЛЬКО ЧТЕНИЕ)", uk="Діагностика влучань (ЛИШЕ ЧИТАННЯ)", de="Trefferdiagnose (NUR LESEN)"},
     ["Coin Farm: ON • defeated; waiting for round end"] = {ru="Фарм монет: ВКЛ • погиб; ожидание конца раунда", uk="Фарм монет: УВІМК • загинув; очікування завершення раунду", de="Münzfarm: AN • besiegt; warte auf Rundenende"},
     ["Coin Farm: finish Fling / TP / Shot first"] = {ru="Фарм монет: сначала заверши флинг / ТП / выстрел", uk="Фарм монет: спершу заверши флінг / ТП / постріл", de="Münzfarm: zuerst Fling / TP / Schuss beenden"},
     ["Coin Farm: 0 targets; candidate: "] = {ru="Фарм монет: 0 целей; кандидат: ", uk="Фарм монет: 0 цілей; кандидат: ", de="Münzfarm: 0 Ziele; Kandidat: "},
@@ -910,8 +916,6 @@ local TEXT_TRANSLATIONS = {
     ["Fling: stop current target before switching roles"] = {ru="Флинг: останови текущую цель перед сменой роли", uk="Флінг: зупини поточну ціль перед зміною ролі", de="Fling: aktuelles Ziel vor Rollenwechsel stoppen"},
     ["Fling: stop selected fling first"] = {ru="Флинг: сначала останови выбранный флинг", uk="Флінг: спершу зупини вибраний флінг", de="Fling: zuerst gewählten Fling stoppen"},
     ["Fling: wait for the revolver pickup to finish"] = {ru="Флинг: дождись завершения подбора револьвера", uk="Флінг: дочекайся завершення підбору револьвера", de="Fling: Warte auf Revolveraufnahme"},
-    ["Fling Selected: chosen player is not alive / available"] = {ru="Флинг: выбранный игрок мёртв или недоступен", uk="Флінг: вибраний гравець мертвий або недоступний", de="Fling: gewählter Spieler ist tot oder nicht verfügbar"},
-    ["Fling Selected: stop current Fling / TP first"] = {ru="Флинг: сначала останови текущий флинг / ТП", uk="Флінг: спершу зупини поточний флінг / ТП", de="Fling: zuerst aktuellen Fling / TP stoppen"},
     ["Shoot: finish pickup / stop Fling first"] = {ru="Выстрел: сначала закончи подбор / останови флинг", uk="Постріл: спершу заверши підбір / зупини флінг", de="Schuss: zuerst Aufnahme beenden / Fling stoppen"},
     ["TP Player: character changed; cancelled"] = {ru="ТП к игроку: персонаж сменился; отменено", uk="ТП до гравця: персонаж змінився; скасовано", de="Spieler-TP: Charakter gewechselt; abgebrochen"},
     ["TP Player: stop Fling / finish weapon action first"] = {ru="ТП к игроку: сначала останови флинг / действие с оружием", uk="ТП до гравця: спершу зупини флінг / дію зі зброєю", de="Spieler-TP: zuerst Fling / Waffenaktion beenden"},
@@ -945,7 +949,6 @@ local TEXT_TRANSLATIONS = {
     ["Shoot error: "] = {ru="Ошибка выстрела: ", uk="Помилка пострілу: ", de="Schussfehler: "},
     ["Silent Revolver OFF: "] = {ru="Тихий револьвер ВЫКЛ: ", uk="Тихий револьвер ВИМК: ", de="Silent-Revolver AUS: "},
     ["Silent Knife OFF: "] = {ru="Тихий нож ВЫКЛ: ", uk="Тихий ніж ВИМК: ", de="Silent-Messer AUS: "},
-    ["ScriptMM2 | Mobile  •  "] = {ru="ScriptMM2 | Телефон  •  ", uk="ScriptMM2 | Телефон  •  ", de="ScriptMM2 | Mobil  •  "},
     ["ScriptMM2 | PC  •  "] = {ru="ScriptMM2 | ПК  •  ", uk="ScriptMM2 | ПК  •  ", de="ScriptMM2 | PC  •  "},
     ["Real replicated roots, not preview hitboxes:"] = {ru="Настоящие позиции игроков, не предпросмотр хитбоксов:", uk="Справжні позиції гравців, не попередній перегляд хітбоксів:", de="Echte replizierte Positionen, keine Vorschau-Hitboxen:"},
     ["No living player roots currently replicated."] = {ru="Сейчас нет доступных позиций живых игроков.", uk="Зараз немає доступних позицій живих гравців.", de="Derzeit keine Positionen lebender Spieler repliziert."},
@@ -975,7 +978,7 @@ local function translateText(source)
     end
     -- Dynamic role button labels retain their ON/OFF suffix and remain translatable.
     if result == source then
-        for _, prefix in ipairs({"Spectate Murderer", "Spectate Sheriff", "Fling Selected", "Bring All"}) do
+        for _, prefix in ipairs({"Spectate Murderer", "Spectate Sheriff", "Bring All"}) do
             if string.sub(source, 1, #prefix) == prefix and TEXT_TRANSLATIONS[prefix] then
                 result = TEXT_TRANSLATIONS[prefix][lang] .. string.sub(source, #prefix + 1)
                 break
@@ -1417,13 +1420,6 @@ do
         UIStyling.userScale=percent/100
         sizeValue.Text=tostring(percent).."%"
         fill.Size=UDim2.fromScale((percent-75)/50,1)
-        -- Fit the requested size within the viewport on mobile.
-        if IsMobile then
-            local camera=Workspace.CurrentCamera
-            local viewport=camera and camera.ViewportSize or Vector2.new(390,800)
-            Scale.Scale=math.min(1, (viewport.X-22)/(580*UIStyling.userScale),
-                (viewport.Y-30)/(610*UIStyling.userScale))
-        end
         if UIRefs.Main.Visible then UIRefs.WindowScale.Scale=UIStyling.userScale end
     end
     local dragging=nil
@@ -1432,7 +1428,7 @@ do
         if w>0 then updateSize(75+50*math.clamp((x-track.AbsolutePosition.X)/w,0,1)) end
     end
     addConnection(track.InputBegan:Connect(function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        if input.UserInputType==Enum.UserInputType.MouseButton1 then
             dragging=input
             moveSize(input.Position.X)
         end
@@ -1524,46 +1520,7 @@ create("UICorner", {
     CornerRadius = UDim.new(0, 10),
 }, UIRefs.reopen)
 
-UIRefs.MobileFlyControls = create("Frame", {
-    Name = "MobileFlyControls",
-    AnchorPoint = Vector2.new(1, 1),
-    Position = UDim2.new(1, -20, 1, -25),
-    Size = UDim2.fromOffset(62, 132),
-    BackgroundTransparency = 1,
-    Visible = false,
-}, UIRefs.ScriptMM2)
-
-UIRefs.FlyUpButton = create("TextButton", {
-    Name = "FlyUp",
-    Position = UDim2.fromOffset(0, 0),
-    Size = UDim2.fromOffset(62, 58),
-    BackgroundColor3 = Color3.fromRGB(38, 115, 72),
-    BackgroundTransparency = 0.08,
-    BorderSizePixel = 0,
-    Font = Enum.Font.GothamBold,
-    Text = "▲",
-    TextColor3 = Color3.fromRGB(240, 255, 245),
-    TextSize = 22,
-    AutoButtonColor = false,
-}, UIRefs.MobileFlyControls)
-
-create("UICorner", {CornerRadius = UDim.new(0, 12)}, UIRefs.FlyUpButton)
-
-UIRefs.FlyDownButton = create("TextButton", {
-    Name = "FlyDown",
-    Position = UDim2.fromOffset(0, 68),
-    Size = UDim2.fromOffset(62, 58),
-    BackgroundColor3 = Color3.fromRGB(75, 75, 85),
-    BackgroundTransparency = 0.08,
-    BorderSizePixel = 0,
-    Font = Enum.Font.GothamBold,
-    Text = "▼",
-    TextColor3 = Color3.fromRGB(240, 240, 245),
-    TextSize = 22,
-    AutoButtonColor = false,
-}, UIRefs.MobileFlyControls)
-
-create("UICorner", {CornerRadius = UDim.new(0, 12)}, UIRefs.FlyDownButton)
+--// PC-only build: dedicated mobile fly controls removed.
 
 UIRefs.dragHandle = create("Frame", {
     Name = "DragHandle",
@@ -1699,7 +1656,7 @@ local function addSlider(name, minValue, maxValue, defaultValue, order, callback
     end
 
     addConnection(bar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
             if dragInput then return end
             dragInput = input
             setValue(valueFromX(input.Position.X))
@@ -1756,7 +1713,6 @@ UIRefs.flyButton, UIRefs.setFlyToggle = addToggle("Fly", 5, function(enabled)
     -- Auto Coin Farm is a persistent intent, not the current actuator state.
     -- Round end legitimately turns this controller off while the farm remains ON.
     state.fly = enabled
-    UIRefs.MobileFlyControls.Visible = IsMobile and enabled
 end)
 
 UIRefs.infiniteButton = nil
@@ -1823,9 +1779,6 @@ UIRefs.aimLockButton = nil
 UIRefs.setAimLockToggle = nil
 UIRefs.aimLockButton, UIRefs.setAimLockToggle = addToggle("AimLock Murderer [B]", 14, function(enabled)
     state.aimLock = enabled
-    if enabled and state.smoothAim and UIRefs.setSmoothAimToggle then
-        UIRefs.setSmoothAimToggle(false)
-    end
     RunService:UnbindFromRenderStep(aimLockBindingName)
 
     if enabled and updateAimLock and not state.unloaded then
@@ -1840,27 +1793,10 @@ UIRefs.aimLockButton, UIRefs.setAimLockToggle = addToggle("AimLock Murderer [B]"
     end
 end)
 
---// V0.9.11: camera-only smooth aim. No __namecall/hook API required.
-UIRefs.setSmoothAimToggle = nil
-UIRefs._unused, UIRefs.setSmoothAimToggle = addToggle("Smooth Aim (camera only)", 14.10, function(enabled)
-    state.smoothAim = enabled
-    RunService:UnbindFromRenderStep(smoothAimBindingName)
-    if not enabled and UIRefs.AimCircle and not state.fovIndicator then UIRefs.AimCircle.Visible = false end
-    if enabled and state.aimLock and UIRefs.setAimLockToggle then
-        UIRefs.setAimLockToggle(false)
-    end
-    if enabled and not state.unloaded then
-        RunService:BindToRenderStep(smoothAimBindingName, Enum.RenderPriority.Camera.Value + 2, updateSmoothAim)
-    end
-    if not state.unloaded then
-        UIRefs.Status.Text = enabled and "Smooth Aim: camera assistance ON (not Silent Aim)" or "Smooth Aim: OFF"
-    end
-end)
-
 --// V0.9.39: stand-alone screen-space FOV target preview (does NOT alter a shot).
 UIRefs._unused, UIRefs.setFOVIndicatorToggle = addToggle("FOV Target Indicator (visual only)", 14.1005, function(enabled)
     state.fovIndicator = enabled
-    if not enabled and UIRefs.AimCircle and not state.smoothAim then UIRefs.AimCircle.Visible = false end
+    if not enabled and UIRefs.AimCircle then UIRefs.AimCircle.Visible = false end
     if not state.unloaded then
         UIRefs.Status.Text = "FOV preview: shows targets only; no shot redirection"
     end
@@ -1885,11 +1821,11 @@ function Silent.beginXenoWatcher()
                 Silent.restoreXeno(true)
             end
             if Silent.xenoInstalled then
-                Silent.publishXenoStatus("active", "Silent Revolver ON: GunClient connected; server hit unverified")
+                Silent.publishXenoStatus("active", "Silent Revolver ON: connected; server hit unverified")
             else
                 local ok, reason = Silent.installXeno()
                 if ok then
-                    Silent.publishXenoStatus("active", "Silent Revolver ON: GunClient connected; server hit unverified")
+                    Silent.publishXenoStatus("active", "Silent Revolver ON: connected; server hit unverified")
                 elseif tostring(reason) == "Equip/pick up Gun first" then
                     Silent.publishXenoStatus("waiting", "Silent Revolver ON: waiting for revolver")
                 else
@@ -1902,7 +1838,7 @@ function Silent.beginXenoWatcher()
     end)
 end
 UIRefs.setSilentGunToggle = nil
-UIRefs._unused, UIRefs.setSilentGunToggle = addToggle("Silent Revolver V2 (GunClient test)", 14.101, function(enabled)
+UIRefs._unused, UIRefs.setSilentGunToggle = addToggle("Silent Revolver", 14.101, function(enabled)
     state.silentGun = enabled
     if enabled then
         Silent.xenoStatusKey = nil
@@ -1926,27 +1862,13 @@ UIRefs._unused, UIRefs.setSilentKnifeToggle = addToggle("Silent Knife Throw (sho
     UIRefs.Status.Text = state.silentKnife and "Silent Knife armed • no auto throw • server unverified" or "Silent Knife OFF"
 end)
 
---// V0.9.14: hook-free fallback inspired by the submitted Prestige Xeno V4.
---// The source's mouse.Button1Down assignment is invalid (RBXScriptSignal).
---// Reuse the existing guarded X shot instead of adding a second weapon activation
---// to the normal Mouse1 handler (which could double-fire).
-UIRefs.setXenoShotSnapToggle = nil
-UIRefs._unused, UIRefs.setXenoShotSnapToggle = addToggle("Xeno Shot Snap [J] (camera moves)", 14.105, function(enabled)
-    state.xenoShotSnap = enabled
-    if enabled and UIRefs.setSmoothAimToggle and state.smoothAim then UIRefs.setSmoothAimToggle(false) end
-    if enabled and UIRefs.setAimLockToggle and state.aimLock then UIRefs.setAimLockToggle(false) end
-    if not state.unloaded then
-        UIRefs.Status.Text = enabled and "Xeno Snap: ON • J = quick camera shot • NOT Silent Aim" or "Xeno Snap: OFF"
-    end
-end)
-
 --// V0.9.31: velocity-based B AimLock lead; zero disables prediction.
 UIRefs._unused, UIRefs.setAimLead = addSlider("B AimLock prediction (ms)", 0, 300, values.aimLeadMs, 14.109, function(v)
     values.aimLeadMs = v
 end)
 
 --// V0.9.34: separate airborne Y lead, so bunny-hopping does not trail the torso.
-UIRefs._unused, UIRefs.setJumpAimLead = addSlider("B Jump prediction (ms)", 0, 250, values.jumpLeadMs, 14.1095, function(v)
+UIRefs._unused, UIRefs.setJumpAimLead = addSlider("Air prediction (ms)", 0, 250, values.jumpLeadMs, 14.1095, function(v)
     values.jumpLeadMs = v
 end)
 
@@ -1959,19 +1881,17 @@ end)
 UIRefs._unused, UIRefs.setAimVisibleToggle = addToggle("Aim visibility check", 14.13, function(v)
     state.aimVisibleOnly = v
 end)
-UIRefs._unused, UIRefs.setAimTeamToggle = addToggle("Aim team check", 14.14, function(v)
-    state.aimTeamCheck = v
-end)
-UIRefs._unused, UIRefs.setAimMurdererToggle = addToggle("Aim Murderer only (MM2)", 14.15, function(v)
-    state.aimMurdererOnly = v
-end)
-UIRefs._unused, UIRefs.setAimHeadToggle = addToggle("Aim at Head (OFF = body)", 14.16, function(v)
-    state.aimHead = v
+UIRefs._unused, UIRefs.setWallbangToggle = addToggle("Wallbang (experimental)", 14.135, function(v)
+    state.wallbang = v
+    if not state.unloaded and UIRefs.Status then
+        UIRefs.Status.Text = v
+            and "Wallbang ON: client LOS ignored; server may still block wall hits"
+            or "Wallbang OFF: normal visibility rules restored"
+    end
 end)
 -- Set defaults after controls exist, without altering the callback contract.
 UIRefs.setAimVisibleToggle(true)
-UIRefs.setAimTeamToggle(true)
-UIRefs.setAimMurdererToggle(true)
+UIRefs.setWallbangToggle(false)
 
 -- Separate overlay is not scaled with the menu's UIScale.
 UIRefs.AimCircleGui = create("ScreenGui", {
@@ -2013,31 +1933,6 @@ UIRefs.flingSheriffButton = create("TextButton", {
     LayoutOrder = 15.1,
 }, UIRefs.Content)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.flingSheriffButton)
-
-UIRefs.flingAllButton = create("TextButton", {
-    Name = "FlingSelected",
-    Size = UDim2.new(1, -4, 0, 38),
-    BackgroundColor3 = Color3.fromRGB(95, 62, 100),
-    BorderSizePixel = 0, Font = Enum.Font.GothamSemibold,
-    Text = "Fling Selected [OFF]",
-    TextColor3 = Color3.fromRGB(245, 230, 255), TextSize = 13,
-    AutoButtonColor = false, LayoutOrder = 15.15,
-}, UIRefs.Content)
-create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.flingAllButton)
-
-UIRefs.stopFlingButton = create("TextButton", {
-    Name = "StopFling",
-    Size = UDim2.new(1, -4, 0, 36),
-    BackgroundColor3 = Color3.fromRGB(53, 53, 58),
-    BorderSizePixel = 0,
-    Font = Enum.Font.GothamSemibold,
-    Text = "Release Fling / Return",
-    TextColor3 = Color3.fromRGB(235, 235, 235),
-    TextSize = 13,
-    AutoButtonColor = false,
-    LayoutOrder = 15.2,
-}, UIRefs.Content)
-create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.stopFlingButton)
 
 --// Spectate page: role shortcuts + selectable list of all other players.
 do
@@ -2147,12 +2042,12 @@ do
     create("UIListLayout", {
         Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder,
     }, UIRefs.attackPlayerList)
+
     create("TextLabel", {
         Name = "FlingSelectTitle", Size = UDim2.new(1, -4, 0, 25),
         BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = "FLING: SELECT ONE PLAYER",
-        TextColor3 = UITheme.muted, TextSize = 12,
-        TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 19,
+        Text = "FLING: SELECT ONE PLAYER", TextColor3 = UITheme.muted,
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 19,
     }, UIRefs.SpectateContent)
     UIRefs.flingSelectStatus = create("TextLabel", {
         Name = "FlingSelectStatus", Size = UDim2.new(1, -4, 0, 44),
@@ -2178,83 +2073,6 @@ UIRefs.antiFlingButton, UIRefs.setAntiFlingToggle = addToggle("AntiFling", 16, f
     state.antiFling = enabled
     if not enabled and pauseAntiFling then pauseAntiFling() end
 end)
-
---// Read-only hit-position diagnostic. Uses replicated actual character roots.
---// Never invokes remotes or applies damage.
-do
-    local diag = {elapsed = 0}
-    local function updateHitDiagnostic()
-        if not state.hitRegistrationDiagnostic or state.unloaded then return end
-        local ownChar = LocalPlayer.Character
-        local ownRoot = ownChar and ownChar:FindFirstChild("HumanoidRootPart")
-        local ownHum = ownChar and ownChar:FindFirstChildOfClass("Humanoid")
-        if not ownRoot or not ownHum or ownHum.Health <= 0 then
-            UIRefs.hitDiagStatus.Text = "Waiting for your living character..."
-            return
-        end
-        local results = {}
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer then
-                local char = player.Character
-                local root = char and char:FindFirstChild("HumanoidRootPart")
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
-                if root and hum and hum.Health > 0 then
-                    local delta = root.Position - ownRoot.Position
-                    local dist = delta.Magnitude
-                    local params = RaycastParams.new()
-                    params.FilterType = Enum.RaycastFilterType.Exclude
-                    params.FilterDescendantsInstances = {ownChar}
-                    params.IgnoreWater = true
-                    local hit = dist > 0.01 and Workspace:Raycast(ownRoot.Position, delta, params) or nil
-                    local sight = (not hit or hit.Instance:IsDescendantOf(char)) and "CLEAR" or "BLOCKED"
-                    table.insert(results, {name = player.DisplayName, user = player.Name, dist = dist,
-                        height = math.abs(delta.Y), sight = sight})
-                end
-            end
-        end
-        table.sort(results, function(a, b)
-            if a.dist == b.dist then return a.user < b.user end
-            return a.dist < b.dist
-        end)
-        local lines = {"CLIENT OBSERVATION (not server hit confirmation)",
-            "Real replicated roots, not preview hitboxes:"}
-        for i = 1, math.min(6, #results) do
-            local entry = results[i]
-            local shortName = string.sub(entry.name, 1, 13)
-            table.insert(lines, string.format("%s (@%s): %.1f studs | height %.1f | LOS %s",
-                shortName, string.sub(entry.user, 1, 12), entry.dist, entry.height, entry.sight))
-        end
-        if #results == 0 then table.insert(lines, "No living player roots currently replicated.") end
-        table.insert(lines, "Server registration / damage: UNKNOWN (not observed)")
-        UIRefs.hitDiagStatus.Text = table.concat(lines, "\n")
-    end
-
-    UIRefs.hitDiagButton, UIRefs.setHitDiagToggle = addToggle(
-        "Hit Position Diagnostic (READ ONLY)", 16.975, function(enabled)
-            state.hitRegistrationDiagnostic = enabled
-            diag.elapsed = 0
-            if enabled then updateHitDiagnostic() else
-                UIRefs.hitDiagStatus.Text = "OFF: no tracking or hit requests."
-            end
-        end
-    )
-    UIRefs.hitDiagStatus = create("TextLabel", {
-        Name = "HitPositionDiagnostic", Size = UDim2.new(1, -4, 0, 170),
-        BackgroundTransparency = 1, Font = Enum.Font.Code,
-        Text = "OFF: observes replicated player positions only; no server hit confirmation.",
-        TextColor3 = Color3.fromRGB(185, 205, 220), TextSize = 10,
-        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Top,
-        LayoutOrder = 16.976,
-    }, UIRefs.Content)
-    addConnection(RunService.Heartbeat:Connect(function(dt)
-        if not state.hitRegistrationDiagnostic or state.unloaded then return end
-        diag.elapsed += dt
-        if diag.elapsed < 0.25 then return end
-        diag.elapsed = 0
-        updateHitDiagnostic()
-    end))
-end
 
 addSection("VISUALS", 20)
 
@@ -2323,7 +2141,7 @@ UIRefs.espNamesButton, UIRefs.setESPNamesToggle = addToggle("ESP Names", 28, fun
     for _, object in pairs(espObjects) do
         if object.nameLabel and object.roleLabel then
             object.nameLabel.Visible = enabled
-            object.roleLabel.Position = enabled and UDim2.fromOffset(18, 24) or UDim2.fromOffset(18, 8)
+            object.roleLabel.Position = enabled and UDim2.fromOffset(13, 22) or UDim2.fromOffset(13, 11)
         end
     end
 end)
@@ -2338,6 +2156,133 @@ UIRefs.espInfoCardsButton, UIRefs.setESPInfoCardsToggle = addToggle("ESP Info Ca
     end
 end)
 UIRefs.setESPInfoCardsToggle(true) -- Keep existing V1.0 visible-card default.
+
+-- Compact local-role overlay. It is independent from player ESP and can stay on
+-- while the main menu is hidden. The role source is the same replicated role table
+-- used by Role ESP; if no snapshot is available yet, the card shows WAITING.
+UIRefs.RoleHUD = create("Frame", {
+    Name = "RoleHUD",
+    AnchorPoint = Vector2.new(0.5, 0),
+    Position = UDim2.new(0.5, 0, 0, 26),
+    Size = UDim2.fromOffset(176, 48),
+    BackgroundColor3 = UITheme.surface,
+    BackgroundTransparency = 0.08,
+    BorderSizePixel = 0,
+    Visible = false,
+    Active = true,
+    ZIndex = 50,
+}, UIRefs.ScriptMM2)
+create("UICorner", {CornerRadius = UDim.new(0, 10)}, UIRefs.RoleHUD)
+UIRefs.RoleHUDStroke = create("UIStroke", {
+    Color = UITheme.border, Thickness = 1, Transparency = 0.18,
+}, UIRefs.RoleHUD)
+UIRefs.RoleHUDTitle = create("TextLabel", {
+    Name = "Title", BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(10, 5), Size = UDim2.new(1, -20, 0, 12),
+    Font = Enum.Font.GothamSemibold, Text = "YOUR ROLE",
+    TextColor3 = UITheme.muted, TextSize = 9,
+    TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 51,
+}, UIRefs.RoleHUD)
+UIRefs.RoleHUDValue = create("TextLabel", {
+    Name = "Role", BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(8, 17), Size = UDim2.new(1, -16, 0, 25),
+    Font = Enum.Font.GothamBold, Text = "WAITING...",
+    TextColor3 = UITheme.text, TextSize = 17,
+    TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 51,
+}, UIRefs.RoleHUD)
+
+-- Role HUD can be dragged independently from the main menu with the mouse.
+do
+    local dragging, dragInput, dragStart, startPosition = false, nil, nil, nil
+
+    local function clampRoleHUDPosition(position)
+        local camera = Workspace.CurrentCamera
+        if not camera or not UIRefs.RoleHUD then return position end
+        local scale = (Scale and Scale.Scale) or 1
+        if scale <= 0 then scale = 1 end
+        local viewport = camera.ViewportSize / scale
+        local size = UIRefs.RoleHUD.AbsoluteSize / scale
+        local x = position.X.Scale * viewport.X + position.X.Offset
+        local y = position.Y.Scale * viewport.Y + position.Y.Offset
+        -- AnchorPoint is (0.5, 0): x is the card centre, y is its top.
+        x = math.clamp(x, size.X * 0.5 + 6, viewport.X - size.X * 0.5 - 6)
+        y = math.clamp(y, 6, viewport.Y - size.Y - 6)
+        return UDim2.fromOffset(x, y)
+    end
+
+    addConnection(UIRefs.RoleHUD.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+        dragging = true
+        dragInput = input
+        dragStart = input.Position
+        startPosition = UIRefs.RoleHUD.Position
+    end))
+
+    addConnection(UIS.InputChanged:Connect(function(input)
+        if not dragging or not dragInput or not dragStart or not startPosition then return end
+        local matches = dragInput.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseMovement
+        if not matches then return end
+        local scale = (Scale and Scale.Scale) or 1
+        if scale <= 0 then scale = 1 end
+        local delta = (input.Position - dragStart) / scale
+        UIRefs.RoleHUD.Position = clampRoleHUDPosition(UDim2.new(
+            startPosition.X.Scale, startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale, startPosition.Y.Offset + delta.Y
+        ))
+    end))
+
+    addConnection(UIS.InputEnded:Connect(function(input)
+        if not dragging or not dragInput then return end
+        if input == dragInput or (dragInput.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseButton1) then
+            dragging, dragInput, dragStart, startPosition = false, nil, nil, nil
+        end
+    end))
+    addConnection(UIS.WindowFocusReleased:Connect(function()
+        dragging, dragInput, dragStart, startPosition = false, nil, nil, nil
+    end))
+end
+
+local function getLocalRoleForHUD()
+    if not rolesAvailable then return "WAITING" end
+    local data = roles and roles[LocalPlayer.Name]
+    local role = type(data) == "table" and data.Role or nil
+    if type(role) == "string" and role ~= "" then return role end
+    if LocalPlayer.Name == Murder then return "Murderer" end
+    if LocalPlayer.Name == Sheriff then return "Sheriff" end
+    if LocalPlayer.Name == Hero then return "Hero" end
+    return "Innocent"
+end
+
+UIRefs.updateRoleHUD = function()
+    if not UIRefs.RoleHUDValue or not UIRefs.RoleHUDValue.Parent then return end
+    local role = getLocalRoleForHUD()
+    local key = string.lower(tostring(role))
+    local display = string.upper(tostring(role))
+    local color = UITheme.text
+    if key == "murderer" then
+        color = Color3.fromRGB(255, 92, 92)
+    elseif key == "sheriff" then
+        color = Color3.fromRGB(92, 170, 255)
+    elseif key == "hero" then
+        color = Color3.fromRGB(255, 220, 92)
+    elseif key == "innocent" then
+        color = Color3.fromRGB(120, 235, 170)
+    elseif key == "waiting" then
+        display = "WAITING..."
+        color = UITheme.muted
+    end
+    UIRefs.RoleHUDValue.Text = display
+    UIRefs.RoleHUDValue.TextColor3 = color
+    if UIRefs.RoleHUDStroke then UIRefs.RoleHUDStroke.Color = color end
+end
+
+UIRefs.roleHUDButton, UIRefs.setRoleHUDToggle = addToggle("Role HUD", 28.7, function(enabled)
+    state.roleHud = enabled
+    UIRefs.RoleHUD.Visible = enabled
+    if enabled and UIRefs.updateRoleHUD then UIRefs.updateRoleHUD() end
+end)
 
 UIRefs._unused, UIRefs.setFOVSliderValue = addSlider("FOV", CONFIG.MinFOV, CONFIG.MaxFOV, values.fov, 29, function(value)
     values.fov = value
@@ -2589,7 +2534,7 @@ UIRefs.teleportRevolverButton = create("TextButton", {
     BackgroundColor3 = UITheme.item,
     BorderSizePixel = 0,
     Font = Enum.Font.GothamSemibold,
-    Text = IsMobile and "Grab Revolver (return if collected)" or "Grab Revolver (return if collected) [H]",
+    Text = "Grab Revolver (return if collected) [H]",
     TextColor3 = UITheme.text,
     TextSize = 13,
     AutoButtonColor = false,
@@ -2695,7 +2640,7 @@ UIRefs.draggingMain = false
 UIRefs.mainDragInput = nil
 
 local function beginDrag(input)
-    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
         return
     end
     if UIRefs.mainDragInput then return end
@@ -2729,91 +2674,12 @@ addConnection(UIS.InputEnded:Connect(function(input)
     end
 end))
 
---// Mobile floating MOD drag
-UIRefs.draggingReopen = false
-UIRefs.reopenDragStart = nil
-UIRefs.reopenStartPosition = nil
-UIRefs.reopenDragInput = nil
-
-addConnection(UIRefs.reopen.InputBegan:Connect(function(input)
-    if not IsMobile then
-        return
-    end
-    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        if UIRefs.reopenDragInput then return end
-        UIRefs.reopenDragInput = input
-        UIRefs.draggingReopen = true
-        UIRefs.reopenDragStart = input.Position
-        UIRefs.reopenStartPosition = UIRefs.reopen.Position
-    end
-end))
-
-addConnection(UIS.InputChanged:Connect(function(input)
-    if not UIRefs.draggingReopen or not IsMobile then
-        return
-    end
-    if not isPointerMove(input, UIRefs.reopenDragInput) then return end
-
-    local camera = Workspace.CurrentCamera
-    if not camera then
-        return
-    end
-
-    local delta = (input.Position - UIRefs.reopenDragStart) / Scale.Scale
-    local viewport = camera.ViewportSize / Scale.Scale
-    local halfX = UIRefs.reopen.AbsoluteSize.X * 0.5 / Scale.Scale
-    local halfY = UIRefs.reopen.AbsoluteSize.Y * 0.5 / Scale.Scale
-
-    local newX = UIRefs.reopenStartPosition.X.Offset + delta.X
-    local newY = UIRefs.reopenStartPosition.Y.Offset + delta.Y
-    newX = math.clamp(newX, -viewport.X * 0.5 + halfX + 6, viewport.X * 0.5 - halfX - 6)
-    newY = math.clamp(newY, -viewport.Y * 0.5 + halfY + 6, viewport.Y * 0.5 - halfY - 6)
-
-    UIRefs.reopen.Position = UDim2.new(0.5, newX, 0.5, newY)
-end))
-
-addConnection(UIS.InputEnded:Connect(function(input)
-    if isPointerEnd(input, UIRefs.reopenDragInput) then
-        UIRefs.draggingReopen = false
-        UIRefs.reopenDragInput = nil
-    end
-end))
-
---// Mobile fly vertical controls
-UIRefs.flyUpInput, UIRefs.flyDownInput = nil, nil
-addConnection(UIRefs.FlyUpButton.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        UIRefs.flyUpInput = input
-        flyObjects.up = true
-    end
-end))
-
-addConnection(UIS.InputEnded:Connect(function(input)
-    if isPointerEnd(input, UIRefs.flyUpInput) then
-        UIRefs.flyUpInput = nil
-        flyObjects.up = false
-    end
-end))
-
-addConnection(UIRefs.FlyDownButton.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        UIRefs.flyDownInput = input
-        flyObjects.down = true
-    end
-end))
-
-addConnection(UIS.InputEnded:Connect(function(input)
-    if isPointerEnd(input, UIRefs.flyDownInput) then
-        UIRefs.flyDownInput = nil
-        flyObjects.down = false
-    end
-end))
+--// PC-only build: mobile floating MOD and vertical fly controls removed.
 
 addConnection(UIS.WindowFocusReleased:Connect(function()
     windowFocused = false
     flyObjects.up, flyObjects.down = false, false
-    UIRefs.flyUpInput, UIRefs.flyDownInput = nil, nil
-    UIRefs.draggingMain, UIRefs.draggingReopen = false, false
+    UIRefs.draggingMain = false
     UIRefs.mainDragInput, UIRefs.reopenDragInput = nil, nil
 end))
 addConnection(UIS.WindowFocused:Connect(function() windowFocused = true end))
@@ -2852,7 +2718,6 @@ local function stopFly()
     end
     flyObjects.humanoid = nil
 
-    UIRefs.MobileFlyControls.Visible = false
 end
 
 local function startFly()
@@ -2894,7 +2759,6 @@ local function startFly()
     humanoid.PlatformStand = true
     humanoid.AutoRotate = false
 
-    UIRefs.MobileFlyControls.Visible = IsMobile and state.fly
 end
 
 applyNoclip = function()
@@ -3667,6 +3531,7 @@ local function clearRoles()
     roles, Murder, Sheriff, Hero = {}, "", "", ""
     rolesAvailable = false
     rolesUpdatedAt = -math.huge
+    if UIRefs.updateRoleHUD then UIRefs.updateRoleHUD() end
 end
 
 local function refreshRoles()
@@ -3719,6 +3584,8 @@ local function refreshRoles()
             end
         end
     end
+
+    if UIRefs.updateRoleHUD then UIRefs.updateRoleHUD() end
 
     if teleportBusy or flingBusy or shootMurdererBusy or state.spectateMurderer then return true end
     if LocalPlayer.Name == Murder then
@@ -3845,7 +3712,7 @@ do
         UIRefs.flingPlayerButtons = {}
         if UIRefs.selectedFlingPlayer and UIRefs.selectedFlingPlayer.Parent ~= Players then
             UIRefs.selectedFlingPlayer = nil
-            UIRefs.flingSelectStatus.Text = "Selected player left. Choose another player."
+            if UIRefs.flingSelectStatus then UIRefs.flingSelectStatus.Text = "Selected player left. Choose another player." end
         end
         if UIRefs.selectedAttackPlayer and UIRefs.selectedAttackPlayer.Parent ~= Players then
             UIRefs.selectedAttackPlayer = nil
@@ -3918,6 +3785,7 @@ do
                         .. " • Attack Selected or K (normal weapon attempt)"
                     if UIRefs.paintAttackSelection then UIRefs.paintAttackSelection() end
                 end)
+
                 local flingButton = create("TextButton", {
                     Name = "FlingSelect_" .. tostring(player.UserId),
                     Size = UDim2.new(1, -4, 0, 38),
@@ -4355,71 +4223,6 @@ updateAimLock = function()
     end
 end
 
---// Camera-only FOV aim with LOS and team filters; only observed replicated character positions.
-updateSmoothAim = function(dt)
-    local circle = UIRefs.AimCircle
-    if circle then
-        circle.Visible = (state.smoothAim or state.fovIndicator) and not state.unloaded and not state.spectateMurderer
-        circle.Size = UDim2.fromOffset(values.aimRadius * 2, values.aimRadius * 2)
-    end
-    if not state.smoothAim or state.unloaded or state.spectateMurderer or flingBusy
-        or UIS:GetFocusedTextBox() then return end
-    local camera = Workspace.CurrentCamera
-    local myCharacter = LocalPlayer.Character
-    local myHumanoid = myCharacter and myCharacter:FindFirstChildOfClass("Humanoid")
-    if not camera or camera.CameraType == Enum.CameraType.Scriptable or not myHumanoid
-        or myHumanoid.Health <= 0 then return end
-    if state.aimMurdererOnly and (not rolesAvailable or Murder == "") then return end
-
-    local screenCenter = camera.ViewportSize * 0.5
-    local selected, closest = nil, values.aimRadius
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and (not state.aimMurdererOnly or player.Name == Murder)
-            and (not state.aimTeamCheck or not LocalPlayer.Team or not player.Team or LocalPlayer.Team ~= player.Team) then
-            local character = player.Character
-            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-            local part
-            if character then
-                if state.aimHead then
-                    part = character:FindFirstChild("Head")
-                else
-                    part = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
-                        or character:FindFirstChild("HumanoidRootPart")
-                end
-            end
-            if humanoid and humanoid.Health > 0 and part and part:IsA("BasePart") then
-                local screenPos, onScreen = camera:WorldToViewportPoint(part.Position)
-                if onScreen and screenPos.Z > 0 then
-                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
-                    if dist < closest then
-                        local visible = true
-                        if state.aimVisibleOnly then
-                            local rayParams = RaycastParams.new()
-                            rayParams.FilterType = Enum.RaycastFilterType.Exclude
-                            rayParams.FilterDescendantsInstances = {myCharacter, character}
-                            rayParams.IgnoreWater = true
-                            local direction = part.Position - camera.CFrame.Position
-                            visible = Workspace:Raycast(camera.CFrame.Position, direction, rayParams) == nil
-                        end
-                        if visible then
-                            selected, closest = part, dist
-                        end
-                    end
-                end
-            end
-        end
-    end
-    if selected then
-        local cameraPos = camera.CFrame.Position
-        local direction = selected.Position - cameraPos
-        if direction.Magnitude > 0.001 then
-            local goal = CFrame.lookAt(cameraPos, selected.Position)
-            local alpha = 1 - math.exp(-values.aimSmooth * math.clamp(dt or 0.016, 0, 0.1))
-            camera.CFrame = camera.CFrame:Lerp(goal, alpha)
-        end
-    end
-end
-
 --// Visual-only FOV target indicator. The presence of hookfunction in Xeno is
 --// NOT evidence that Roblox's actual ShootGun namecall can be intercepted.
 do
@@ -4433,7 +4236,7 @@ do
         local enabled = state.fovIndicator and not state.unloaded and not state.spectateMurderer
         if not enabled then
             UIRefs.AimCircleStroke.Color = Color3.fromRGB(150, 150, 150)
-            if not state.smoothAim then circle.Visible = false end
+            circle.Visible = false
             return
         end
         local camera = Workspace.CurrentCamera
@@ -4454,7 +4257,7 @@ do
         local center = camera.ViewportSize * 0.5
         local within = onScreen and screenPos.Z > 0
             and (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude <= values.aimRadius
-        if within and state.aimVisibleOnly then
+        if within and state.aimVisibleOnly and not state.wallbang then
             local params = RaycastParams.new()
             params.FilterType = Enum.RaycastFilterType.Exclude
             params.FilterDescendantsInstances = {myCharacter, target.Parent}
@@ -4700,12 +4503,6 @@ stopRoleFling = function(releaseBurst)
         UIRefs.flingSheriffButton.Text = "Inside Fling Sheriff"
         setButtonVisual(UIRefs.flingMurdererButton, false)
         setButtonVisual(UIRefs.flingSheriffButton, false)
-        if not flingAllActive then
-            UIRefs.flingAllButton.Text = "Fling Selected [OFF]"
-            if UIRefs.flingSelectButton then UIRefs.flingSelectButton.Text = "Fling Selected [OFF]" end
-            setButtonVisual(UIRefs.flingAllButton, false)
-            if UIRefs.flingSelectButton then setButtonVisual(UIRefs.flingSelectButton, false) end
-        end
     end
     return returned, returnError
 end
@@ -4761,8 +4558,7 @@ local function flingRole(roleName, chosenPlayer)
     }
     flingTrip = trip
     flingBusy = true
-    local activeButton = isPlayer and UIRefs.flingAllButton
-        or (isMurderer and UIRefs.flingMurdererButton or UIRefs.flingSheriffButton)
+    local activeButton = isMurderer and UIRefs.flingMurdererButton or UIRefs.flingSheriffButton
     if not isPlayer then
         activeButton.Text = "Release " .. roleName .. " Inside Fling [ON]"
         setButtonVisual(activeButton, true)
@@ -5091,8 +4887,8 @@ local function flingRole(roleName, chosenPlayer)
     end
 end
 
---// Explicit one-player target, using the existing one-target contact attempt.
---// Only our own character's physics is controlled; server displacement is not guaranteed.
+--// PC V1.0: restore explicit one-player Fling selection.
+--// The existing flingRole("Player", target) physics path is reused; no duplicate fling engine.
 UIRefs.paintFlingSelection = function()
     for player, button in pairs(UIRefs.flingPlayerButtons or {}) do
         if button and button.Parent then
@@ -5100,22 +4896,22 @@ UIRefs.paintFlingSelection = function()
         end
     end
 end
+
 local function paintSelectedFlingAction(active)
-    local label = active and "Stop Fling Selected [ON]" or "Fling Selected [OFF]"
-    UIRefs.flingAllButton.Text = label
-    UIRefs.flingSelectButton.Text = label
-    setButtonVisual(UIRefs.flingAllButton, active)
+    if not UIRefs.flingSelectButton then return end
+    UIRefs.flingSelectButton.Text = active and "Stop Fling Selected [ON]" or "Fling Selected [OFF]"
     setButtonVisual(UIRefs.flingSelectButton, active)
 end
-local function flingAllPlayers()
+
+local function flingSelectedPlayer()
     if state.unloaded then return end
     if flingAllActive then
         flingAllActive = false
-        flingAllGeneration = flingAllGeneration + 1
+        flingAllGeneration += 1
         if flingBusy then stopRoleFling(true) end
         paintSelectedFlingAction(false)
         UIRefs.Status.Text = "Fling Selected: stopped • returned"
-        UIRefs.flingSelectStatus.Text = "Stopped. Choose a target to retry."
+        if UIRefs.flingSelectStatus then UIRefs.flingSelectStatus.Text = "Stopped. Choose a target to retry." end
         return
     end
     if flingBusy or teleportBusy then
@@ -5125,23 +4921,21 @@ local function flingAllPlayers()
     local player = UIRefs.selectedFlingPlayer
     if not player or player == LocalPlayer or player.Parent ~= Players then
         UIRefs.Status.Text = "Fling Selected: choose a player in SPECTATE first"
-        UIRefs.flingSelectStatus.Text = Localization.sources[UIRefs.Status] or UIRefs.Status.Text
+        if UIRefs.flingSelectStatus then UIRefs.flingSelectStatus.Text = UIRefs.Status.Text end
         return
     end
     if not roleAlive(player.Name) then
         UIRefs.Status.Text = "Fling Selected: chosen player is not alive / available"
-        UIRefs.flingSelectStatus.Text = Localization.sources[UIRefs.Status] or UIRefs.Status.Text
+        if UIRefs.flingSelectStatus then UIRefs.flingSelectStatus.Text = UIRefs.Status.Text end
         return
     end
-    flingAllActive = true -- retained internal lifecycle flag for the Player mode
-    flingAllGeneration = flingAllGeneration + 1
+    flingAllActive = true
+    flingAllGeneration += 1
     local generation = flingAllGeneration
     paintSelectedFlingAction(true)
     UIRefs.Status.Text = "Fling Selected: " .. player.DisplayName .. " • local contact attempt"
-    UIRefs.flingSelectStatus.Text = Localization.sources[UIRefs.Status] or UIRefs.Status.Text
+    if UIRefs.flingSelectStatus then UIRefs.flingSelectStatus.Text = UIRefs.Status.Text end
     task.spawn(function()
-        -- The role fling routine owns the physics and restores it on every exit.
-        -- Keep a single target, never iterate other players.
         task.spawn(flingRole, "Player", player)
         local deadline = os.clock() + CONFIG.FlingRoleWait + CONFIG.FlingTargetWait + 1
         repeat
@@ -5163,7 +4957,9 @@ local function flingAllPlayers()
         if flingBusy then stopRoleFling(false) end
         if not state.unloaded then
             paintSelectedFlingAction(false)
-            UIRefs.flingSelectStatus.Text = "Fling Selected: attempt finished; server result unverified."
+            if UIRefs.flingSelectStatus then
+                UIRefs.flingSelectStatus.Text = "Fling Selected: attempt finished; server result unverified."
+            end
         end
     end)
 end
@@ -5267,8 +5063,8 @@ local function createESPForPlayer(player)
     billboard.AlwaysOnTop = true
     billboard.LightInfluence = 0
     billboard.MaxDistance = 2500
-    billboard.Size = UDim2.fromOffset(220, 58)
-    billboard.StudsOffsetWorldSpace = Vector3.new(0, 3.5, 0)
+    billboard.Size = UDim2.fromOffset(178, 44)
+    billboard.StudsOffsetWorldSpace = Vector3.new(0, 3.1, 0)
     billboard.ResetOnSpawn = false
     billboard.Parent = character
 
@@ -5276,26 +5072,26 @@ local function createESPForPlayer(player)
     card.Name = "Card"
     card.AnchorPoint = Vector2.new(0.5, 0.5)
     card.Position = UDim2.fromScale(0.5, 0.5)
-    card.Size = UDim2.fromScale(0.96, 0.82)
-    card.BackgroundColor3 = Color3.fromRGB(18, 19, 24)
-    card.BackgroundTransparency = 0.16
+    card.Size = UDim2.fromOffset(172, 38)
+    card.BackgroundColor3 = Color3.fromRGB(17, 23, 32)
+    card.BackgroundTransparency = 0.10
     card.BorderSizePixel = 0
     card.Parent = billboard
 
     local cardCorner = Instance.new("UICorner")
-    cardCorner.CornerRadius = UDim.new(0, 10)
+    cardCorner.CornerRadius = UDim.new(0, 7)
     cardCorner.Parent = card
 
     local cardStroke = Instance.new("UIStroke")
     cardStroke.Name = "RoleStroke"
-    cardStroke.Thickness = 1.5
-    cardStroke.Transparency = 0.08
+    cardStroke.Thickness = 1
+    cardStroke.Transparency = 0.52
     cardStroke.Parent = card
 
     local accent = Instance.new("Frame")
     accent.Name = "Accent"
-    accent.Position = UDim2.fromOffset(7, 8)
-    accent.Size = UDim2.fromOffset(4, 27)
+    accent.Position = UDim2.fromOffset(5, 9)
+    accent.Size = UDim2.fromOffset(3, 20)
     accent.BorderSizePixel = 0
     accent.Parent = card
 
@@ -5306,12 +5102,12 @@ local function createESPForPlayer(player)
     local nameLabel = Instance.new("TextLabel")
     nameLabel.Name = "Name"
     nameLabel.BackgroundTransparency = 1
-    nameLabel.Position = UDim2.fromOffset(18, 5)
-    nameLabel.Size = UDim2.new(1, -78, 0, 19)
+    nameLabel.Position = UDim2.fromOffset(13, 5)
+    nameLabel.Size = UDim2.new(1, -58, 0, 15)
     nameLabel.Font = Enum.Font.GothamBold
-    nameLabel.Text = player.DisplayName
+    nameLabel.Text = "@" .. player.Name
     nameLabel.TextColor3 = Color3.fromRGB(245, 245, 248)
-    nameLabel.TextSize = 13
+    nameLabel.TextSize = 11
     nameLabel.TextXAlignment = Enum.TextXAlignment.Left
     nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
     nameLabel.Parent = card
@@ -5319,12 +5115,12 @@ local function createESPForPlayer(player)
     local roleLabel = Instance.new("TextLabel")
     roleLabel.Name = "Role"
     roleLabel.BackgroundTransparency = 1
-    roleLabel.Position = UDim2.fromOffset(18, 24)
-    roleLabel.Size = UDim2.new(1, -25, 0, 15)
+    roleLabel.Position = UDim2.fromOffset(13, 22)
+    roleLabel.Size = UDim2.new(1, -20, 0, 12)
     roleLabel.Font = Enum.Font.GothamMedium
     roleLabel.Text = "PLAYER"
     roleLabel.TextColor3 = Color3.fromRGB(155, 160, 170)
-    roleLabel.TextSize = 10
+    roleLabel.TextSize = 9
     roleLabel.TextXAlignment = Enum.TextXAlignment.Left
     roleLabel.Parent = card
 
@@ -5332,12 +5128,12 @@ local function createESPForPlayer(player)
     distanceLabel.Name = "Distance"
     distanceLabel.BackgroundTransparency = 1
     distanceLabel.AnchorPoint = Vector2.new(1, 0)
-    distanceLabel.Position = UDim2.new(1, -8, 0, 8)
-    distanceLabel.Size = UDim2.fromOffset(55, 17)
+    distanceLabel.Position = UDim2.new(1, -8, 0, 6)
+    distanceLabel.Size = UDim2.fromOffset(40, 14)
     distanceLabel.Font = Enum.Font.GothamBold
     distanceLabel.Text = "0m"
     distanceLabel.TextColor3 = Color3.fromRGB(175, 180, 190)
-    distanceLabel.TextSize = 10
+    distanceLabel.TextSize = 9
     distanceLabel.TextXAlignment = Enum.TextXAlignment.Right
     distanceLabel.Parent = card
 
@@ -5444,11 +5240,9 @@ local function updateESP()
                 object.billboard.Enabled = state.espInfoCards
                 object.cardStroke.Color = color
                 object.accent.BackgroundColor3 = color
-                object.nameLabel.Text = player.DisplayName ~= player.Name
-                    and (player.DisplayName .. "  •  @" .. player.Name)
-                    or ("@" .. player.Name)
+                object.nameLabel.Text = "@" .. player.Name
                 object.nameLabel.Visible = state.espNames
-                object.roleLabel.Position = state.espNames and UDim2.fromOffset(18, 24) or UDim2.fromOffset(18, 8)
+                object.roleLabel.Position = state.espNames and UDim2.fromOffset(13, 22) or UDim2.fromOffset(13, 11)
 
                 local roleText = targetRole
                 if targetRole == "Murderer" then
@@ -5580,40 +5374,58 @@ local function refreshAntiFlingPairs(character)
         guard.folder.Name = "ScriptMM2AntiFling"
         guard.folder.Parent = character
     end
-    local wanted, body = {}, {}
-    for _, part in ipairs(character:GetChildren()) do
-        if part:IsA("BasePart") and part.CanCollide then table.insert(body, part) end
-    end
+
+    -- V1.0 ground-safe AntiFling: the old implementation created a full
+    -- body-to-body constraint matrix. On thin floors / ledges that could add
+    -- unnecessary solver work and make the local character look slightly sunk.
+    -- Fling physics is normally driven by the other player's root / torso, so
+    -- protect only our core body against their core body. Map/floor collisions
+    -- are never disabled.
+    local wanted = {}
     local ownRoot = character:FindFirstChild("HumanoidRootPart")
+    if not ownRoot then return end
+
+    local ownCore = {ownRoot}
+    local ownTorso = character:FindFirstChild("UpperTorso")
+        or character:FindFirstChild("Torso")
+        or character:FindFirstChild("LowerTorso")
+    if ownTorso and ownTorso:IsA("BasePart") then table.insert(ownCore, ownTorso) end
+
+    local function addPair(part, targetPart)
+        if not part or not targetPart or not part:IsA("BasePart") or not targetPart:IsA("BasePart") then return end
+        wanted[part] = wanted[part] or {}
+        wanted[part][targetPart] = true
+        guard.pairs[part] = guard.pairs[part] or {}
+        local constraint = guard.pairs[part][targetPart]
+        if not constraint or not constraint.Parent then
+            constraint = Instance.new("NoCollisionConstraint")
+            constraint.Name = "AntiFlingPlayerContact"
+            constraint.Part0, constraint.Part1 = part, targetPart
+            constraint.Enabled = true
+            constraint.Parent = guard.folder
+            guard.pairs[part][targetPart] = constraint
+        end
+    end
+
     for _, player in ipairs(Players:GetPlayers()) do
         local theirCharacter = player.Character
         local theirRoot = theirCharacter and theirCharacter:FindFirstChild("HumanoidRootPart")
-        if player ~= LocalPlayer and theirRoot and ownRoot
+        if player ~= LocalPlayer and theirRoot
             and (theirRoot.Position - ownRoot.Position).Magnitude <= CONFIG.AntiFlingNearbyRadius then
-            for _, targetPart in ipairs(theirCharacter:GetChildren()) do
-                if targetPart:IsA("BasePart") and targetPart.CanCollide then
-                    for _, part in ipairs(body) do
-                        wanted[part] = wanted[part] or {}
-                        wanted[part][targetPart] = true
-                        guard.pairs[part] = guard.pairs[part] or {}
-                        local constraint = guard.pairs[part][targetPart]
-                        if not constraint or not constraint.Parent then
-                            constraint = Instance.new("NoCollisionConstraint")
-                            constraint.Name = "AntiFlingPlayerContact"
-                            constraint.Part0, constraint.Part1 = part, targetPart
-                            constraint.Enabled = true
-                            constraint.Parent = guard.folder
-                            guard.pairs[part][targetPart] = constraint
-                        end
-                    end
-                end
+            local theirTorso = theirCharacter:FindFirstChild("UpperTorso")
+                or theirCharacter:FindFirstChild("Torso")
+                or theirCharacter:FindFirstChild("LowerTorso")
+            for _, ownPart in ipairs(ownCore) do
+                addPair(ownPart, theirRoot)
+                if theirTorso and theirTorso:IsA("BasePart") then addPair(ownPart, theirTorso) end
             end
         end
     end
+
     for part, targets in pairs(guard.pairs) do
         for targetPart, constraint in pairs(targets) do
             if not wanted[part] or not wanted[part][targetPart] then
-                constraint:Destroy()
+                pcall(function() constraint:Destroy() end)
                 targets[targetPart] = nil
             end
         end
@@ -5683,16 +5495,17 @@ guardAntiFling = function()
     local angular = guard.root.AssemblyAngularVelocity
     local permitted = state.fly and math.max(180, values.coinFarmSpeed * 2.5, values.flySpeed * 2.5)
         or math.max(110, guard.humanoid.WalkSpeed * 4, (longJumpState.active and (state.ultraLongJump and CONFIG.UltraJumpSpeed or values.longJumpSpeed) * 1.35 or 0))
-    local abnormal = velocity.Magnitude > permitted or angular.Magnitude > 160
+    -- Ground-safe recovery: never PivotTo the old full character transform and
+    -- never clamp normal Y motion. That old recovery could push the avatar a
+    -- little into thin floors / ramps. Only kill suspicious spin and cap the
+    -- horizontal launch while Roblox keeps control of jumping/falling/grounding.
+    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+    local abnormal = horizontal.Magnitude > permitted or angular.Magnitude > 160
     if abnormal then
         guard.root.AssemblyAngularVelocity = Vector3.zero
-        if previous and (current.Position - previous.Position).Magnitude > 12 then
-            -- Recover only a high-velocity physics launch, not a normal teleport.
-            pcall(function() guard.character:PivotTo(previous) end)
-            guard.safePivot = previous
-            guard.root.AssemblyLinearVelocity = Vector3.zero
-        elseif velocity.Magnitude > permitted then
-            guard.root.AssemblyLinearVelocity = velocity.Unit * math.min(permitted * 0.5, 65)
+        if horizontal.Magnitude > permitted then
+            local cappedHorizontal = horizontal.Unit * math.min(permitted * 0.5, 65)
+            guard.root.AssemblyLinearVelocity = Vector3.new(cappedHorizontal.X, velocity.Y, cappedHorizontal.Z)
         end
     end
 end
@@ -5909,7 +5722,7 @@ addConnection(UIS.JumpRequest:Connect(function()
     end
 end))
 
---// Long Jump arms only for a new, grounded jump (keyboard, controller or mobile).
+--// Long Jump arms only for a new, grounded jump (keyboard/controller).
 addConnection(UIS.JumpRequest:Connect(function()
     if state.unloaded or not state.longJump or state.fly or state.coinFarm
         or flingBusy or teleportBusy or not windowFocused or UIS:GetFocusedTextBox() then return end
@@ -5958,8 +5771,7 @@ local function onCharacterAdded(character)
     end
     flingAllActive = false
     flingAllGeneration = flingAllGeneration + 1
-    if UIRefs.flingAllButton then UIRefs.flingAllButton.Text = "Fling Selected [OFF]" end
-    if UIRefs.flingSelectButton then UIRefs.flingSelectButton.Text = "Fling Selected [OFF]" end
+    if UIRefs.flingSelectButton then paintSelectedFlingAction(false) end
     stopRoleFling()
     stopRegularSpin()
     stopFly()
@@ -6018,7 +5830,7 @@ addConnection(RunService.Heartbeat:Connect(function(deltaTime)
     end
     roleTimer = 0
 
-    if (state.roleESP or state.innocentESP or state.aimLock or state.spectateMurderer or flingBusy) and not roleRefreshPending then
+    if (state.roleESP or state.innocentESP or state.roleHud or state.aimLock or state.spectateMurderer or flingBusy) and not roleRefreshPending then
         -- Network requests must not run inside the camera callback or overlap
         -- on every Heartbeat while a previous role request is still waiting.
         roleRefreshPending = true
@@ -6076,14 +5888,10 @@ addConnection(UIS.InputBegan:Connect(function(input, processed)
         UIRefs.setAimLockToggle(not state.aimLock)
     elseif input.KeyCode == CONFIG.RevolverPickupKey then
         teleportToRevolver()
-    elseif input.KeyCode == Enum.KeyCode.X and not IsMobile then
+    elseif input.KeyCode == Enum.KeyCode.X then
         shootMurderer()
-    elseif input.KeyCode == Enum.KeyCode.K and not IsMobile then
+    elseif input.KeyCode == Enum.KeyCode.K then
         if UIRefs.attackSelected then task.spawn(UIRefs.attackSelected) end
-    elseif input.KeyCode == Enum.KeyCode.J and not IsMobile and state.xenoShotSnap then
-        -- Existing X-shot implementation: checks live Murderer, equips revolver,
-        -- briefly aims camera, activates once, and restores camera/tool.
-        shootMurderer()
     end
 end))
 
@@ -6132,7 +5940,7 @@ local function setMainVisible(visible, instant)
         end
     elseif instant then
         UIRefs.Main.Visible = false
-        UIRefs.reopen.Visible = IsMobile
+        UIRefs.reopen.Visible = false
         scale.Scale = UIStyling.userScale
     else
         playMenuSound("close")
@@ -6140,12 +5948,11 @@ local function setMainVisible(visible, instant)
         tweenScale(1.045, 0.045, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, function()
             tweenScale(0.25, 0.145, Enum.EasingStyle.Back, Enum.EasingDirection.In, function()
                 UIRefs.Main.Visible = false
-                UIRefs.reopen.Visible = IsMobile
+                UIRefs.reopen.Visible = false
                 scale.Scale = UIStyling.userScale
             end)
         end)
     end
-    UIRefs.MobileFlyControls.Visible = IsMobile and state.fly
 end
 
 addConnection(UIS.InputBegan:Connect(function(input, processed)
@@ -6269,7 +6076,6 @@ local function unload()
     if state.coinFarm and UIRefs.setCoinFarmToggle then UIRefs.setCoinFarmToggle(false) end
     if UIRefs.stopBring then UIRefs.stopBring() end
     if UIRefs.clearAttackSelection then UIRefs.clearAttackSelection() end
-    UIRefs.selectedFlingPlayer = nil
     state.unloaded = true
     Silent.stop()
     Silent.restoreXeno()
@@ -6277,6 +6083,7 @@ local function unload()
     finishRevolverTrip()
     flingAllActive = false
     flingAllGeneration = flingAllGeneration + 1
+    if UIRefs.flingSelectButton then paintSelectedFlingAction(false) end
     stopRoleFling()
     stopSpectateMurderer()
 
@@ -6299,18 +6106,14 @@ local function unload()
     UIRefs.setESPNamesToggle(false)
     UIRefs.setESPInfoCardsToggle(false)
     UIRefs.setAimLockToggle(false)
-    if UIRefs.setSmoothAimToggle then UIRefs.setSmoothAimToggle(false) end
     if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(false) end
-    if UIRefs.setXenoShotSnapToggle then UIRefs.setXenoShotSnapToggle(false) end
     UIRefs.setAntiFlingToggle(false)
-    UIRefs.setHitDiagToggle(false)
 
     stopFly()
     restoreNoclip()
     clearESP()
     disableFullBright()
     restoreCameraFOV()
-    RunService:UnbindFromRenderStep(smoothAimBindingName)
     if UIRefs.AimCircleGui then UIRefs.AimCircleGui:Destroy() end
 
     disconnectBucket(characterConnections)
@@ -6394,8 +6197,30 @@ do
         return false
     end
 
+    local function containerBounds(container)
+        if not container then return nil, nil end
+        if container:IsA("Model") then
+            local ok, cf, size = pcall(function() return container:GetBoundingBox() end)
+            if ok and cf and size then return cf, size end
+        end
+        local minV, maxV = nil, nil
+        for _, part in ipairs(container:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                local half = part.Size * 0.5
+                local lo, hi = part.Position - half, part.Position + half
+                minV = minV and Vector3.new(math.min(minV.X, lo.X), math.min(minV.Y, lo.Y), math.min(minV.Z, lo.Z)) or lo
+                maxV = maxV and Vector3.new(math.max(maxV.X, hi.X), math.max(maxV.Y, hi.Y), math.max(maxV.Z, hi.Z)) or hi
+            end
+        end
+        if not minV or not maxV then return nil, nil end
+        local size = maxV - minV
+        return CFrame.new((minV + maxV) * 0.5), size
+    end
+
     local function findSpawn(container, kind, withinNamedContainer)
         if not container then return nil end
+        local boundsCF, boundsSize = containerBounds(container)
+        local topY = boundsCF and boundsSize and (boundsCF.Position.Y + boundsSize.Y * 0.5) or nil
         local candidates = {}
         for _, part in ipairs(container:GetDescendants()) do
             if isSpawnPart(part, kind, withinNamedContainer) then
@@ -6415,14 +6240,24 @@ do
                     local priority = part:IsA("SpawnLocation") and 0 or 1
                     if (kind == "map" and (name == "mapspawn" or name == "playerspawn"))
                         or (kind == "lobby" and (name == "lobbyspawn" or name == "lobbyspawnpoint")) then
-                        priority = -1
+                        priority = -2
                     end
-                    table.insert(candidates, {part = part, priority = priority, path = part:GetFullName()})
+                    -- Generic spawns sitting near the very top of a model are commonly roof/debug spawns.
+                    local roofPenalty = 0
+                    if topY and boundsSize and boundsSize.Y > 12 then
+                        local roofBand = topY - math.max(3, boundsSize.Y * 0.12)
+                        if part.Position.Y >= roofBand then roofPenalty = 50 end
+                    end
+                    table.insert(candidates, {
+                        part = part, priority = priority + roofPenalty,
+                        y = part.Position.Y, path = part:GetFullName()
+                    })
                 end
             end
         end
         table.sort(candidates, function(a, b)
             if a.priority ~= b.priority then return a.priority < b.priority end
+            if math.abs(a.y - b.y) > 0.1 then return a.y < b.y end
             return a.path < b.path
         end)
         return candidates[1] and candidates[1].part or nil
@@ -6432,41 +6267,92 @@ do
         if kind == "map" then
             local activeMap = findTopLevel(mapContainerNames)
             if not activeMap then return nil, nil, "TP Map: active map model not found" end
-            local marker = findSpawn(activeMap, "map", true)
-            if not marker then return nil, nil, "TP Map: spawn not found in active map" end
-            return marker, activeMap
+            -- A marker is preferred, but an interior-floor fallback is allowed if the map
+            -- has no trustworthy spawn marker or its only marker is on a roof.
+            return findSpawn(activeMap, "map", true), activeMap
         end
 
         local lobby = findTopLevel(lobbyContainerNames)
         if lobby then
-            local marker = findSpawn(lobby, "lobby", true)
-            if marker then return marker, lobby end
+            return findSpawn(lobby, "lobby", true), lobby
         end
-        -- Only explicitly named lobby spawns, not an arbitrary global spawn/floor.
+        -- Explicit global lobby markers are still supported.
         local marker = findSpawn(Workspace, "lobby", false)
         if marker then return marker, nil end
-        return nil, nil, "TP Lobby: lobby spawn not found"
+        return nil, nil, "TP Lobby: lobby model/spawn not found"
+    end
+
+    local function standingHeight(root, hum)
+        return hum.HipHeight + root.Size.Y * 0.5 + 1.25
+    end
+
+    local function isLikelyRoof(container, y)
+        if not container then return false end
+        local cf, size = containerBounds(container)
+        if not cf or not size or size.Y < 12 then return false end
+        local topY = cf.Position.Y + size.Y * 0.5
+        return y >= topY - math.max(3, size.Y * 0.10)
     end
 
     local function spawnDestination(char, root, hum, marker, container)
-        local standingHeight = hum.HipHeight + root.Size.Y * 0.5 + 1.25
+        if not marker then return nil end
+        local stand = standingHeight(root, hum)
         local center = marker.Position
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = {char, marker}
+        params.IgnoreWater = true
+        local hit = Workspace:Raycast(center + Vector3.new(0, 10, 0),
+            Vector3.new(0, -42, 0), params)
+        if hit and hit.Instance and hit.Instance.CanCollide and hit.Normal.Y >= 0.72
+            and hit.Position.Y <= center.Y + marker.Size.Y * 0.5 + 3
+            and hit.Position.Y >= center.Y - 20
+            and (not container or hit.Instance:IsDescendantOf(container)) then
+            local y = hit.Position.Y + stand
+            if not isLikelyRoof(container, y) then
+                return Vector3.new(center.X, y, center.Z)
+            end
+        end
+        if marker:IsA("SpawnLocation") and marker.CanCollide and marker.Anchored then
+            local y = center.Y + marker.Size.Y * 0.5 + stand
+            if not isLikelyRoof(container, y) then
+                return Vector3.new(center.X, y, center.Z)
+            end
+        end
+        return nil
+    end
+
+    -- Find a walkable floor INSIDE a map/lobby model. Raycasts begin around the
+    -- vertical middle of the model, not above its roof, so roof geometry is skipped.
+    local function interiorDestination(char, root, hum, container)
+        if not container then return nil end
+        local cf, size = containerBounds(container)
+        if not cf or not size or size.X < 2 or size.Z < 2 then return nil end
+        local stand = standingHeight(root, hum)
         local params = RaycastParams.new()
         params.FilterType = Enum.RaycastFilterType.Exclude
         params.FilterDescendantsInstances = {char}
         params.IgnoreWater = true
-        local hit = Workspace:Raycast(center + Vector3.new(0, 12, 0),
-            Vector3.new(0, -45, 0), params)
-        if hit and hit.Instance and hit.Instance.CanCollide and hit.Normal.Y >= 0.75
-            and hit.Position.Y <= center.Y + marker.Size.Y * 0.5 + 3
-            and hit.Position.Y >= center.Y - 20
-            and (not container or hit.Instance:IsDescendantOf(container)) then
-            -- The landing X/Z is ALWAYS the spawn marker's X/Z, not a sampled floor point.
-            return Vector3.new(center.X, hit.Position.Y + standingHeight, center.Z)
-        end
-        -- Valid collidable SpawnLocation can be used even if CanQuery is disabled.
-        if marker:IsA("SpawnLocation") and marker.CanCollide and marker.Anchored then
-            return Vector3.new(center.X, center.Y + marker.Size.Y * 0.5 + standingHeight, center.Z)
+        local offsets = {
+            Vector2.new(0, 0), Vector2.new(0.18, 0), Vector2.new(-0.18, 0),
+            Vector2.new(0, 0.18), Vector2.new(0, -0.18),
+            Vector2.new(0.32, 0.22), Vector2.new(-0.32, 0.22),
+            Vector2.new(0.32, -0.22), Vector2.new(-0.32, -0.22),
+        }
+        local topY = cf.Position.Y + size.Y * 0.5
+        local startY = math.min(topY - 3, cf.Position.Y + math.max(2, size.Y * 0.12))
+        for _, off in ipairs(offsets) do
+            local x = cf.Position.X + off.X * size.X
+            local z = cf.Position.Z + off.Y * size.Z
+            local origin = Vector3.new(x, startY, z)
+            local hit = Workspace:Raycast(origin, Vector3.new(0, -math.max(45, size.Y * 0.75), 0), params)
+            if hit and hit.Instance and hit.Instance.CanCollide and hit.Normal.Y >= 0.72
+                and hit.Instance:IsDescendantOf(container) then
+                local destination = Vector3.new(x, hit.Position.Y + stand, z)
+                if not isLikelyRoof(container, destination.Y) then
+                    return destination
+                end
+            end
         end
         return nil
     end
@@ -6485,14 +6371,20 @@ do
         teleportBusy = true
         local ok, err = pcall(function()
             local marker, container, reason = resolveTravelSpawn(kind)
-            if not marker or not marker.Parent then
-                UIRefs.Status.Text = reason or "TP: spawn not replicated"
+            if marker and not marker.Parent then marker = nil end
+            if not marker and not container then
+                UIRefs.Status.Text = reason or "TP: destination not replicated"
                 return
             end
             if state.unloaded or LocalPlayer.Character ~= char or hum.Health <= 0 then return end
-            local destination = spawnDestination(char, root, hum, marker, container)
+            local destination = marker and spawnDestination(char, root, hum, marker, container) or nil
+            -- If the named spawn is on a roof / invalid, fall back to a walkable
+            -- floor found from inside the replicated map or lobby bounds.
+            if not destination and container then
+                destination = interiorDestination(char, root, hum, container)
+            end
             if not destination then
-                UIRefs.Status.Text = "TP " .. kind .. ": no safe floor at spawn"
+                UIRefs.Status.Text = "TP " .. kind .. ": no safe interior floor found"
                 return
             end
             -- Disable movement controllers only after finding an actual spawn and landing.
@@ -6507,8 +6399,8 @@ do
             char:PivotTo(desiredRoot * rootToPivot)
             antiFlingGuard.safePivot = char:GetPivot()
             antiFlingGuard.teleportUntil = os.clock() + CONFIG.AntiFlingTeleportGrace
-            UIRefs.Status.Text = kind == "map" and "TP Map: moved to map spawn"
-                or "TP Lobby: moved to lobby spawn"
+            UIRefs.Status.Text = kind == "map" and "TP Map: moved inside active map"
+                or "TP Lobby: moved inside lobby"
         end)
         teleportBusy = false
         if not ok then
@@ -6590,26 +6482,11 @@ end))
 addConnection(UIRefs.flingSheriffButton.MouseButton1Click:Connect(function()
     task.spawn(flingRole, "Sheriff")
 end))
-addConnection(UIRefs.flingAllButton.MouseButton1Click:Connect(flingAllPlayers))
-addConnection(UIRefs.flingSelectButton.MouseButton1Click:Connect(flingAllPlayers))
+addConnection(UIRefs.flingSelectButton.MouseButton1Click:Connect(flingSelectedPlayer))
 addConnection(UIRefs.spectateMurdererButton.MouseButton1Click:Connect(toggleSpectateMurderer))
 addConnection(UIRefs.spectateSheriffButton.MouseButton1Click:Connect(UIRefs.toggleSpectateSheriff))
 addConnection(UIRefs.spectateReturnButton.MouseButton1Click:Connect(UIRefs.stopSpectate))
 UIRefs.rebuildSpectatorList()
-
-addConnection(UIRefs.stopFlingButton.MouseButton1Click:Connect(function()
-    if flingAllActive then
-        flingAllPlayers()
-        return
-    end
-    if not flingBusy then
-        UIRefs.Status.Text = "Fling: already stopped"
-        return
-    end
-    local returned, err = stopRoleFling(true)
-    UIRefs.Status.Text = err and ("Fling return error: " .. tostring(err))
-        or (returned and "Fling stopped • returned" or "Fling stopped")
-end))
 
 addConnection(UIRefs.refreshButton.MouseButton1Click:Connect(function()
     if refreshRoles() then
@@ -6656,12 +6533,10 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     UIRefs.setESPLinesToggle(false)
     UIRefs.setESPNamesToggle(true)
     UIRefs.setESPInfoCardsToggle(true)
+    if UIRefs.setRoleHUDToggle then UIRefs.setRoleHUDToggle(false) end
     UIRefs.setAimLockToggle(false)
-    if UIRefs.setSmoothAimToggle then UIRefs.setSmoothAimToggle(false) end
     if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(false) end
-    if UIRefs.setXenoShotSnapToggle then UIRefs.setXenoShotSnapToggle(false) end
     UIRefs.setAntiFlingToggle(false)
-    UIRefs.setHitDiagToggle(false)
     restoreCameraFOV()
 
     values.walkSpeed = CONFIG.DefaultWalkSpeed
@@ -6680,9 +6555,6 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     if UIRefs.setAimRadius then UIRefs.setAimRadius(115) end
     if UIRefs.setAimSmooth then UIRefs.setAimSmooth(9) end
     if UIRefs.setAimVisibleToggle then UIRefs.setAimVisibleToggle(true) end
-    if UIRefs.setAimTeamToggle then UIRefs.setAimTeamToggle(true) end
-    if UIRefs.setAimMurdererToggle then UIRefs.setAimMurdererToggle(true) end
-    if UIRefs.setAimHeadToggle then UIRefs.setAimHeadToggle(false) end
 
     if UIRefs.setWalkSpeedSlider then UIRefs.setWalkSpeedSlider(CONFIG.DefaultWalkSpeed) end
     if UIRefs.setJumpPowerSlider then UIRefs.setJumpPowerSlider(CONFIG.DefaultJumpPower) end
@@ -6705,20 +6577,10 @@ addConnection(UIRefs.Close.MouseButton1Click:Connect(function()
 end))
 addConnection(UIRefs.unloadButton.MouseButton1Click:Connect(unload))
 
---// Device-specific UI
-if IsMobile then
-    UIRefs.Title.Text = "SCRIPTMM2   /   " .. VERSION .. "  •  MOBILE"
-    UIRefs.Status.Text = "Tap MOD to reopen • drag MOD to move"
-    local camera = Workspace.CurrentCamera
-    local viewport = camera and camera.ViewportSize or Vector2.new(390, 800)
-    Scale.Scale = math.min(0.90, (viewport.X - 22) / 580, (viewport.Y - 30) / 610)
-    UIRefs.reopen.Visible = false
-else
-    UIRefs.Title.Text = "SCRIPTMM2   /   " .. VERSION .. "  •  PC"
-    UIRefs.Status.Text = "Mouse4/G = menu • B = AimLock • H = grab"
-    UIRefs.reopen.Visible = false
-    UIRefs.MobileFlyControls.Visible = false
-end
+--// PC-only UI
+UIRefs.Title.Text = "SCRIPTMM2   /   " .. VERSION .. "  •  PC"
+UIRefs.Status.Text = "Mouse4/G = menu • B = AimLock • H = grab"
+UIRefs.reopen.Visible = false
 
 -- Apply a viewport-safe initial window size; opening uses the chosen scale.
 if UIRefs.applyInitialSize then UIRefs.applyInitialSize() end
@@ -6729,4 +6591,4 @@ setMainVisible(true)
 setCharacterMovement()
 refreshRoles()
 
-print("[ScriptMM2] " .. VERSION .. " loaded successfully. Mouse4/G = menu, B = AimLock, H = Grab Revolver, X = camera shot, J = optional Xeno Shot Snap, K = attack selected.")
+print("[ScriptMM2 PC] " .. VERSION .. " loaded successfully. PC-only build; selected-player Fling restored.")
