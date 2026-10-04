@@ -1,3 +1,16 @@
+--// ============================================================
+--// ScriptMM2 V1.0 ANDROID
+--// MOBILE UPDATE / ANDROID BUILD
+--//
+--// • Compact phone HUD (320x470) with mobile sidebar layout.
+--// • Touch-safe toggle handling for Android executors.
+--// • Silent Revolver mobile mode does NOT use __namecall/hookmetamethod hooks.
+--// • Silent Revolver uses the separate SILENT FIRE touch button.
+--// • Mobile Silent Knife hook path is disabled for crash safety.
+--// • Role HUD, Coin Farm, ESP, FOV and UI settings are preserved.
+--// • Version shown in the menu remains V1.0.
+--// ============================================================
+
 --// ScriptMM2
 --// V0.9.37: adaptive B AimLock prediction for jump spam and rapid direction changes.
 --// V0.9.36: four-language interface, English default, hot-switch Language tab.
