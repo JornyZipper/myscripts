@@ -6,7 +6,7 @@
 --// Client menu. Body AimLock; role-based Inside Fling with bounded center follow and Release Burst.
 
 local VERSION = "V1.0"
-local MOBILE_BUILD = true -- V1.0 mobile: safe toggle audio
+local MOBILE_BUILD = true -- V1.0 mobile: hard-safe toggle path
 local UIRefs = {}
 
 local Players = game:GetService("Players")
@@ -1673,21 +1673,40 @@ local function addToggle(name, order, callback)
     create("UIStroke", {Color=UITheme.border, Thickness=1, Transparency=0.45}, button)
 
     local enabled = false
-    local function setEnabled(value)
-        enabled = value
-        button.Text = name .. (enabled and "   [ON]" or "   [OFF]")
+    local function applyToggleText()
+        -- Mobile stability: avoid firing the live localization Text listener for every tap.
+        -- Keep its source/rendered caches synchronized manually instead.
+        local rawText = name .. (enabled and "   [ON]" or "   [OFF]")
+        Localization.busy[button] = true
+        button.Text = rawText
+        Localization.busy[button] = nil
+        Localization.sources[button] = rawText
+        Localization.rendered[button] = rawText
+    end
+
+    local function runToggleCallback(value, deferred)
+        local function runner()
+            if state.unloaded then return end
+            local ok, err = pcall(callback, value)
+            if not ok then
+                warn("[ScriptMM2 MOBILE] Toggle callback failed: " .. tostring(name) .. " (" .. tostring(err) .. ")")
+            end
+        end
+        if deferred then task.defer(runner) else runner() end
+    end
+
+    local function setEnabled(value, deferred)
+        enabled = value == true
+        applyToggleText()
         setButtonVisual(button, enabled)
-        callback(enabled)
+        runToggleCallback(enabled, deferred == true)
     end
 
     addConnection(button.MouseButton1Click:Connect(function()
-        local wasEnabled = enabled
-        setEnabled(not enabled)
-        if wasEnabled ~= enabled then
-            -- Never play executor-local MP3 assets from toggle clicks on Android.
-            -- This avoids the native client freeze/crash seen on Delta/Xeno-like mobile executors.
-            playSafeToggleSound(enabled)
-        end
+        -- Hard mobile safe mode: no Sound:Play(), no custom assets and no synchronous
+        -- feature callback inside the touch/click event. Programmatic setEnabled calls
+        -- remain synchronous so Fly/CoinFarm/Reset internal sequencing still works.
+        setEnabled(not enabled, true)
     end))
 
     return button, setEnabled
