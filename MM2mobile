@@ -1489,7 +1489,7 @@ do
         if IsMobile then
             local camera=Workspace.CurrentCamera
             local viewport=camera and camera.ViewportSize or Vector2.new(390,800)
-            local baseW, baseH = IsMobile and 350 or 580, IsMobile and 520 or 610
+            local baseW, baseH = IsMobile and 320 or 580, IsMobile and 470 or 610
             Scale.Scale=math.min(1, (viewport.X-18)/(baseW*UIStyling.userScale),
                 (viewport.Y-24)/(baseH*UIStyling.userScale))
         end
@@ -1633,6 +1633,29 @@ UIRefs.FlyDownButton = create("TextButton", {
 }, UIRefs.MobileFlyControls)
 
 create("UICorner", {CornerRadius = UDim.new(0, 12)}, UIRefs.FlyDownButton)
+
+--// MOBILE V1.0: dedicated safe Silent Fire button.
+--// It does not install __namecall/hookmetamethod hooks. Tapping this GUI button
+--// sends one Gun.Shoot request toward the current FOV target without moving camera.
+UIRefs.MobileSilentFire = create("TextButton", {
+    Name = "MobileSilentFire",
+    AnchorPoint = Vector2.new(1, 1),
+    Position = UDim2.new(1, -18, 1, -154),
+    Size = UDim2.fromOffset(112, 48),
+    BackgroundColor3 = Color3.fromRGB(116, 45, 55),
+    BackgroundTransparency = 0.04,
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    Text = "SILENT FIRE",
+    TextColor3 = Color3.fromRGB(255, 238, 240),
+    TextSize = 13,
+    AutoButtonColor = false,
+    Visible = false,
+    Active = true,
+    ZIndex = 120,
+}, UIRefs.ScriptMM2)
+create("UICorner", {CornerRadius = UDim.new(0, 12)}, UIRefs.MobileSilentFire)
+create("UIStroke", {Color = Color3.fromRGB(185, 77, 91), Thickness = 1, Transparency = 0.2}, UIRefs.MobileSilentFire)
 
 UIRefs.dragHandle = create("Frame", {
     Name = "DragHandle",
@@ -1955,17 +1978,16 @@ function Silent.beginXenoWatcher()
                 Silent.restoreXeno(true)
             end
             if IsMobile then
-                -- Android/Touch: keep MM2's original TouchTapInWorld handler and
-                -- redirect only Gun.Shoot's target CFrame through __namecall.
-                local hookOK, hookReason = Silent.install()
-                local gun = (char and char:FindFirstChild("Gun")) or (bag and bag:FindFirstChild("Gun"))
-                if not hookOK then
-                    local detail = tostring(hookReason or "mobile hook unavailable")
-                    Silent.publishXenoStatus("mobile-error:" .. detail, "Silent Revolver MOBILE: " .. detail)
-                elseif gun and gun:IsA("Tool") and gun:FindFirstChild("Shoot") then
-                    Silent.publishXenoStatus("mobile-active", "Silent Revolver MOBILE: ready • use normal fire button")
+                -- Android safe mode: never install executor metamethod hooks here.
+                -- The dedicated SILENT FIRE button sends one verified-shape request.
+                local gun = char and char:FindFirstChild("Gun")
+                if UIRefs.MobileSilentFire then
+                    UIRefs.MobileSilentFire.Visible = state.silentGun and not state.unloaded
+                end
+                if gun and gun:IsA("Tool") and gun:FindFirstChild("Shoot") then
+                    Silent.publishXenoStatus("mobile-active", "Silent Revolver MOBILE: ready • tap SILENT FIRE")
                 else
-                    Silent.publishXenoStatus("mobile-waiting", "Silent Revolver MOBILE: ON • waiting for revolver")
+                    Silent.publishXenoStatus("mobile-waiting", "Silent Revolver MOBILE: ON • equip revolver")
                 end
             elseif Silent.xenoInstalled then
                 Silent.publishXenoStatus("active", "Silent Revolver ON: connected; server hit unverified")
@@ -1984,23 +2006,77 @@ function Silent.beginXenoWatcher()
         end
     end)
 end
+function Silent.mobileFire()
+    if not IsMobile or state.unloaded or not state.silentGun or Silent.mobileFireBusy then return end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local gun = char and char:FindFirstChild("Gun")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local attachment = root and root:FindFirstChild("GunRaycastAttachment")
+    local remote = gun and gun:FindFirstChild("Shoot")
+    if not char or not hum or hum.Health <= 0 then
+        if UIRefs.Status then UIRefs.Status.Text = "Silent MOBILE: character not ready" end
+        return
+    end
+    if not gun or not gun:IsA("Tool") or not remote or not remote:IsA("RemoteEvent") or not attachment then
+        if UIRefs.Status then UIRefs.Status.Text = "Silent MOBILE: equip the revolver first" end
+        return
+    end
+    local aim = Silent.xenoTargetCFrame()
+    if typeof(aim) ~= "CFrame" then
+        if UIRefs.Status then UIRefs.Status.Text = "Silent MOBILE: no valid Murderer inside FOV" end
+        return
+    end
+    Silent.mobileFireBusy = true
+    local ok, err = pcall(function()
+        remote:FireServer(attachment.WorldCFrame, aim)
+    end)
+    if UIRefs.Status then
+        UIRefs.Status.Text = ok and "Silent MOBILE: shot sent • server hit unverified"
+            or ("Silent MOBILE: shot failed • " .. tostring(err))
+    end
+    task.delay(0.28, function() Silent.mobileFireBusy = false end)
+end
+
+if UIRefs.MobileSilentFire then
+    addConnection(UIRefs.MobileSilentFire.MouseButton1Click:Connect(function()
+        task.defer(Silent.mobileFire)
+    end))
+end
+
 UIRefs.setSilentGunToggle = nil
 UIRefs._unused, UIRefs.setSilentGunToggle = addToggle("Silent Revolver", 14.101, function(enabled)
     state.silentGun = enabled
     if enabled then
         Silent.xenoStatusKey = nil
         if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(true) end
-        Silent.publishXenoStatus("waiting", "Silent Revolver ON: waiting for revolver")
+        if IsMobile and UIRefs.MobileSilentFire then UIRefs.MobileSilentFire.Visible = true end
+        Silent.publishXenoStatus("waiting", IsMobile and "Silent Revolver MOBILE: ON • equip revolver" or "Silent Revolver ON: waiting for revolver")
         Silent.beginXenoWatcher()
     else
         Silent.xenoWatcherGeneration = (Silent.xenoWatcherGeneration or 0) + 1
-        Silent.restoreXeno(false)
+        if IsMobile then
+            if UIRefs.MobileSilentFire then UIRefs.MobileSilentFire.Visible = false end
+            state.silentGun = false
+        else
+            Silent.restoreXeno(false)
+        end
         Silent.xenoStatusKey = nil
         if not state.unloaded then UIRefs.Status.Text = "Silent Revolver OFF" end
     end
 end)
 UIRefs.setSilentKnifeToggle = nil
 UIRefs._unused, UIRefs.setSilentKnifeToggle = addToggle("Silent Knife Throw (short lead)", 14.102, function(enabled)
+    if IsMobile then
+        state.silentKnife = false
+        if enabled then
+            task.defer(function()
+                if UIRefs.setSilentKnifeToggle then UIRefs.setSilentKnifeToggle(false) end
+            end)
+            UIRefs.Status.Text = "Silent Knife: disabled in MOBILE safe mode"
+        end
+        return
+    end
     if enabled then
         local ok, why = Silent.install()
         state.silentKnife = ok
@@ -6659,7 +6735,7 @@ addConnection(UIRefs.unloadButton.MouseButton1Click:Connect(unload))
 --// genuinely compact instead of shrinking a 580x610 desktop window into tiny text.
 local function applyCompactMobileLayout()
     if not IsMobile then return end
-    local baseW, baseH = 350, 520
+    local baseW, baseH = 320, 470
     UIRefs.Main.Size = UDim2.fromOffset(baseW, baseH)
     UIRefs.TopBar.Size = UDim2.new(1, 0, 0, 58)
 
@@ -6686,12 +6762,12 @@ local function applyCompactMobileLayout()
         UIRefs.Close.Size = UDim2.fromOffset(27, 27)
     end
 
-    local sideX, sideY, sideW = 8, 66, 88
-    local contentX, contentY = 104, 66
-    local contentRight, contentBottom = 112, 74
+    local sideX, sideY, sideW = 6, 62, 76
+    local contentX, contentY = 88, 62
+    local contentRight, contentBottom = 94, 68
     if UIRefs.TabBar then
         UIRefs.TabBar.Position = UDim2.fromOffset(sideX, sideY)
-        UIRefs.TabBar.Size = UDim2.new(0, sideW, 1, -74)
+        UIRefs.TabBar.Size = UDim2.new(0, sideW, 1, -68)
         local caption = UIRefs.TabBar:FindFirstChild("NavigationCaption")
         local divider = UIRefs.TabBar:FindFirstChild("NavDivider")
         if caption then caption.Visible = false end
@@ -6710,9 +6786,9 @@ local function applyCompactMobileLayout()
     for i, key in ipairs(order) do
         local button = UIRefs.CategoryTabs and UIRefs.CategoryTabs[key]
         if button then
-            button.Position = UDim2.fromOffset(6, 10 + (i - 1) * 50)
-            button.Size = UDim2.new(1, -12, 0, 42)
-            button.TextSize = 9
+            button.Position = UDim2.fromOffset(4, 8 + (i - 1) * 43)
+            button.Size = UDim2.new(1, -8, 0, 36)
+            button.TextSize = 8
         end
     end
     if UIRefs.reopen then
@@ -6720,8 +6796,13 @@ local function applyCompactMobileLayout()
         UIRefs.reopen.TextSize = 13
     end
     if UIRefs.MobileFlyControls then
-        UIRefs.MobileFlyControls.Position = UDim2.new(1, -12, 1, -18)
-        UIRefs.MobileFlyControls.Size = UDim2.fromOffset(56, 120)
+        UIRefs.MobileFlyControls.Position = UDim2.new(1, -10, 1, -14)
+        UIRefs.MobileFlyControls.Size = UDim2.fromOffset(52, 112)
+    end
+    if UIRefs.MobileSilentFire then
+        UIRefs.MobileSilentFire.Position = UDim2.new(1, -10, 1, -132)
+        UIRefs.MobileSilentFire.Size = UDim2.fromOffset(102, 44)
+        UIRefs.MobileSilentFire.TextSize = 12
     end
     if UIRefs.aimLockButton then
         UIRefs.aimLockButton.Text = "AimLock Murderer"
@@ -6735,7 +6816,7 @@ if IsMobile then
     UIRefs.Status.Text = "Touch UI • MOD = reopen"
     local camera = Workspace.CurrentCamera
     local viewport = camera and camera.ViewportSize or Vector2.new(390, 800)
-    Scale.Scale = math.min(1, (viewport.X - 18) / 350, (viewport.Y - 24) / 520)
+    Scale.Scale = math.min(1, (viewport.X - 14) / 320, (viewport.Y - 18) / 470)
     UIRefs.reopen.Visible = false
 else
     UIRefs.Title.Text = "SCRIPTMM2   /   " .. VERSION .. "  •  PC"
@@ -6753,4 +6834,4 @@ setMainVisible(true)
 setCharacterMovement()
 refreshRoles()
 
-print("[ScriptMM2 MOBILE] " .. VERSION .. " loaded successfully. Touch UI enabled; Silent Revolver uses the normal mobile fire button when executor hooks are available.")
+print("[ScriptMM2 MOBILE] " .. VERSION .. " loaded successfully. Touch UI enabled; Silent Revolver uses hook-free SILENT FIRE safe mode.")
