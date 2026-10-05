@@ -1614,9 +1614,9 @@ CrashDescription.Parent = CrashButton
 
 local Watermark = New("TextButton", {
     Position = UDim2.fromOffset(12, 12),
-    Size = UDim2.fromOffset(366, 72),
-    BackgroundColor3 = Color3.fromRGB(20, 26, 36),
-    BackgroundTransparency = 0.06,
+    Size = UDim2.fromOffset(452, 62),
+    BackgroundColor3 = Color3.fromRGB(28, 36, 49),
+    BackgroundTransparency = 0.08,
     BorderSizePixel = 0,
     Text = "",
     AutoButtonColor = false,
@@ -1625,8 +1625,8 @@ local Watermark = New("TextButton", {
     ZIndex = 210,
 })
 Watermark.Parent = Gui
-Corner(Watermark, 15)
-local WatermarkStroke = Stroke(Watermark, Config.Border, 0.02, 1)
+Corner(Watermark, 14)
+local WatermarkStroke = Stroke(Watermark, Config.Border, 0.04, 1)
 
 local WatermarkScale = New("UIScale", { Scale = 1 })
 WatermarkScale.Parent = Watermark
@@ -1634,79 +1634,146 @@ WatermarkScale.Parent = Watermark
 local WatermarkGradient = New("UIGradient", {
     Rotation = 0,
     Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(32, 42, 58)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(22, 29, 41)),
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(46, 59, 80)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(33, 43, 59)),
     }),
 })
 WatermarkGradient.Parent = Watermark
+
+local WatermarkPadding = New("UIPadding", {
+    PaddingLeft = UDim.new(0, 9),
+    PaddingRight = UDim.new(0, 9),
+    PaddingTop = UDim.new(0, 9),
+    PaddingBottom = UDim.new(0, 9),
+})
+WatermarkPadding.Parent = Watermark
 
 local WatermarkLayout = New("UIListLayout", {
     FillDirection = Enum.FillDirection.Horizontal,
     HorizontalAlignment = Enum.HorizontalAlignment.Left,
     VerticalAlignment = Enum.VerticalAlignment.Center,
-    Padding = UDim.new(0, 8),
+    Padding = UDim.new(0, 7),
     SortOrder = Enum.SortOrder.LayoutOrder,
 })
 WatermarkLayout.Parent = Watermark
 
-local WatermarkPadding = New("UIPadding", {
-    PaddingLeft = UDim.new(0, 8),
-    PaddingRight = UDim.new(0, 8),
-    PaddingTop = UDim.new(0, 8),
-    PaddingBottom = UDim.new(0, 8),
-})
-WatermarkPadding.Parent = Watermark
+local function CreateMarkCard(width, order)
+    local card = New("Frame", {
+        Size = UDim2.fromOffset(width, 44),
+        BackgroundColor3 = Color3.fromRGB(46, 59, 80),
+        BackgroundTransparency = 0.08,
+        BorderSizePixel = 0,
+        LayoutOrder = order,
+        ZIndex = 212,
+    })
+    card.Parent = Watermark
+    Corner(card, 12)
+    Stroke(card, Color3.fromRGB(78, 93, 117), 0.20, 1)
+    return card
+end
 
-local WatermarkLogoCell = New("Frame", {
-    Size = UDim2.fromOffset(68, 56),
-    BackgroundColor3 = Color3.fromRGB(28, 37, 50),
-    BackgroundTransparency = 0.02,
+local BrandCard = CreateMarkCard(164, 1)
+
+local BrandIconWrap = New("Frame", {
+    Position = UDim2.fromOffset(10, 6),
+    Size = UDim2.fromOffset(34, 32),
+    BackgroundTransparency = 1,
+    ZIndex = 214,
+})
+BrandIconWrap.Parent = BrandCard
+
+local BrandLeft = New("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromOffset(12, 16),
+    Size = UDim2.fromOffset(12, 28),
+    Rotation = -35,
+    BackgroundColor3 = Color3.fromRGB(12, 55, 153),
     BorderSizePixel = 0,
-    LayoutOrder = 1,
-    ZIndex = 212,
+    ZIndex = 215,
 })
-WatermarkLogoCell.Parent = Watermark
-Corner(WatermarkLogoCell, 13)
-Stroke(WatermarkLogoCell, Config.Border, 0.08, 1)
+BrandLeft.Parent = BrandIconWrap
+Corner(BrandLeft, 8)
+local BrandLeftGradient = New("UIGradient", {
+    Rotation = 90,
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(13, 42, 129)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(21, 122, 255)),
+    }),
+})
+BrandLeftGradient.Parent = BrandLeft
 
-local WatermarkLogoAccent = New("Frame", {
-    AnchorPoint = Vector2.new(1, 0.5),
-    Position = UDim2.new(1, -1, 0.5, 0),
-    Size = UDim2.fromOffset(2, 30),
-    BackgroundColor3 = Config.WaterBright,
+local BrandRight = New("Frame", {
+    AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromOffset(24, 13),
+    Size = UDim2.fromOffset(11, 23),
+    Rotation = 35,
+    BackgroundColor3 = Color3.fromRGB(34, 175, 255),
+    BorderSizePixel = 0,
+    ZIndex = 215,
+})
+BrandRight.Parent = BrandIconWrap
+Corner(BrandRight, 8)
+local BrandRightGradient = New("UIGradient", {
+    Rotation = 90,
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 131, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(55, 204, 255)),
+    }),
+})
+BrandRightGradient.Parent = BrandRight
+
+local BrandDivider = New("Frame", {
+    Position = UDim2.fromOffset(52, 8),
+    Size = UDim2.fromOffset(1, 28),
+    BackgroundColor3 = Color3.fromRGB(108, 124, 146),
+    BackgroundTransparency = 0.25,
     BorderSizePixel = 0,
     ZIndex = 214,
 })
-WatermarkLogoAccent.Parent = WatermarkLogoCell
-Corner(WatermarkLogoAccent, 999)
+BrandDivider.Parent = BrandCard
 
-local WatermarkLogo = New("TextLabel", {
+local BrandTitle = New("TextLabel", {
+    Position = UDim2.fromOffset(64, 6),
+    Size = UDim2.fromOffset(88, 16),
+    BackgroundTransparency = 1,
+    Text = "VAFLEX",
+    TextColor3 = Color3.fromRGB(245, 248, 252),
+    TextSize = 12,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 214,
+})
+BrandTitle.Parent = BrandCard
+
+local BrandSub = New("TextLabel", {
+    Position = UDim2.fromOffset(64, 21),
+    Size = UDim2.fromOffset(88, 14),
+    BackgroundTransparency = 1,
+    Text = "HUB",
+    TextColor3 = Color3.fromRGB(193, 206, 220),
+    TextSize = 10,
+    Font = Enum.Font.GothamMedium,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 214,
+})
+BrandSub.Parent = BrandCard
+
+local AvatarCard = CreateMarkCard(44, 2)
+local AvatarViewport = New("ViewportFrame", {
     AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5),
-    Size = UDim2.new(1, -8, 1, -8),
-    BackgroundTransparency = 1,
-    Text = "V",
-    TextColor3 = Config.WaterBright,
-    TextSize = 26,
-    Font = Enum.Font.GothamBlack,
-    ZIndex = 214,
-})
-WatermarkLogo.Parent = WatermarkLogoCell
-
-local AvatarViewport = New("ViewportFrame", {
-    Size = UDim2.fromOffset(56, 56),
-    BackgroundColor3 = Color3.fromRGB(29, 38, 51),
-    BackgroundTransparency = 0.02,
+    Size = UDim2.fromOffset(34, 34),
+    BackgroundColor3 = Color3.fromRGB(38, 48, 64),
+    BackgroundTransparency = 0.04,
     BorderSizePixel = 0,
     Ambient = Color3.fromRGB(180, 190, 205),
     LightColor = Color3.fromRGB(255, 255, 255),
     LightDirection = Vector3.new(-1, -1, -1),
-    LayoutOrder = 2,
-    ZIndex = 212,
+    ZIndex = 214,
 })
-AvatarViewport.Parent = Watermark
-Corner(AvatarViewport, 13)
-Stroke(AvatarViewport, Config.Border, 0.08, 1)
+AvatarViewport.Parent = AvatarCard
+Corner(AvatarViewport, 999)
+Stroke(AvatarViewport, Color3.fromRGB(78, 93, 117), 0.25, 1)
 
 local AvatarWorld = New("WorldModel", { Name = "AvatarWorld" })
 AvatarWorld.Parent = AvatarViewport
@@ -1715,46 +1782,36 @@ local AvatarCamera = New("Camera", { Name = "AvatarCamera" })
 AvatarCamera.Parent = AvatarViewport
 AvatarViewport.CurrentCamera = AvatarCamera
 
-local function MakeStatCell(width, titleText, valueText, order)
-    local Cell = New("Frame", {
-        Size = UDim2.fromOffset(width, 56),
-        BackgroundColor3 = Color3.fromRGB(28, 37, 50),
-        BackgroundTransparency = 0.02,
-        BorderSizePixel = 0,
-        LayoutOrder = order,
-        ZIndex = 212,
-    })
-    Cell.Parent = Watermark
-    Corner(Cell, 13)
-    Stroke(Cell, Config.Border, 0.08, 1)
+local function CreateStatCard(width, order, iconText, initialValue)
+    local card = CreateMarkCard(width, order)
 
-    local Accent = New("Frame", {
-        Position = UDim2.fromOffset(34, 11),
-        Size = UDim2.fromOffset(1, 34),
-        BackgroundColor3 = Config.Border,
-        BackgroundTransparency = 0.30,
-        BorderSizePixel = 0,
-        ZIndex = 214,
-    })
-    Accent.Parent = Cell
-
-    local Icon = New("TextLabel", {
-        Position = UDim2.fromOffset(0, 0),
-        Size = UDim2.fromOffset(34, 56),
+    local icon = New("TextLabel", {
+        Position = UDim2.fromOffset(10, 0),
+        Size = UDim2.fromOffset(28, 44),
         BackgroundTransparency = 1,
-        Text = titleText,
-        TextColor3 = Color3.fromRGB(202, 214, 228),
-        TextSize = 12,
+        Text = iconText,
+        TextColor3 = Color3.fromRGB(229, 236, 244),
+        TextSize = 10,
         Font = Enum.Font.GothamBold,
         ZIndex = 214,
     })
-    Icon.Parent = Cell
+    icon.Parent = card
 
-    local Value = New("TextLabel", {
-        Position = UDim2.fromOffset(46, 0),
-        Size = UDim2.new(1, -54, 1, 0),
+    local divider = New("Frame", {
+        Position = UDim2.fromOffset(40, 8),
+        Size = UDim2.fromOffset(1, 28),
+        BackgroundColor3 = Color3.fromRGB(108, 124, 146),
+        BackgroundTransparency = 0.25,
+        BorderSizePixel = 0,
+        ZIndex = 214,
+    })
+    divider.Parent = card
+
+    local value = New("TextLabel", {
+        Position = UDim2.fromOffset(52, 0),
+        Size = UDim2.new(1, -60, 1, 0),
         BackgroundTransparency = 1,
-        Text = valueText,
+        Text = initialValue,
         TextColor3 = Config.Text,
         TextSize = 11,
         Font = Enum.Font.GothamSemibold,
@@ -1762,30 +1819,29 @@ local function MakeStatCell(width, titleText, valueText, order)
         TextTruncate = Enum.TextTruncate.AtEnd,
         ZIndex = 214,
     })
-    Value.Parent = Cell
+    value.Parent = card
 
-    return Cell, Value
+    return card, value
 end
 
-local NameCell, NameValue = MakeStatCell(110, "N", LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName or LocalPlayer.Name, 3)
-local FPSCell, FPSValueLabel = MakeStatCell(84, "FPS", "60", 4)
-local PingCell, PingValueLabel = MakeStatCell(84, "PING", "0 ms", 5)
+local NameCard, NameValue = CreateStatCard(110, 3, "ID", LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName or LocalPlayer.Name)
+local FPSCard, FPSValueLabel = CreateStatCard(92, 4, "FPS", "60")
+local PingCard, PingValueLabel = CreateStatCard(88, 5, "PING", "0 ms")
 
 local WatermarkShimmer = New("Frame", {
-    Size = UDim2.new(0, 44, 1, 0),
-    Position = UDim2.fromOffset(-60, 0),
+    Size = UDim2.fromOffset(46, 70),
+    Position = UDim2.fromOffset(-56, -4),
     BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-    BackgroundTransparency = 0.88,
+    BackgroundTransparency = 0.92,
+    Rotation = 10,
     BorderSizePixel = 0,
-    Rotation = 12,
-    ZIndex = 215,
+    ZIndex = 216,
 })
 WatermarkShimmer.Parent = Watermark
 local WatermarkShimmerGradient = New("UIGradient", {
-    Rotation = 0,
     Transparency = NumberSequence.new({
         NumberSequenceKeypoint.new(0, 1),
-        NumberSequenceKeypoint.new(0.5, 0.25),
+        NumberSequenceKeypoint.new(0.5, 0.18),
         NumberSequenceKeypoint.new(1, 1),
     }),
 })
@@ -1922,132 +1978,36 @@ local function RefreshWatermarkText()
     local ping = GetLocalPing()
     PingValueLabel.Text = ping and (tostring(ping) .. " ms") or "-- ms"
 
-    AvatarViewport.Visible = Config.WatermarkOptions.ShowAvatar
-    NameCell.Visible = Config.WatermarkOptions.ShowNickname
-    FPSCell.Visible = Config.WatermarkOptions.ShowFPS
-    PingCell.Visible = Config.WatermarkOptions.ShowPing
+    AvatarCard.Visible = Config.WatermarkOptions.ShowAvatar
+    NameCard.Visible = Config.WatermarkOptions.ShowNickname
+    FPSCard.Visible = Config.WatermarkOptions.ShowFPS
+    PingCard.Visible = Config.WatermarkOptions.ShowPing
 
-    local visibleCount = 0
-    for _, child in ipairs({WatermarkLogoCell, AvatarViewport, NameCell, FPSCell, PingCell}) do
-        if child.Visible ~= false then visibleCount = visibleCount + 1 end
+    local visible = {BrandCard}
+    if AvatarCard.Visible then table.insert(visible, AvatarCard) end
+    if NameCard.Visible then table.insert(visible, NameCard) end
+    if FPSCard.Visible then table.insert(visible, FPSCard) end
+    if PingCard.Visible then table.insert(visible, PingCard) end
+
+    local width = 18
+    for i, gui in ipairs(visible) do
+        width = width + gui.Size.X.Offset
+        if i < #visible then width = width + 7 end
     end
+    width = width + 18
 
-    local width = 84
-    if AvatarViewport.Visible then width = width + 64 end
-    if NameCell.Visible then width = width + 118 end
-    if FPSCell.Visible then width = width + 92 end
-    if PingCell.Visible then width = width + 92 end
-    if visibleCount > 0 then width = width + math.max(0, visibleCount - 1) * 8 end
-
-    Watermark.Size = UDim2.fromOffset(width, 72)
+    Watermark.Size = UDim2.fromOffset(width, 62)
 end
 
 Connect(RunService.RenderStepped, function()
-    if Watermark.Visible and WatermarkShimmer.Position.X.Offset < Watermark.AbsoluteSize.X + 60 then
-        WatermarkShimmer.Position = WatermarkShimmer.Position + UDim2.fromOffset(1, 0)
-    else
-        WatermarkShimmer.Position = UDim2.fromOffset(-60, 0)
+    if Watermark.Visible then
+        local x = WatermarkShimmer.Position.X.Offset + 1
+        if x > Watermark.AbsoluteSize.X + 34 then
+            x = -56
+        end
+        WatermarkShimmer.Position = UDim2.fromOffset(x, -4)
     end
 end)
-
---// ============================================================
---// WATER STREAM TRANSITION
---// ============================================================
-
-local TransitionOverlay = New("Frame", {
-    Size = UDim2.fromScale(1, 1),
-    BackgroundTransparency = 1,
-    BorderSizePixel = 0,
-    Visible = true,
-    ZIndex = 400,
-})
-TransitionOverlay.Parent = Gui
-
-local function GetAbsoluteCenter(guiObject)
-    local absPos = guiObject.AbsolutePosition
-    local absSize = guiObject.AbsoluteSize
-    return Vector2.new(absPos.X + absSize.X / 2, absPos.Y + absSize.Y / 2)
-end
-
-local function WaterStreamTransition(fromObject, toObject)
-    local fromCenter = GetAbsoluteCenter(fromObject)
-    local toCenter = GetAbsoluteCenter(toObject)
-    local delta = toCenter - fromCenter
-    local distance = delta.Magnitude
-    local angle = math.deg(math.atan2(delta.Y, delta.X))
-
-    local Stream = New("Frame", {
-        AnchorPoint = Vector2.new(0, 0.5),
-        Position = UDim2.fromOffset(fromCenter.X, fromCenter.Y),
-        Size = UDim2.fromOffset(0, 12),
-        BackgroundColor3 = Config.WaterBright,
-        BackgroundTransparency = 0.20,
-        BorderSizePixel = 0,
-        Rotation = angle,
-        ZIndex = 430,
-    })
-    Stream.Parent = TransitionOverlay
-    Corner(Stream, 999)
-
-    local StreamGlow = New("Frame", {
-        Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Config.WaterWhite,
-        BackgroundTransparency = 0.55,
-        BorderSizePixel = 0,
-        ZIndex = 431,
-    })
-    StreamGlow.Parent = Stream
-    Corner(StreamGlow, 999)
-
-    Tween(Stream, 0.18, { Size = UDim2.fromOffset(distance, 12) }, Enum.EasingStyle.Quint)
-
-    for i = 1, 18 do
-        local droplet = New("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromOffset(fromCenter.X, fromCenter.Y),
-            Size = UDim2.fromOffset(math.random(5, 11), math.random(5, 11)),
-            BackgroundColor3 = i % 4 == 0 and Config.WaterWhite or Config.WaterBright,
-            BackgroundTransparency = 0.08,
-            BorderSizePixel = 0,
-            ZIndex = 432,
-        })
-        droplet.Parent = TransitionOverlay
-        Corner(droplet, 999)
-
-        local t = i / 18
-        local wobble = Vector2.new(math.random(-18, 18), math.random(-18, 18)) * (1 - math.abs(0.5 - t))
-        local target = fromCenter:Lerp(toCenter, t) + wobble
-
-        Tween(droplet, 0.20 + t * 0.08, {
-            Position = UDim2.fromOffset(target.X, target.Y),
-            Size = UDim2.fromOffset(2, 2),
-            BackgroundTransparency = 1,
-        }, Enum.EasingStyle.Quint)
-
-        task.delay(0.34, function()
-            if droplet.Parent then droplet:Destroy() end
-        end)
-    end
-
-    local Burst = New("Frame", {
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromOffset(toCenter.X, toCenter.Y),
-        Size = UDim2.fromOffset(12, 12),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        ZIndex = 433,
-    })
-    Burst.Parent = TransitionOverlay
-    Corner(Burst, 999)
-    local BurstStroke = Stroke(Burst, Config.WaterWhite, 0.05, 2)
-    Tween(Burst, 0.24, { Size = UDim2.fromOffset(88, 88) }, Enum.EasingStyle.Quart)
-    Tween(BurstStroke, 0.24, { Transparency = 1 })
-
-    task.delay(0.27, function()
-        if Stream.Parent then Stream:Destroy() end
-        if Burst.Parent then Burst:Destroy() end
-    end)
-end
 
 --// ============================================================
 --// SMOOTH MENU <-> WATERMARK TRANSITION
@@ -2064,39 +2024,13 @@ local function ShowWatermarkAnimated()
 
     RefreshWatermarkText()
     Watermark.Visible = true
-    WatermarkScale.Scale = 0.86
+    WatermarkScale.Scale = 0.78
     Watermark.BackgroundTransparency = 1
     WatermarkStroke.Transparency = 1
 
-    for _, child in ipairs(Watermark:GetDescendants()) do
-        if child:IsA("TextLabel") then
-            child.TextTransparency = 1
-        elseif child:IsA("ImageLabel") then
-            child.ImageTransparency = 1
-        elseif child:IsA("Frame") then
-            child.BackgroundTransparency = math.clamp(child.BackgroundTransparency + 0.25, 0, 1)
-        elseif child:IsA("ViewportFrame") then
-            child.ImageTransparency = 1
-        elseif child:IsA("UIStroke") then
-            child.Transparency = 1
-        end
-    end
-
-    Tween(WatermarkScale, 0.28, { Scale = 1 }, Enum.EasingStyle.Back)
-    Tween(Watermark, 0.24, { BackgroundTransparency = 0.06 })
-    Tween(WatermarkStroke, 0.24, { Transparency = 0.02 })
-
-    for _, child in ipairs(Watermark:GetDescendants()) do
-        if child:IsA("TextLabel") then
-            Tween(child, 0.22, { TextTransparency = 0 })
-        elseif child:IsA("Frame") and child ~= WatermarkShimmer then
-            Tween(child, 0.22, { BackgroundTransparency = 0.02 }, Enum.EasingStyle.Sine)
-        elseif child:IsA("ViewportFrame") then
-            Tween(child, 0.22, { ImageTransparency = 0 })
-        elseif child:IsA("UIStroke") and child.Parent ~= Watermark then
-            Tween(child, 0.22, { Transparency = 0.08 })
-        end
-    end
+    Tween(WatermarkScale, 0.26, { Scale = 1 }, Enum.EasingStyle.Back)
+    Tween(Watermark, 0.22, { BackgroundTransparency = 0.08 })
+    Tween(WatermarkStroke, 0.22, { Transparency = 0.04 })
 end
 
 local function HideWatermarkAnimated(callback)
@@ -2105,23 +2039,11 @@ local function HideWatermarkAnimated(callback)
         return
     end
 
-    Tween(WatermarkScale, 0.18, { Scale = 0.84 })
-    Tween(Watermark, 0.18, { BackgroundTransparency = 1 })
-    Tween(WatermarkStroke, 0.18, { Transparency = 1 })
+    Tween(WatermarkScale, 0.17, { Scale = 0.82 })
+    Tween(Watermark, 0.17, { BackgroundTransparency = 1 })
+    Tween(WatermarkStroke, 0.17, { Transparency = 1 })
 
-    for _, child in ipairs(Watermark:GetDescendants()) do
-        if child:IsA("TextLabel") then
-            Tween(child, 0.16, { TextTransparency = 1 })
-        elseif child:IsA("Frame") and child ~= WatermarkShimmer then
-            Tween(child, 0.16, { BackgroundTransparency = 1 })
-        elseif child:IsA("ViewportFrame") then
-            Tween(child, 0.16, { ImageTransparency = 1 })
-        elseif child:IsA("UIStroke") and child.Parent ~= Watermark then
-            Tween(child, 0.16, { Transparency = 1 })
-        end
-    end
-
-    task.delay(0.19, function()
+    task.delay(0.18, function()
         Watermark.Visible = false
         if callback then callback() end
     end)
@@ -2137,14 +2059,7 @@ local function CloseMenu()
     MenuOpen = false
     ClickSound:Play()
 
-    Tween(MainScale, 0.18, { Scale = TargetScale * 0.90 }, Enum.EasingStyle.Quart)
-
-    task.delay(0.10, function()
-        if Running and Main.Visible and Config.Watermark then
-            Watermark.Visible = true
-            WaterStreamTransition(Main, Watermark)
-        end
-    end)
+    Tween(MainScale, 0.20, { Scale = TargetScale * 0.82 }, Enum.EasingStyle.Quart)
 
     task.delay(0.20, function()
         if not Running or MenuOpen then
@@ -2165,17 +2080,14 @@ local function OpenMenu()
     MenuOpen = true
     ClickSound:Play()
 
-    Main.Visible = true
-    MainScale.Scale = TargetScale * 0.90
-
-    WaterStreamTransition(Watermark, Main)
-
     HideWatermarkAnimated(function()
         if not Running then
             TransitionBusy = false
             return
         end
 
+        Main.Visible = true
+        MainScale.Scale = TargetScale * 0.82
         Tween(MainScale, 0.28, { Scale = TargetScale }, Enum.EasingStyle.Back)
 
         task.delay(0.24, function()
