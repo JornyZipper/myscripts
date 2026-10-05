@@ -48,7 +48,7 @@ local Config = {
         ShowNickname = true,
         ShowFPS = true,
         ShowPing = true,
-        ShowAvatar = true,
+        ShowAvatar = false,
     },
 
     -- Extra bright loader.
@@ -777,14 +777,14 @@ Corner(Sidebar, 15)
 Stroke(Sidebar, Config.Border, 0, 1)
 
 local SidebarPadding = New("UIPadding", {
-    PaddingTop = UDim.new(0, 9),
+    PaddingTop = UDim.new(0, 6),
     PaddingLeft = UDim.new(0, 7),
     PaddingRight = UDim.new(0, 7),
 })
 SidebarPadding.Parent = Sidebar
 
 local SidebarList = New("UIListLayout", {
-    Padding = UDim.new(0, 7),
+    Padding = UDim.new(0, 5),
     SortOrder = Enum.SortOrder.LayoutOrder,
 })
 SidebarList.Parent = Sidebar
@@ -842,7 +842,7 @@ local function CreateTab(name, icon)
         BackgroundTransparency = 1,
         Text = name,
         TextColor3 = Config.Muted,
-        TextSize = 11,
+        TextSize = 10,
         Font = Enum.Font.GothamMedium,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex = 104,
@@ -998,7 +998,7 @@ local function MakeSection(parent, title, order)
         BackgroundTransparency = 1,
         Text = title,
         TextColor3 = Config.Text,
-        TextSize = 12,
+        TextSize = 10,
         Font = Enum.Font.GothamSemibold,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex = 108,
@@ -1089,7 +1089,7 @@ local RoleTitle = New("TextLabel", {
     BackgroundTransparency = 1,
     Text = "Role ESP",
     TextColor3 = Config.Text,
-    TextSize = 11,
+    TextSize = 10,
     Font = Enum.Font.GothamSemibold,
     TextXAlignment = Enum.TextXAlignment.Left,
     ZIndex = 110,
@@ -1133,7 +1133,7 @@ local GunTitle = New("TextLabel", {
     BackgroundTransparency = 1,
     Text = "Gun ESP",
     TextColor3 = Config.Text,
-    TextSize = 11,
+    TextSize = 10,
     Font = Enum.Font.GothamSemibold,
     TextXAlignment = Enum.TextXAlignment.Left,
     ZIndex = 110,
@@ -1165,7 +1165,7 @@ local WatermarkRowTitle = New("TextLabel", {
     BackgroundTransparency = 1,
     Text = "Watermark",
     TextColor3 = Config.Text,
-    TextSize = 11,
+    TextSize = 10,
     Font = Enum.Font.GothamSemibold,
     TextXAlignment = Enum.TextXAlignment.Left,
     ZIndex = 110,
@@ -1297,7 +1297,7 @@ local function CreateOptionRow(parent, y, title, description, default, callback)
         BackgroundTransparency = 1,
         Text = title,
         TextColor3 = Config.Text,
-        TextSize = 10,
+        TextSize = 8,
         Font = Enum.Font.GothamSemibold,
         TextXAlignment = Enum.TextXAlignment.Left,
         ZIndex = 312,
@@ -1387,7 +1387,7 @@ WatermarkSettingsShade.Parent = Main
 local WatermarkSettingsPanel = New("Frame", {
     AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5),
-    Size = UDim2.fromOffset(270, 260),
+    Size = UDim2.fromOffset(270, 214),
     BackgroundColor3 = Color3.fromRGB(24, 30, 42),
     BackgroundTransparency = 0.03,
     BorderSizePixel = 0,
@@ -1466,15 +1466,6 @@ CreateOptionRow(
     "Show your network ping",
     Config.WatermarkOptions.ShowPing,
     function(value) Config.WatermarkOptions.ShowPing = value end
-)
-
-CreateOptionRow(
-    WatermarkSettingsPanel,
-    209,
-    "Avatar",
-    "Show mini 3D character",
-    Config.WatermarkOptions.ShowAvatar,
-    function(value) Config.WatermarkOptions.ShowAvatar = value end
 )
 
 local WatermarkSettingsOpen = false
@@ -1588,7 +1579,7 @@ local CrashTitle = New("TextLabel", {
     BackgroundTransparency = 1,
     Text = "Crash VAFLEX",
     TextColor3 = Color3.fromRGB(255, 112, 125),
-    TextSize = 11,
+    TextSize = 10,
     Font = Enum.Font.GothamSemibold,
     TextXAlignment = Enum.TextXAlignment.Left,
     ZIndex = 105,
@@ -1614,7 +1605,7 @@ CrashDescription.Parent = CrashButton
 
 local Watermark = New("TextButton", {
     Position = UDim2.fromOffset(12, 12),
-    Size = UDim2.fromOffset(452, 62),
+    Size = UDim2.fromOffset(332, 48),
     BackgroundColor3 = Color3.fromRGB(28, 36, 49),
     BackgroundTransparency = 0.08,
     BorderSizePixel = 0,
@@ -1641,10 +1632,10 @@ local WatermarkGradient = New("UIGradient", {
 WatermarkGradient.Parent = Watermark
 
 local WatermarkPadding = New("UIPadding", {
-    PaddingLeft = UDim.new(0, 9),
-    PaddingRight = UDim.new(0, 9),
-    PaddingTop = UDim.new(0, 9),
-    PaddingBottom = UDim.new(0, 9),
+    PaddingLeft = UDim.new(0, 6),
+    PaddingRight = UDim.new(0, 6),
+    PaddingTop = UDim.new(0, 6),
+    PaddingBottom = UDim.new(0, 6),
 })
 WatermarkPadding.Parent = Watermark
 
@@ -1652,14 +1643,14 @@ local WatermarkLayout = New("UIListLayout", {
     FillDirection = Enum.FillDirection.Horizontal,
     HorizontalAlignment = Enum.HorizontalAlignment.Left,
     VerticalAlignment = Enum.VerticalAlignment.Center,
-    Padding = UDim.new(0, 7),
+    Padding = UDim.new(0, 5),
     SortOrder = Enum.SortOrder.LayoutOrder,
 })
 WatermarkLayout.Parent = Watermark
 
 local function CreateMarkCard(width, order)
     local card = New("Frame", {
-        Size = UDim2.fromOffset(width, 44),
+        Size = UDim2.fromOffset(width, 36),
         BackgroundColor3 = Color3.fromRGB(46, 59, 80),
         BackgroundTransparency = 0.08,
         BorderSizePixel = 0,
@@ -1667,16 +1658,16 @@ local function CreateMarkCard(width, order)
         ZIndex = 212,
     })
     card.Parent = Watermark
-    Corner(card, 12)
+    Corner(card, 10)
     Stroke(card, Color3.fromRGB(78, 93, 117), 0.20, 1)
     return card
 end
 
-local BrandCard = CreateMarkCard(164, 1)
+local BrandCard = CreateMarkCard(130, 1)
 
 local BrandIconWrap = New("Frame", {
-    Position = UDim2.fromOffset(10, 6),
-    Size = UDim2.fromOffset(34, 32),
+    Position = UDim2.fromOffset(8, 4),
+    Size = UDim2.fromOffset(28, 28),
     BackgroundTransparency = 1,
     ZIndex = 214,
 })
@@ -1684,8 +1675,8 @@ BrandIconWrap.Parent = BrandCard
 
 local BrandLeft = New("Frame", {
     AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromOffset(12, 16),
-    Size = UDim2.fromOffset(12, 28),
+    Position = UDim2.fromOffset(10, 14),
+    Size = UDim2.fromOffset(10, 24),
     Rotation = -35,
     BackgroundColor3 = Color3.fromRGB(12, 55, 153),
     BorderSizePixel = 0,
@@ -1704,8 +1695,8 @@ BrandLeftGradient.Parent = BrandLeft
 
 local BrandRight = New("Frame", {
     AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromOffset(24, 13),
-    Size = UDim2.fromOffset(11, 23),
+    Position = UDim2.fromOffset(20, 11),
+    Size = UDim2.fromOffset(9, 20),
     Rotation = 35,
     BackgroundColor3 = Color3.fromRGB(34, 175, 255),
     BorderSizePixel = 0,
@@ -1723,8 +1714,8 @@ local BrandRightGradient = New("UIGradient", {
 BrandRightGradient.Parent = BrandRight
 
 local BrandDivider = New("Frame", {
-    Position = UDim2.fromOffset(52, 8),
-    Size = UDim2.fromOffset(1, 28),
+    Position = UDim2.fromOffset(42, 7),
+    Size = UDim2.fromOffset(1, 22),
     BackgroundColor3 = Color3.fromRGB(108, 124, 146),
     BackgroundTransparency = 0.25,
     BorderSizePixel = 0,
@@ -1733,8 +1724,8 @@ local BrandDivider = New("Frame", {
 BrandDivider.Parent = BrandCard
 
 local BrandTitle = New("TextLabel", {
-    Position = UDim2.fromOffset(64, 6),
-    Size = UDim2.fromOffset(88, 16),
+    Position = UDim2.fromOffset(52, 4),
+    Size = UDim2.fromOffset(70, 14),
     BackgroundTransparency = 1,
     Text = "VAFLEX",
     TextColor3 = Color3.fromRGB(245, 248, 252),
@@ -1746,23 +1737,23 @@ local BrandTitle = New("TextLabel", {
 BrandTitle.Parent = BrandCard
 
 local BrandSub = New("TextLabel", {
-    Position = UDim2.fromOffset(64, 21),
-    Size = UDim2.fromOffset(88, 14),
+    Position = UDim2.fromOffset(52, 17),
+    Size = UDim2.fromOffset(70, 11),
     BackgroundTransparency = 1,
     Text = "HUB",
     TextColor3 = Color3.fromRGB(193, 206, 220),
-    TextSize = 10,
+    TextSize = 9,
     Font = Enum.Font.GothamMedium,
     TextXAlignment = Enum.TextXAlignment.Left,
     ZIndex = 214,
 })
 BrandSub.Parent = BrandCard
 
-local AvatarCard = CreateMarkCard(44, 2)
+local AvatarCard = CreateMarkCard(38, 2)
 local AvatarViewport = New("ViewportFrame", {
     AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5),
-    Size = UDim2.fromOffset(34, 34),
+    Size = UDim2.fromOffset(28, 28),
     BackgroundColor3 = Color3.fromRGB(38, 48, 64),
     BackgroundTransparency = 0.04,
     BorderSizePixel = 0,
@@ -1786,20 +1777,20 @@ local function CreateStatCard(width, order, iconText, initialValue)
     local card = CreateMarkCard(width, order)
 
     local icon = New("TextLabel", {
-        Position = UDim2.fromOffset(10, 0),
-        Size = UDim2.fromOffset(28, 44),
+        Position = UDim2.fromOffset(8, 0),
+        Size = UDim2.fromOffset(24, 36),
         BackgroundTransparency = 1,
         Text = iconText,
         TextColor3 = Color3.fromRGB(229, 236, 244),
-        TextSize = 10,
+        TextSize = 9,
         Font = Enum.Font.GothamBold,
         ZIndex = 214,
     })
     icon.Parent = card
 
     local divider = New("Frame", {
-        Position = UDim2.fromOffset(40, 8),
-        Size = UDim2.fromOffset(1, 28),
+        Position = UDim2.fromOffset(31, 7),
+        Size = UDim2.fromOffset(1, 22),
         BackgroundColor3 = Color3.fromRGB(108, 124, 146),
         BackgroundTransparency = 0.25,
         BorderSizePixel = 0,
@@ -1808,12 +1799,12 @@ local function CreateStatCard(width, order, iconText, initialValue)
     divider.Parent = card
 
     local value = New("TextLabel", {
-        Position = UDim2.fromOffset(52, 0),
-        Size = UDim2.new(1, -60, 1, 0),
+        Position = UDim2.fromOffset(40, 0),
+        Size = UDim2.new(1, -46, 1, 0),
         BackgroundTransparency = 1,
         Text = initialValue,
         TextColor3 = Config.Text,
-        TextSize = 11,
+        TextSize = 10,
         Font = Enum.Font.GothamSemibold,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
@@ -1824,13 +1815,13 @@ local function CreateStatCard(width, order, iconText, initialValue)
     return card, value
 end
 
-local NameCard, NameValue = CreateStatCard(110, 3, "ID", LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName or LocalPlayer.Name)
-local FPSCard, FPSValueLabel = CreateStatCard(92, 4, "FPS", "60")
-local PingCard, PingValueLabel = CreateStatCard(88, 5, "PING", "0 ms")
+local NameCard, NameValue = CreateStatCard(94, 3, "ID", LocalPlayer.DisplayName ~= "" and LocalPlayer.DisplayName or LocalPlayer.Name)
+local FPSCard, FPSValueLabel = CreateStatCard(70, 4, "FPS", "60")
+local PingCard, PingValueLabel = CreateStatCard(76, 5, "PING", "0 ms")
 
 local WatermarkShimmer = New("Frame", {
-    Size = UDim2.fromOffset(46, 70),
-    Position = UDim2.fromOffset(-56, -4),
+    Size = UDim2.fromOffset(34, 56),
+    Position = UDim2.fromOffset(-44, -4),
     BackgroundColor3 = Color3.fromRGB(255, 255, 255),
     BackgroundTransparency = 0.92,
     Rotation = 10,
@@ -1978,13 +1969,12 @@ local function RefreshWatermarkText()
     local ping = GetLocalPing()
     PingValueLabel.Text = ping and (tostring(ping) .. " ms") or "-- ms"
 
-    AvatarCard.Visible = Config.WatermarkOptions.ShowAvatar
+    AvatarCard.Visible = false
     NameCard.Visible = Config.WatermarkOptions.ShowNickname
     FPSCard.Visible = Config.WatermarkOptions.ShowFPS
     PingCard.Visible = Config.WatermarkOptions.ShowPing
 
     local visible = {BrandCard}
-    if AvatarCard.Visible then table.insert(visible, AvatarCard) end
     if NameCard.Visible then table.insert(visible, NameCard) end
     if FPSCard.Visible then table.insert(visible, FPSCard) end
     if PingCard.Visible then table.insert(visible, PingCard) end
@@ -1996,14 +1986,14 @@ local function RefreshWatermarkText()
     end
     width = width + 18
 
-    Watermark.Size = UDim2.fromOffset(width, 62)
+    Watermark.Size = UDim2.fromOffset(width, 48)
 end
 
 Connect(RunService.RenderStepped, function()
     if Watermark.Visible then
         local x = WatermarkShimmer.Position.X.Offset + 1
-        if x > Watermark.AbsoluteSize.X + 34 then
-            x = -56
+        if x > Watermark.AbsoluteSize.X + 22 then
+            x = -44
         end
         WatermarkShimmer.Position = UDim2.fromOffset(x, -4)
     end
@@ -2024,11 +2014,11 @@ local function ShowWatermarkAnimated()
 
     RefreshWatermarkText()
     Watermark.Visible = true
-    WatermarkScale.Scale = 0.78
+    WatermarkScale.Scale = 0.86
     Watermark.BackgroundTransparency = 1
     WatermarkStroke.Transparency = 1
 
-    Tween(WatermarkScale, 0.26, { Scale = 1 }, Enum.EasingStyle.Back)
+    Tween(WatermarkScale, 0.22, { Scale = 1 }, Enum.EasingStyle.Back)
     Tween(Watermark, 0.22, { BackgroundTransparency = 0.08 })
     Tween(WatermarkStroke, 0.22, { Transparency = 0.04 })
 end
@@ -2437,7 +2427,7 @@ local function CreateRoleESP(player)
         BackgroundTransparency = 1,
         Text = "",
         TextColor3 = Color3.fromRGB(228, 234, 242),
-        TextSize = 10,
+        TextSize = 9,
         Font = Enum.Font.GothamMedium,
         TextXAlignment = Enum.TextXAlignment.Center,
         TextStrokeColor3 = Color3.fromRGB(6, 8, 11),
