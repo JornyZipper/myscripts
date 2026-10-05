@@ -10,8 +10,21 @@ if not loadstring and load then loadstring = load end
 if not loadstring then loadstring = function(s) return load(s) end end
 
 --[Obfuscated by Hercules v2.0.0 | hercules-obfuscator.xyz/discord | hercules-obfuscator.xyz/source]
-local thing = 5831;
-local thing2 = 5831;
+(function(...) if true then local _ = 45 end
+if false then local _ = 14 end
+local lrfdvh = 61
+local ltshrz = 49
+while false do local _ = 6 break end
+local qbbyzp = 28
+if false then local _ = 97 end
+local function njjize(odvrkc) local _ = 54 end
+if false then local _ = 84 end
+if true then local _ = 8 end
+if false then local _ = 70 end
+if false then local _ = 8 end
+if true then local _ = 25 end
+local thing = 5425;
+local thing2 = 5425;
 local counter = 0;
 while thing == thing2 and counter < 1 do
     thing = thing + 1;
@@ -20,14 +33,14 @@ while thing == thing2 and counter < 1 do
         local tbl = {1, 2, 3}; table.sort(tbl, function(a, b) return a > b end);
     else
         do
-            local ArGMgkYEE,CfXtJOWS,VXOKHMOX,wMEaADcVjekY,vuwGMYNoW,KqxYdScI,tuUnOzyinUqD,nqNmnIKmjREk,neOoWsrFQklv,bNYqyrEpToI,fPkGwMqcRFfx,CqRseQTb,byzGfOhoKIYV,MUIUWCbAIRy,OVpWWWsZ,KjPYjuwzh,aokTDXxi,CrDAijhU,oTqhYesgnaVB,IWhMFidSmZ,YCZlXdSuTTeC,dDlohzLQM,yrsGKGvfBsL,ugRtoFElO,inGnOdsY,aEnOdZdnF,JXSepTtpXDSu,QWVOTIxCy,DKarSoDJir,jHpbuJUJig,XtivKxipf,uUBFdKhhJwQ,rOkZmLPi,KKMasVWDeVt,SNHbOYvt,TECMMJhVS,SAdyHRXZfH,eBvZFyRhU,fMiFVkmV
-ArGMgkYEE=assert;CfXtJOWS=error;VXOKHMOX=ipairs;wMEaADcVjekY=next;vuwGMYNoW=pairs;KqxYdScI=pcall;tuUnOzyinUqD=print;nqNmnIKmjREk=rawget;neOoWsrFQklv=select;bNYqyrEpToI=tonumber;fPkGwMqcRFfx=tostring;CqRseQTb=unpack;byzGfOhoKIYV=math.abs;MUIUWCbAIRy=math.atan;OVpWWWsZ=math.ceil;KjPYjuwzh=math.cos;aokTDXxi=math.deg;CrDAijhU=math.exp;oTqhYesgnaVB=math.floor;IWhMFidSmZ=math.huge;YCZlXdSuTTeC=math.max;dDlohzLQM=math.min;yrsGKGvfBsL=math.pi;ugRtoFElO=math.rad;inGnOdsY=math.sin;aEnOdZdnF=string.char;JXSepTtpXDSu=string.find;QWVOTIxCy=string.format;DKarSoDJir=string.lower;jHpbuJUJig=string.match;XtivKxipf=string.sub;uUBFdKhhJwQ=string.upper;rOkZmLPi=table.concat;KKMasVWDeVt=table.insert;SNHbOYvt=table.remove;TECMMJhVS=table.sort;SAdyHRXZfH=table.pack;eBvZFyRhU=table.unpack;fMiFVkmV=os.clock;
+            local bAGBAUWxT,oAeJYUPaIHV,gXhfXHjC,AcVlODKjPKl,gpjtKZlfgJws,oYkAwnipmbLN,EBnMRYzdPIn,ltFuGChbwO,KwtcKKgVmH,szDfKoAcokxe,QpXsVgSWGGTe,Xootjyxdmua,OTGDnMyACoj,KmSrASQVXnl,BFlyTjcsYnzp,isRpGihbg,LYInVzKu,plIdPItH,OaoZsCxztJO,slEFPUOkE,cXsmEUerhUy,urjfaRxnEnU,LQaQtDkTwsH,msiLTDpCx,kcIvMBdOY,jlWPFrSaRsiC,UDuFvbdlmzbi,jEIFoAuv,XgmWwUXPg,lEabPAOKO,ZaCzlCjcK,REiqvQUrau,zanqlXLON,EYisIeIV,DxwTuiSvNjw,iNUcbfdYf,sCgYzAPvdEFp,XZHlipuQod,YhUtMahHS
+bAGBAUWxT=assert;oAeJYUPaIHV=error;gXhfXHjC=ipairs;AcVlODKjPKl=next;gpjtKZlfgJws=pairs;oYkAwnipmbLN=pcall;EBnMRYzdPIn=print;ltFuGChbwO=rawget;KwtcKKgVmH=select;szDfKoAcokxe=tonumber;QpXsVgSWGGTe=tostring;Xootjyxdmua=unpack;OTGDnMyACoj=math.abs;KmSrASQVXnl=math.atan;BFlyTjcsYnzp=math.ceil;isRpGihbg=math.cos;LYInVzKu=math.deg;plIdPItH=math.exp;OaoZsCxztJO=math.floor;slEFPUOkE=math.huge;cXsmEUerhUy=math.max;urjfaRxnEnU=math.min;LQaQtDkTwsH=math.pi;msiLTDpCx=math.rad;kcIvMBdOY=math.sin;jlWPFrSaRsiC=string.char;UDuFvbdlmzbi=string.find;jEIFoAuv=string.format;XgmWwUXPg=string.lower;lEabPAOKO=string.match;ZaCzlCjcK=string.sub;REiqvQUrau=string.upper;zanqlXLON=table.concat;EYisIeIV=table.insert;DxwTuiSvNjw=table.remove;iNUcbfdYf=table.sort;sCgYzAPvdEFp=table.pack;XZHlipuQod=table.unpack;YhUtMahHS=os.clock;
 -- SYDJA HUB V1.1 PC: transparent PNG + native SH emblem for asset compatibility. Function ON/OFF sounds are muted.
 -- Run this file once. Settings > Auto Run on Rejoin saves ON/OFF.
 -- For fresh Roblox joins, move the generated ScriptMM2_AutoRun.lua from your
 -- executor's workspace into its Autoexec folder. Executor attachment is required.
 -- The long string contains the editable full program, used for its local cache.
-local fKCXlrcUZh = [====[
+local qCrOWvRT = [====[
 --// SYDJA HUB V1.1 PC — instant air steering and Silent Knife / Revolver
 --// Silent Knife uses the supplied KnifeClient target provider; original throw/stab remain active.
 --// KnifeThrown retains its original Handle.CFrame and target; camera is never steered.
@@ -11586,12 +11599,30 @@ refreshRoles()
 
 print("[SYDJA HUB PC] " .. VERSION .. " loaded successfully. PC-only build; YARHM SkidFling ready.")
 ]====]
-local YIKVZcJiuM, eEXQeyqG = loadstring(fKCXlrcUZh, "@SYDJA_HUB_V1.1")
-if type(YIKVZcJiuM) ~= "function" then IrRLCkCD(eEXQeyqG or "Could not compile SYDJA HUB", 0) end
-if not (68 ~= 68) then
-    YIKVZcJiuM(fKCXlrcUZh, false)
+local wovxLzgfxI, ZhJpmnmx = loadstring(qCrOWvRT, "@SYDJA_HUB_V1.1")
+if type(wovxLzgfxI) ~= "function" then ADWfxwiiBbBw(ZhJpmnmx or "Could not compile SYDJA HUB", 0) end
+if (not (11 >= 88)) == (11 < 88) then
+    wovxLzgfxI(qCrOWvRT, false)
 end
         end
         break
     end
 end
+local dummy = 1; dummy = dummy + 7;
+
+if false then local _ = 7 end
+local xefdne = 79
+local function gxoxhf(mgjjci) local _ = 88 end
+local cqiwlr = 43
+local lgcpyh = 18
+local function jajmas(wmsolp) local _ = 66 end
+local nidabb = 98
+if true then local _ = 9 end
+local function tfpify(awuxnc) local _ = 72 end
+local function vwdkug(neinnt) local _ = 37 end
+local wftoos = 11
+if false then local _ = 83 end
+local function iyskzp(lsxexl) local _ = 47 end
+local kwwcgv = 90
+local wuwrzg = 62
+local rdpycs = 43 end)()
