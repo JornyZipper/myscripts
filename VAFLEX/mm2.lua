@@ -78,8 +78,7 @@ local Config = {
     Dead = Color3.fromRGB(135, 143, 153),
 }
 
-local WatermarkTargetScale = Config.WatermarkScale
-local WatermarkScaleObject = nil
+local UIControls = {}
 
 local Running = true
 local Connections = {}
@@ -879,7 +878,7 @@ end
 
 local VisualPage = CreateTab("Visual", "◉")
 local SettingsPage = CreateTab("Settings", "⚙")
-local ConfigsPage = CreateTab("Configs", "▣")
+CreateTab("Configs", "▣")
 
 local function CreatePageTitle(parent, title, subtitle)
     local Title = New("TextLabel", {
@@ -910,7 +909,7 @@ end
 
 CreatePageTitle(VisualPage, "Visual", "Visual modules")
 CreatePageTitle(SettingsPage, "Settings", "VAFLEX configuration")
-CreatePageTitle(ConfigsPage, "Configs", "Save and restore VAFLEX settings")
+CreatePageTitle(Pages["Configs"].Page, "Configs", "Save and restore VAFLEX settings")
 
 local function CreateSwitch(parent, position, default, callback)
     local Switch = New("TextButton", {
@@ -1141,7 +1140,7 @@ local RoleGear = New("TextButton", {
 RoleGear.Parent = RoleRow
 Corner(RoleGear, 8)
 
-local RoleSwitchControl = CreateSwitch(RoleRow, UDim2.new(1, -9, 0.5, 0), Config.RoleESP, function(value)
+UIControls.RoleSwitch = CreateSwitch(RoleRow, UDim2.new(1, -9, 0.5, 0), Config.RoleESP, function(value)
     Config.RoleESP = value
 end)
 
@@ -1169,7 +1168,7 @@ local GunTitle = New("TextLabel", {
 })
 GunTitle.Parent = GunRow
 
-local GunSwitchControl = CreateSwitch(GunRow, UDim2.new(1, -9, 0.5, 0), Config.GunESP, function(value)
+UIControls.GunSwitch = CreateSwitch(GunRow, UDim2.new(1, -9, 0.5, 0), Config.GunESP, function(value)
     Config.GunESP = value
 end)
 
@@ -1231,7 +1230,7 @@ WatermarkGear.Parent = WatermarkRow
 Corner(WatermarkGear, 8)
 
 local SetWatermarkEnabled
-local WatermarkSwitchControl = CreateSwitch(WatermarkRow, UDim2.new(1, -9, 0.5, 0), Config.Watermark, function(value)
+UIControls.WatermarkSwitch = CreateSwitch(WatermarkRow, UDim2.new(1, -9, 0.5, 0), Config.Watermark, function(value)
     Config.Watermark = value
     if SetWatermarkEnabled then SetWatermarkEnabled(value) end
 end)
@@ -1350,7 +1349,7 @@ local function CreateOptionRow(parent, y, title, description, default, callback)
     return controller
 end
 
-local RoleNamesControl = CreateOptionRow(
+UIControls.RoleNames = CreateOptionRow(
     RoleSettingsPanel,
     63,
     "Show Usernames",
@@ -1359,7 +1358,7 @@ local RoleNamesControl = CreateOptionRow(
     function(value) Config.RoleOptions.ShowUsernames = value end
 )
 
-local RoleDistanceControl = CreateOptionRow(
+UIControls.RoleDistance = CreateOptionRow(
     RoleSettingsPanel,
     112,
     "Show Distance",
@@ -1471,7 +1470,7 @@ local WatermarkSettingsClose = New("TextButton", {
 WatermarkSettingsClose.Parent = WatermarkSettingsPanel
 Corner(WatermarkSettingsClose, 9)
 
-local WatermarkNicknameControl = CreateOptionRow(
+UIControls.WatermarkNickname = CreateOptionRow(
     WatermarkSettingsPanel,
     62,
     "Nickname",
@@ -1480,7 +1479,7 @@ local WatermarkNicknameControl = CreateOptionRow(
     function(value) Config.WatermarkOptions.ShowNickname = value end
 )
 
-local WatermarkFPSControl = CreateOptionRow(
+UIControls.WatermarkFPS = CreateOptionRow(
     WatermarkSettingsPanel,
     111,
     "FPS",
@@ -1489,7 +1488,7 @@ local WatermarkFPSControl = CreateOptionRow(
     function(value) Config.WatermarkOptions.ShowFPS = value end
 )
 
-local WatermarkPingControl = CreateOptionRow(
+UIControls.WatermarkPing = CreateOptionRow(
     WatermarkSettingsPanel,
     160,
     "Ping",
@@ -1498,6 +1497,7 @@ local WatermarkPingControl = CreateOptionRow(
     function(value) Config.WatermarkOptions.ShowPing = value end
 )
 
+do
 local function CreateScaleSlider(parent, y, defaultValue, callback)
     local MinScale = 0.30
     local MaxScale = 1.20
@@ -1622,18 +1622,19 @@ local function CreateScaleSlider(parent, y, defaultValue, callback)
     }
 end
 
-local WatermarkScaleControl = CreateScaleSlider(
+UIControls.WatermarkScale = CreateScaleSlider(
     WatermarkSettingsPanel,
     209,
     Config.WatermarkScale,
     function(value)
         Config.WatermarkScale = value
-        WatermarkTargetScale = value
-        if WatermarkScaleObject then
-            Tween(WatermarkScaleObject, 0.12, { Scale = value }, Enum.EasingStyle.Sine)
+        Config.WatermarkScale = value
+        if UIControls.WatermarkScaleObject then
+            Tween(UIControls.WatermarkScaleObject, 0.12, { Scale = value }, Enum.EasingStyle.Sine)
         end
     end
 )
+end
 
 local WatermarkSettingsOpen = false
 
@@ -1670,6 +1671,7 @@ Connect(WatermarkSettingsClose.MouseButton1Click, CloseWatermarkSettings)
 --// CONFIGS PAGE
 --// ============================================================
 
+do
 local DefaultConfigSnapshot = {
     RoleESP = true,
     GunESP = true,
@@ -1706,7 +1708,7 @@ local ConfigCard = New("Frame", {
     BorderSizePixel = 0,
     ZIndex = 104,
 })
-ConfigCard.Parent = ConfigsPage
+ConfigCard.Parent = Pages["Configs"].Page
 Corner(ConfigCard, 15)
 Stroke(ConfigCard, Config.Border, 0, 1)
 
@@ -1771,20 +1773,19 @@ local function ApplyConfigSnapshot(snapshot)
     Config.WatermarkOptions.ShowFPS = snapshot.ShowFPS
     Config.WatermarkOptions.ShowPing = snapshot.ShowPing
     Config.WatermarkScale = math.clamp(snapshot.WatermarkScale or 0.52, 0.30, 1.20)
-    WatermarkTargetScale = Config.WatermarkScale
+    
+    UIControls.RoleSwitch:SetInstant(Config.RoleESP, false)
+    UIControls.GunSwitch:SetInstant(Config.GunESP, false)
+    UIControls.WatermarkSwitch:SetInstant(Config.Watermark, false)
+    UIControls.RoleNames:SetInstant(Config.RoleOptions.ShowUsernames, false)
+    UIControls.RoleDistance:SetInstant(Config.RoleOptions.ShowDistance, false)
+    UIControls.WatermarkNickname:SetInstant(Config.WatermarkOptions.ShowNickname, false)
+    UIControls.WatermarkFPS:SetInstant(Config.WatermarkOptions.ShowFPS, false)
+    UIControls.WatermarkPing:SetInstant(Config.WatermarkOptions.ShowPing, false)
+    UIControls.WatermarkScale:Set(Config.WatermarkScale, false)
 
-    RoleSwitchControl:SetInstant(Config.RoleESP, false)
-    GunSwitchControl:SetInstant(Config.GunESP, false)
-    WatermarkSwitchControl:SetInstant(Config.Watermark, false)
-    RoleNamesControl:SetInstant(Config.RoleOptions.ShowUsernames, false)
-    RoleDistanceControl:SetInstant(Config.RoleOptions.ShowDistance, false)
-    WatermarkNicknameControl:SetInstant(Config.WatermarkOptions.ShowNickname, false)
-    WatermarkFPSControl:SetInstant(Config.WatermarkOptions.ShowFPS, false)
-    WatermarkPingControl:SetInstant(Config.WatermarkOptions.ShowPing, false)
-    WatermarkScaleControl:Set(Config.WatermarkScale, false)
-
-    if WatermarkScaleObject then
-        WatermarkScaleObject.Scale = WatermarkTargetScale
+    if UIControls.WatermarkScaleObject then
+        UIControls.WatermarkScaleObject.Scale = Config.WatermarkScale
     end
 
     if SetWatermarkEnabled then
@@ -1817,6 +1818,7 @@ Connect(ResetConfigButton.MouseButton1Click, function()
     ConfigStatus.Text = "Default config restored"
     ConfigStatus.TextColor3 = Config.Muted
 end)
+end
 
 --// ============================================================
 --// SETTINGS PAGE
@@ -1938,8 +1940,8 @@ Watermark.Parent = Gui
 Corner(Watermark, 14)
 local WatermarkStroke = Stroke(Watermark, Config.Border, 1, 1)
 
-WatermarkScaleObject = New("UIScale", { Scale = WatermarkTargetScale })
-WatermarkScaleObject.Parent = Watermark
+UIControls.WatermarkScaleObject = New("UIScale", { Scale = Config.WatermarkScale })
+UIControls.WatermarkScaleObject.Parent = Watermark
 
 local WatermarkGradient = New("UIGradient", {
     Rotation = 0,
@@ -2333,11 +2335,11 @@ local function ShowWatermarkAnimated()
 
     RefreshWatermarkText()
     Watermark.Visible = true
-    WatermarkScaleObject.Scale = WatermarkTargetScale * 0.86
+    UIControls.WatermarkScaleObject.Scale = Config.WatermarkScale * 0.86
     Watermark.BackgroundTransparency = 1
     WatermarkStroke.Transparency = 1
 
-    Tween(WatermarkScaleObject, 0.22, { Scale = WatermarkTargetScale }, Enum.EasingStyle.Back)
+    Tween(UIControls.WatermarkScaleObject, 0.22, { Scale = Config.WatermarkScale }, Enum.EasingStyle.Back)
     Tween(Watermark, 0.22, { BackgroundTransparency = 1 })
     Tween(WatermarkStroke, 0.22, { Transparency = 1 })
 end
@@ -2348,7 +2350,7 @@ local function HideWatermarkAnimated(callback)
         return
     end
 
-    Tween(WatermarkScaleObject, 0.17, { Scale = WatermarkTargetScale * 0.82 })
+    Tween(UIControls.WatermarkScaleObject, 0.17, { Scale = Config.WatermarkScale * 0.82 })
     Tween(Watermark, 0.17, { BackgroundTransparency = 1 })
     Tween(WatermarkStroke, 0.17, { Transparency = 1 })
 
