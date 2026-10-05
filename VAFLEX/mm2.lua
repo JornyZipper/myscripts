@@ -1604,10 +1604,10 @@ CrashDescription.Parent = CrashButton
 --// ============================================================
 
 local Watermark = New("TextButton", {
-    Position = UDim2.fromOffset(12, 12),
+    Position = UDim2.fromOffset(8, 8),
     Size = UDim2.fromOffset(332, 48),
-    BackgroundColor3 = Color3.fromRGB(28, 36, 49),
-    BackgroundTransparency = 0.08,
+    BackgroundColor3 = Color3.fromRGB(46, 59, 80),
+    BackgroundTransparency = 1,
     BorderSizePixel = 0,
     Text = "",
     AutoButtonColor = false,
@@ -1617,9 +1617,10 @@ local Watermark = New("TextButton", {
 })
 Watermark.Parent = Gui
 Corner(Watermark, 14)
-local WatermarkStroke = Stroke(Watermark, Config.Border, 0.04, 1)
+local WatermarkStroke = Stroke(Watermark, Config.Border, 1, 1)
 
-local WatermarkScale = New("UIScale", { Scale = 1 })
+local WatermarkTargetScale = 0.52
+local WatermarkScale = New("UIScale", { Scale = WatermarkTargetScale })
 WatermarkScale.Parent = Watermark
 
 local WatermarkGradient = New("UIGradient", {
@@ -2014,13 +2015,13 @@ local function ShowWatermarkAnimated()
 
     RefreshWatermarkText()
     Watermark.Visible = true
-    WatermarkScale.Scale = 0.86
+    WatermarkScale.Scale = WatermarkTargetScale * 0.86
     Watermark.BackgroundTransparency = 1
     WatermarkStroke.Transparency = 1
 
-    Tween(WatermarkScale, 0.22, { Scale = 1 }, Enum.EasingStyle.Back)
-    Tween(Watermark, 0.22, { BackgroundTransparency = 0.08 })
-    Tween(WatermarkStroke, 0.22, { Transparency = 0.04 })
+    Tween(WatermarkScale, 0.22, { Scale = WatermarkTargetScale }, Enum.EasingStyle.Back)
+    Tween(Watermark, 0.22, { BackgroundTransparency = 1 })
+    Tween(WatermarkStroke, 0.22, { Transparency = 1 })
 end
 
 local function HideWatermarkAnimated(callback)
@@ -2029,7 +2030,7 @@ local function HideWatermarkAnimated(callback)
         return
     end
 
-    Tween(WatermarkScale, 0.17, { Scale = 0.82 })
+    Tween(WatermarkScale, 0.17, { Scale = WatermarkTargetScale * 0.82 })
     Tween(Watermark, 0.17, { BackgroundTransparency = 1 })
     Tween(WatermarkStroke, 0.17, { Transparency = 1 })
 
