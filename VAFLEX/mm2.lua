@@ -713,6 +713,7 @@ local Main = New("Frame", {
     BorderSizePixel = 0,
     Visible = false,
     Active = true,
+    ClipsDescendants = true,
     ZIndex = 100,
 })
 Main.Parent = Gui
@@ -798,6 +799,7 @@ local Content = New("Frame", {
     Position = UDim2.fromOffset(135, 66),
     Size = UDim2.new(1, -149, 1, -80),
     BackgroundTransparency = 1,
+    ClipsDescendants = true,
     ZIndex = 102,
 })
 Content.Parent = Main
@@ -819,6 +821,7 @@ end
 
 local function CreateTab(name, icon)
     local Button = New("TextButton", {
+        Name = name .. "Tab",
         Size = UDim2.new(1, 0, 0, 44),
         BackgroundColor3 = Config.Panel2,
         BackgroundTransparency = 1,
@@ -855,8 +858,10 @@ local function CreateTab(name, icon)
     Label.Parent = Button
 
     local Page = New("Frame", {
+        Name = name .. "Page",
         Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1,
+        ClipsDescendants = true,
         Visible = false,
         ZIndex = 103,
     })
@@ -878,7 +883,9 @@ end
 
 local VisualPage = CreateTab("Visual", "◉")
 local SettingsPage = CreateTab("Settings", "⚙")
-CreateTab("Configs", "▣")
+SettingsPage.Name = "SettingsPage"
+local ConfigsPage = CreateTab("Configs", "▣")
+ConfigsPage.Name = "ConfigsPage"
 
 local function CreatePageTitle(parent, title, subtitle)
     local Title = New("TextLabel", {
@@ -909,7 +916,7 @@ end
 
 CreatePageTitle(VisualPage, "Visual", "Visual modules")
 CreatePageTitle(SettingsPage, "Settings", "VAFLEX configuration")
-CreatePageTitle(Pages["Configs"].Page, "Configs", "Save and restore VAFLEX settings")
+CreatePageTitle(ConfigsPage, "Configs", "Save and restore VAFLEX settings")
 
 local function CreateSwitch(parent, position, default, callback)
     local Switch = New("TextButton", {
@@ -984,10 +991,19 @@ end
 --// VISUAL ACCORDION STACK
 --// ============================================================
 
-local VisualStack = New("Frame", {
+local VisualStack = New("ScrollingFrame", {
+    Name = "VisualSections",
     Position = UDim2.fromOffset(0, 58),
     Size = UDim2.new(1, 0, 1, -58),
     BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+    CanvasSize = UDim2.fromOffset(0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollingDirection = Enum.ScrollingDirection.Y,
+    ScrollBarThickness = 2,
+    ScrollBarImageColor3 = Config.Muted,
+    ScrollBarImageTransparency = 0.35,
     ZIndex = 105,
 })
 VisualStack.Parent = VisualPage
@@ -999,7 +1015,9 @@ local VisualList = New("UIListLayout", {
 VisualList.Parent = VisualStack
 
 local function MakeSection(parent, title, order)
+    local safeName = string.gsub(title, "%s+", "")
     local Section = New("Frame", {
+        Name = safeName .. "Section",
         Size = UDim2.new(1, 0, 0, 49),
         BackgroundTransparency = 1,
         ClipsDescendants = true,
@@ -1009,6 +1027,7 @@ local function MakeSection(parent, title, order)
     Section.Parent = parent
 
     local HeaderButton = New("TextButton", {
+        Name = safeName .. "Header",
         Size = UDim2.new(1, 0, 0, 49),
         BackgroundColor3 = Config.Panel2,
         BackgroundTransparency = 0.05,
@@ -1047,6 +1066,7 @@ local function MakeSection(parent, title, order)
     Arrow.Parent = HeaderButton
 
     local Body = New("Frame", {
+        Name = safeName .. "Body",
         Position = UDim2.fromOffset(0, 57),
         Size = UDim2.new(1, 0, 0, 0),
         BackgroundTransparency = 1,
@@ -1628,7 +1648,6 @@ UIControls.WatermarkScale = CreateScaleSlider(
     Config.WatermarkScale,
     function(value)
         Config.WatermarkScale = value
-        Config.WatermarkScale = value
         if UIControls.WatermarkScaleObject then
             Tween(UIControls.WatermarkScaleObject, 0.12, { Scale = value }, Enum.EasingStyle.Sine)
         end
@@ -1708,7 +1727,7 @@ local ConfigCard = New("Frame", {
     BorderSizePixel = 0,
     ZIndex = 104,
 })
-ConfigCard.Parent = Pages["Configs"].Page
+ConfigCard.Parent = ConfigsPage
 Corner(ConfigCard, 15)
 Stroke(ConfigCard, Config.Border, 0, 1)
 
@@ -1927,18 +1946,19 @@ CrashDescription.Parent = CrashButton
 local Watermark = New("TextButton", {
     Position = UDim2.fromOffset(8, 8),
     Size = UDim2.fromOffset(332, 48),
-    BackgroundColor3 = Color3.fromRGB(46, 59, 80),
-    BackgroundTransparency = 1,
+    BackgroundColor3 = Color3.fromRGB(42, 54, 74),
+    BackgroundTransparency = 0.04,
     BorderSizePixel = 0,
     Text = "",
     AutoButtonColor = false,
     Visible = false,
     Active = true,
+    ClipsDescendants = true,
     ZIndex = 210,
 })
 Watermark.Parent = Gui
 Corner(Watermark, 14)
-local WatermarkStroke = Stroke(Watermark, Config.Border, 1, 1)
+local WatermarkStroke = Stroke(Watermark, Color3.fromRGB(78, 93, 117), 0.12, 1)
 
 UIControls.WatermarkScaleObject = New("UIScale", { Scale = Config.WatermarkScale })
 UIControls.WatermarkScaleObject.Parent = Watermark
@@ -1964,23 +1984,35 @@ local WatermarkLayout = New("UIListLayout", {
     FillDirection = Enum.FillDirection.Horizontal,
     HorizontalAlignment = Enum.HorizontalAlignment.Left,
     VerticalAlignment = Enum.VerticalAlignment.Center,
-    Padding = UDim.new(0, 5),
+    Padding = UDim.new(0, 0),
     SortOrder = Enum.SortOrder.LayoutOrder,
 })
 WatermarkLayout.Parent = Watermark
 
 local function CreateMarkCard(width, order)
     local card = New("Frame", {
+        Name = "WatermarkSegment" .. tostring(order),
         Size = UDim2.fromOffset(width, 36),
-        BackgroundColor3 = Color3.fromRGB(46, 59, 80),
-        BackgroundTransparency = 0.08,
+        BackgroundTransparency = 1,
         BorderSizePixel = 0,
         LayoutOrder = order,
         ZIndex = 212,
     })
     card.Parent = Watermark
-    Corner(card, 10)
-    Stroke(card, Color3.fromRGB(78, 93, 117), 0.20, 1)
+
+    if order > 1 then
+        local separator = New("Frame", {
+            AnchorPoint = Vector2.new(0, 0.5),
+            Position = UDim2.new(0, 0, 0.5, 0),
+            Size = UDim2.fromOffset(1, 22),
+            BackgroundColor3 = Color3.fromRGB(108, 124, 146),
+            BackgroundTransparency = 0.32,
+            BorderSizePixel = 0,
+            ZIndex = 213,
+        })
+        separator.Parent = card
+    end
+
     return card
 end
 
@@ -2300,12 +2332,10 @@ local function RefreshWatermarkText()
     if FPSCard.Visible then table.insert(visible, FPSCard) end
     if PingCard.Visible then table.insert(visible, PingCard) end
 
-    local width = 18
-    for i, gui in ipairs(visible) do
+    local width = 12
+    for _, gui in ipairs(visible) do
         width = width + gui.Size.X.Offset
-        if i < #visible then width = width + 7 end
     end
-    width = width + 18
 
     Watermark.Size = UDim2.fromOffset(width, 48)
 end
@@ -2340,8 +2370,8 @@ local function ShowWatermarkAnimated()
     WatermarkStroke.Transparency = 1
 
     Tween(UIControls.WatermarkScaleObject, 0.22, { Scale = Config.WatermarkScale }, Enum.EasingStyle.Back)
-    Tween(Watermark, 0.22, { BackgroundTransparency = 1 })
-    Tween(WatermarkStroke, 0.22, { Transparency = 1 })
+    Tween(Watermark, 0.22, { BackgroundTransparency = 0.04 })
+    Tween(WatermarkStroke, 0.22, { Transparency = 0.12 })
 end
 
 local function HideWatermarkAnimated(callback)
