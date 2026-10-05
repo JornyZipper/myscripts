@@ -51,6 +51,9 @@ local Config = {
         ShowAvatar = false,
     },
 
+    -- Watermark scale: 0.52 = 52%
+    WatermarkScale = 0.52,
+
     -- Extra bright loader.
     Water = Color3.fromRGB(180, 226, 248),
     WaterBright = Color3.fromRGB(242, 250, 255),
@@ -74,6 +77,9 @@ local Config = {
     Unknown = Color3.fromRGB(190, 198, 210),
     Dead = Color3.fromRGB(135, 143, 153),
 }
+
+local WatermarkTargetScale = Config.WatermarkScale
+local WatermarkScaleObject = nil
 
 local Running = true
 local Connections = {}
@@ -873,6 +879,7 @@ end
 
 local VisualPage = CreateTab("Visual", "◉")
 local SettingsPage = CreateTab("Settings", "⚙")
+local ConfigsPage = CreateTab("Configs", "▣")
 
 local function CreatePageTitle(parent, title, subtitle)
     local Title = New("TextLabel", {
@@ -903,6 +910,7 @@ end
 
 CreatePageTitle(VisualPage, "Visual", "Visual modules")
 CreatePageTitle(SettingsPage, "Settings", "VAFLEX configuration")
+CreatePageTitle(ConfigsPage, "Configs", "Save and restore VAFLEX settings")
 
 local function CreateSwitch(parent, position, default, callback)
     local Switch = New("TextButton", {
@@ -932,24 +940,45 @@ local function CreateSwitch(parent, position, default, callback)
 
     local enabled = default
 
+    local function Apply(value, animate, triggerCallback)
+        enabled = value and true or false
+
+        local switchColor = enabled and Config.Water or Color3.fromRGB(55, 64, 79)
+        local dotPosition = enabled
+            and UDim2.new(1, -12.5, 0.5, 0)
+            or UDim2.new(0, 12.5, 0.5, 0)
+
+        if animate then
+            Tween(Switch, 0.20, { BackgroundColor3 = switchColor })
+            Tween(Dot, 0.20, { Position = dotPosition })
+        else
+            Switch.BackgroundColor3 = switchColor
+            Dot.Position = dotPosition
+        end
+
+        if triggerCallback ~= false then
+            callback(enabled)
+        end
+    end
+
     Connect(Switch.MouseButton1Click, function()
         ClickSound:Play()
-        enabled = not enabled
-
-        Tween(Switch, 0.20, {
-            BackgroundColor3 = enabled and Config.Water or Color3.fromRGB(55, 64, 79),
-        })
-
-        Tween(Dot, 0.20, {
-            Position = enabled
-                and UDim2.new(1, -12.5, 0.5, 0)
-                or UDim2.new(0, 12.5, 0.5, 0),
-        })
-
-        callback(enabled)
+        Apply(not enabled, true, true)
     end)
 
-    return Switch
+    return {
+        Instance = Switch,
+        Dot = Dot,
+        Set = function(_, value, triggerCallback)
+            Apply(value, true, triggerCallback)
+        end,
+        SetInstant = function(_, value, triggerCallback)
+            Apply(value, false, triggerCallback)
+        end,
+        Get = function()
+            return enabled
+        end,
+    }
 end
 
 --// ============================================================
@@ -1112,7 +1141,7 @@ local RoleGear = New("TextButton", {
 RoleGear.Parent = RoleRow
 Corner(RoleGear, 8)
 
-CreateSwitch(RoleRow, UDim2.new(1, -9, 0.5, 0), Config.RoleESP, function(value)
+local RoleSwitchControl = CreateSwitch(RoleRow, UDim2.new(1, -9, 0.5, 0), Config.RoleESP, function(value)
     Config.RoleESP = value
 end)
 
@@ -1140,7 +1169,7 @@ local GunTitle = New("TextLabel", {
 })
 GunTitle.Parent = GunRow
 
-CreateSwitch(GunRow, UDim2.new(1, -9, 0.5, 0), Config.GunESP, function(value)
+local GunSwitchControl = CreateSwitch(GunRow, UDim2.new(1, -9, 0.5, 0), Config.GunESP, function(value)
     Config.GunESP = value
 end)
 
@@ -1176,7 +1205,7 @@ local WatermarkRowSub = New("TextLabel", {
     Position = UDim2.fromOffset(13, 25),
     Size = UDim2.new(1, -120, 0, 16),
     BackgroundTransparency = 1,
-    Text = "FPS, ping, nickname and avatar",
+    Text = "FPS, ping and nickname",
     TextColor3 = Config.Muted,
     TextSize = 7,
     Font = Enum.Font.Gotham,
@@ -1202,7 +1231,7 @@ WatermarkGear.Parent = WatermarkRow
 Corner(WatermarkGear, 8)
 
 local SetWatermarkEnabled
-CreateSwitch(WatermarkRow, UDim2.new(1, -9, 0.5, 0), Config.Watermark, function(value)
+local WatermarkSwitchControl = CreateSwitch(WatermarkRow, UDim2.new(1, -9, 0.5, 0), Config.Watermark, function(value)
     Config.Watermark = value
     if SetWatermarkEnabled then SetWatermarkEnabled(value) end
 end)
@@ -1317,10 +1346,11 @@ local function CreateOptionRow(parent, y, title, description, default, callback)
     })
     Description.Parent = Row
 
-    CreateSwitch(Row, UDim2.new(1, -9, 0.5, 0), default, callback)
+    local controller = CreateSwitch(Row, UDim2.new(1, -9, 0.5, 0), default, callback)
+    return controller
 end
 
-CreateOptionRow(
+local RoleNamesControl = CreateOptionRow(
     RoleSettingsPanel,
     63,
     "Show Usernames",
@@ -1329,7 +1359,7 @@ CreateOptionRow(
     function(value) Config.RoleOptions.ShowUsernames = value end
 )
 
-CreateOptionRow(
+local RoleDistanceControl = CreateOptionRow(
     RoleSettingsPanel,
     112,
     "Show Distance",
@@ -1387,7 +1417,7 @@ WatermarkSettingsShade.Parent = Main
 local WatermarkSettingsPanel = New("Frame", {
     AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5),
-    Size = UDim2.fromOffset(270, 214),
+    Size = UDim2.fromOffset(270, 270),
     BackgroundColor3 = Color3.fromRGB(24, 30, 42),
     BackgroundTransparency = 0.03,
     BorderSizePixel = 0,
@@ -1441,7 +1471,7 @@ local WatermarkSettingsClose = New("TextButton", {
 WatermarkSettingsClose.Parent = WatermarkSettingsPanel
 Corner(WatermarkSettingsClose, 9)
 
-CreateOptionRow(
+local WatermarkNicknameControl = CreateOptionRow(
     WatermarkSettingsPanel,
     62,
     "Nickname",
@@ -1450,7 +1480,7 @@ CreateOptionRow(
     function(value) Config.WatermarkOptions.ShowNickname = value end
 )
 
-CreateOptionRow(
+local WatermarkFPSControl = CreateOptionRow(
     WatermarkSettingsPanel,
     111,
     "FPS",
@@ -1459,13 +1489,150 @@ CreateOptionRow(
     function(value) Config.WatermarkOptions.ShowFPS = value end
 )
 
-CreateOptionRow(
+local WatermarkPingControl = CreateOptionRow(
     WatermarkSettingsPanel,
     160,
     "Ping",
     "Show your network ping",
     Config.WatermarkOptions.ShowPing,
     function(value) Config.WatermarkOptions.ShowPing = value end
+)
+
+local function CreateScaleSlider(parent, y, defaultValue, callback)
+    local MinScale = 0.30
+    local MaxScale = 1.20
+    local current = math.clamp(defaultValue, MinScale, MaxScale)
+    local dragging = false
+
+    local Row = New("Frame", {
+        Position = UDim2.fromOffset(12, y),
+        Size = UDim2.new(1, -24, 0, 49),
+        BackgroundColor3 = Config.Panel2,
+        BackgroundTransparency = 0.07,
+        BorderSizePixel = 0,
+        ZIndex = 331,
+    })
+    Row.Parent = parent
+    Corner(Row, 11)
+
+    local Title = New("TextLabel", {
+        Position = UDim2.fromOffset(12, 5),
+        Size = UDim2.new(1, -75, 0, 16),
+        BackgroundTransparency = 1,
+        Text = "Scale",
+        TextColor3 = Config.Text,
+        TextSize = 8,
+        Font = Enum.Font.GothamSemibold,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 332,
+    })
+    Title.Parent = Row
+
+    local ValueLabel = New("TextLabel", {
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -12, 0, 5),
+        Size = UDim2.fromOffset(58, 16),
+        BackgroundTransparency = 1,
+        Text = tostring(math.floor(current * 100 + 0.5)) .. "%",
+        TextColor3 = Config.WaterBright,
+        TextSize = 8,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        ZIndex = 332,
+    })
+    ValueLabel.Parent = Row
+
+    local Track = New("TextButton", {
+        Position = UDim2.fromOffset(12, 30),
+        Size = UDim2.new(1, -24, 0, 6),
+        BackgroundColor3 = Color3.fromRGB(55, 64, 79),
+        BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
+        ZIndex = 332,
+    })
+    Track.Parent = Row
+    Corner(Track, 999)
+
+    local Fill = New("Frame", {
+        Size = UDim2.fromScale(0, 1),
+        BackgroundColor3 = Config.Water,
+        BorderSizePixel = 0,
+        ZIndex = 333,
+    })
+    Fill.Parent = Track
+    Corner(Fill, 999)
+
+    local Knob = New("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.new(0, 0, 0.5, 0),
+        Size = UDim2.fromOffset(14, 14),
+        BackgroundColor3 = Config.WaterWhite,
+        BorderSizePixel = 0,
+        ZIndex = 334,
+    })
+    Knob.Parent = Track
+    Corner(Knob, 999)
+    Stroke(Knob, Config.Water, 0.18, 1)
+
+    local function Apply(value, triggerCallback)
+        current = math.clamp(value, MinScale, MaxScale)
+        local alpha = (current - MinScale) / (MaxScale - MinScale)
+        Fill.Size = UDim2.fromScale(alpha, 1)
+        Knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+        ValueLabel.Text = tostring(math.floor(current * 100 + 0.5)) .. "%"
+        if triggerCallback ~= false then callback(current) end
+    end
+
+    local function ApplyFromX(x)
+        local width = math.max(1, Track.AbsoluteSize.X)
+        local alpha = math.clamp((x - Track.AbsolutePosition.X) / width, 0, 1)
+        Apply(MinScale + (MaxScale - MinScale) * alpha, true)
+    end
+
+    Connect(Track.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            ApplyFromX(input.Position.X)
+        end
+    end)
+
+    Connect(UserInputService.InputChanged, function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            ApplyFromX(input.Position.X)
+        end
+    end)
+
+    Connect(UserInputService.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+
+    Apply(current, false)
+
+    return {
+        Set = function(_, value, triggerCallback)
+            Apply(value, triggerCallback)
+        end,
+        Get = function()
+            return current
+        end,
+    }
+end
+
+local WatermarkScaleControl = CreateScaleSlider(
+    WatermarkSettingsPanel,
+    209,
+    Config.WatermarkScale,
+    function(value)
+        Config.WatermarkScale = value
+        WatermarkTargetScale = value
+        if WatermarkScaleObject then
+            Tween(WatermarkScaleObject, 0.12, { Scale = value }, Enum.EasingStyle.Sine)
+        end
+    end
 )
 
 local WatermarkSettingsOpen = false
@@ -1498,6 +1665,158 @@ end
 
 Connect(WatermarkGear.MouseButton1Click, OpenWatermarkSettings)
 Connect(WatermarkSettingsClose.MouseButton1Click, CloseWatermarkSettings)
+
+--// ============================================================
+--// CONFIGS PAGE
+--// ============================================================
+
+local DefaultConfigSnapshot = {
+    RoleESP = true,
+    GunESP = true,
+    ShowUsernames = true,
+    ShowDistance = true,
+    Watermark = true,
+    ShowNickname = true,
+    ShowFPS = true,
+    ShowPing = true,
+    WatermarkScale = 0.52,
+}
+
+local SavedConfigSnapshot = nil
+
+local function SnapshotCurrentConfig()
+    return {
+        RoleESP = Config.RoleESP,
+        GunESP = Config.GunESP,
+        ShowUsernames = Config.RoleOptions.ShowUsernames,
+        ShowDistance = Config.RoleOptions.ShowDistance,
+        Watermark = Config.Watermark,
+        ShowNickname = Config.WatermarkOptions.ShowNickname,
+        ShowFPS = Config.WatermarkOptions.ShowFPS,
+        ShowPing = Config.WatermarkOptions.ShowPing,
+        WatermarkScale = Config.WatermarkScale,
+    }
+end
+
+local ConfigCard = New("Frame", {
+    Position = UDim2.fromOffset(0, 58),
+    Size = UDim2.new(1, 0, 0, 174),
+    BackgroundColor3 = Config.Panel2,
+    BackgroundTransparency = 0.08,
+    BorderSizePixel = 0,
+    ZIndex = 104,
+})
+ConfigCard.Parent = ConfigsPage
+Corner(ConfigCard, 15)
+Stroke(ConfigCard, Config.Border, 0, 1)
+
+local ConfigTitle = New("TextLabel", {
+    Position = UDim2.fromOffset(14, 10),
+    Size = UDim2.new(1, -28, 0, 20),
+    BackgroundTransparency = 1,
+    Text = "Current Config",
+    TextColor3 = Config.Text,
+    TextSize = 11,
+    Font = Enum.Font.GothamSemibold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 105,
+})
+ConfigTitle.Parent = ConfigCard
+
+local ConfigStatus = New("TextLabel", {
+    Position = UDim2.fromOffset(14, 31),
+    Size = UDim2.new(1, -28, 0, 18),
+    BackgroundTransparency = 1,
+    Text = "No saved config",
+    TextColor3 = Config.Muted,
+    TextSize = 8,
+    Font = Enum.Font.Gotham,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 105,
+})
+ConfigStatus.Parent = ConfigCard
+
+local function MakeConfigButton(textValue, y, danger)
+    local Button = New("TextButton", {
+        Position = UDim2.fromOffset(12, y),
+        Size = UDim2.new(1, -24, 0, 34),
+        BackgroundColor3 = danger and Color3.fromRGB(62, 31, 38) or Config.Panel3,
+        BackgroundTransparency = 0.04,
+        Text = textValue,
+        TextColor3 = danger and Color3.fromRGB(255, 138, 149) or Config.Text,
+        TextSize = 9,
+        Font = Enum.Font.GothamSemibold,
+        AutoButtonColor = false,
+        ZIndex = 106,
+    })
+    Button.Parent = ConfigCard
+    Corner(Button, 10)
+    Stroke(Button, danger and Color3.fromRGB(139, 67, 77) or Config.Border, 0.18, 1)
+    return Button
+end
+
+local SaveConfigButton = MakeConfigButton("Save Current Config", 56, false)
+local LoadConfigButton = MakeConfigButton("Load Saved Config", 96, false)
+local ResetConfigButton = MakeConfigButton("Reset To Default", 136, true)
+
+local function ApplyConfigSnapshot(snapshot)
+    if not snapshot then return end
+
+    Config.RoleESP = snapshot.RoleESP
+    Config.GunESP = snapshot.GunESP
+    Config.RoleOptions.ShowUsernames = snapshot.ShowUsernames
+    Config.RoleOptions.ShowDistance = snapshot.ShowDistance
+    Config.Watermark = snapshot.Watermark
+    Config.WatermarkOptions.ShowNickname = snapshot.ShowNickname
+    Config.WatermarkOptions.ShowFPS = snapshot.ShowFPS
+    Config.WatermarkOptions.ShowPing = snapshot.ShowPing
+    Config.WatermarkScale = math.clamp(snapshot.WatermarkScale or 0.52, 0.30, 1.20)
+    WatermarkTargetScale = Config.WatermarkScale
+
+    RoleSwitchControl:SetInstant(Config.RoleESP, false)
+    GunSwitchControl:SetInstant(Config.GunESP, false)
+    WatermarkSwitchControl:SetInstant(Config.Watermark, false)
+    RoleNamesControl:SetInstant(Config.RoleOptions.ShowUsernames, false)
+    RoleDistanceControl:SetInstant(Config.RoleOptions.ShowDistance, false)
+    WatermarkNicknameControl:SetInstant(Config.WatermarkOptions.ShowNickname, false)
+    WatermarkFPSControl:SetInstant(Config.WatermarkOptions.ShowFPS, false)
+    WatermarkPingControl:SetInstant(Config.WatermarkOptions.ShowPing, false)
+    WatermarkScaleControl:Set(Config.WatermarkScale, false)
+
+    if WatermarkScaleObject then
+        WatermarkScaleObject.Scale = WatermarkTargetScale
+    end
+
+    if SetWatermarkEnabled then
+        SetWatermarkEnabled(Config.Watermark)
+    end
+end
+
+Connect(SaveConfigButton.MouseButton1Click, function()
+    ClickSound:Play()
+    SavedConfigSnapshot = SnapshotCurrentConfig()
+    ConfigStatus.Text = "Saved in this session"
+    ConfigStatus.TextColor3 = Config.WaterBright
+end)
+
+Connect(LoadConfigButton.MouseButton1Click, function()
+    ClickSound:Play()
+    if SavedConfigSnapshot then
+        ApplyConfigSnapshot(SavedConfigSnapshot)
+        ConfigStatus.Text = "Saved config loaded"
+        ConfigStatus.TextColor3 = Config.WaterBright
+    else
+        ConfigStatus.Text = "Nothing saved yet"
+        ConfigStatus.TextColor3 = Color3.fromRGB(255, 170, 98)
+    end
+end)
+
+Connect(ResetConfigButton.MouseButton1Click, function()
+    ClickSound:Play()
+    ApplyConfigSnapshot(DefaultConfigSnapshot)
+    ConfigStatus.Text = "Default config restored"
+    ConfigStatus.TextColor3 = Config.Muted
+end)
 
 --// ============================================================
 --// SETTINGS PAGE
@@ -1619,9 +1938,8 @@ Watermark.Parent = Gui
 Corner(Watermark, 14)
 local WatermarkStroke = Stroke(Watermark, Config.Border, 1, 1)
 
-local WatermarkTargetScale = 0.52
-local WatermarkScale = New("UIScale", { Scale = WatermarkTargetScale })
-WatermarkScale.Parent = Watermark
+WatermarkScaleObject = New("UIScale", { Scale = WatermarkTargetScale })
+WatermarkScaleObject.Parent = Watermark
 
 local WatermarkGradient = New("UIGradient", {
     Rotation = 0,
@@ -2015,11 +2333,11 @@ local function ShowWatermarkAnimated()
 
     RefreshWatermarkText()
     Watermark.Visible = true
-    WatermarkScale.Scale = WatermarkTargetScale * 0.86
+    WatermarkScaleObject.Scale = WatermarkTargetScale * 0.86
     Watermark.BackgroundTransparency = 1
     WatermarkStroke.Transparency = 1
 
-    Tween(WatermarkScale, 0.22, { Scale = WatermarkTargetScale }, Enum.EasingStyle.Back)
+    Tween(WatermarkScaleObject, 0.22, { Scale = WatermarkTargetScale }, Enum.EasingStyle.Back)
     Tween(Watermark, 0.22, { BackgroundTransparency = 1 })
     Tween(WatermarkStroke, 0.22, { Transparency = 1 })
 end
@@ -2030,7 +2348,7 @@ local function HideWatermarkAnimated(callback)
         return
     end
 
-    Tween(WatermarkScale, 0.17, { Scale = WatermarkTargetScale * 0.82 })
+    Tween(WatermarkScaleObject, 0.17, { Scale = WatermarkTargetScale * 0.82 })
     Tween(Watermark, 0.17, { BackgroundTransparency = 1 })
     Tween(WatermarkStroke, 0.17, { Transparency = 1 })
 
