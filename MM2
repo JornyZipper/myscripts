@@ -1,12 +1,14 @@
--- SYDJA HUB V1.0.7 PC: complete script + transparent embedded logo. Function ON/OFF sounds are muted.
+-- SYDJA HUB V1.1 PC: transparent PNG + native SH emblem for asset compatibility. Function ON/OFF sounds are muted.
 -- Run this file once. Settings > Auto Run on Rejoin saves ON/OFF.
 -- For fresh Roblox joins, move the generated ScriptMM2_AutoRun.lua from your
 -- executor's workspace into its Autoexec folder. Executor attachment is required.
 -- The long string contains the editable full program, used for its local cache.
 local program = [====[
---// SYDJA HUB V1.0.7 PC — Spin Speed and Silent Revolver target checks
+--// SYDJA HUB V1.1 PC — instant air steering and Silent Knife / Revolver
+--// Silent Knife uses the supplied KnifeClient target provider; original throw/stab remain active.
+--// KnifeThrown retains its original Handle.CFrame and target; camera is never steered.
 --// Spin Speed: independent yaw after character controls; walking/Shift Lock supported.
---// Silent FOV: tests the current chest volume; jump center/lead points cannot drop a visible body.
+--// Revolver cover check: exposed R6/R15 body parts and one-pixel viewport search; bounded work per call.
 --// The overlay shows the current reason whenever the target/weapon is unavailable.
 --// No mouse.Hit fallback while Silent is ON; OFF restores the original GunClient.
 --// Blue preview / amber awaiting weapon / green locally ready; server hit unverified.
@@ -38,7 +40,8 @@ local program = [====[
 --// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
 --// Client menu. Body AimLock; YARHM Fling for roles and a selected player.
 
-local VERSION = "V1.0.7"
+local CURRENT_VERSION = "1.1.0"
+local VERSION = "V" .. CURRENT_VERSION
 local PC_ONLY_BUILD = true -- V1.0: Android/mobile branch retired
 local UIRefs = {}
 UIRefs.AutoRunSource, UIRefs.AutomaticLaunch = ...
@@ -3331,22 +3334,84 @@ AAAAAAAAAAAAAAAAAAAAAG4D/38mh8zCUdqIoAAAAABJRU5ErkJggg==
         if ok then refresh(view) end
     end
 
+    -- The same SH emblem as native GUI geometry, usable before/without a PNG asset.
+    -- Paths and wordmark use the full original 1254px image coordinates.
+    local nativePaths = {
+        {color = Color3.fromRGB(18, 19, 21), points = {
+            {575, 323}, {582, 326}, {585, 333}, {585, 397}, {581, 405},
+            {467, 473}, {465, 477}, {467, 481}, {664, 598}, {670, 607}, {671, 617},
+            {671, 677}, {669, 689}, {534, 773}, {527, 777}, {520, 774}, {392, 696},
+            {386, 687}, {386, 613}, {391, 605}, {397, 609}, {528, 686}, {591, 652},
+            {467, 579}, {397, 537}, {386, 526}, {386, 444}, {391, 435},
+        }},
+        {color = Color3.fromRGB(18, 19, 21), points = {
+            {777, 412}, {785, 416}, {860, 462}, {865, 470}, {865, 738},
+            {859, 745}, {777, 745}, {770, 738}, {770, 663}, {705, 663},
+            {698, 656}, {698, 605}, {704, 598}, {772, 598}, {772, 421},
+        }},
+        {color = Color3.fromRGB(87, 45, 252), points = {
+            {630, 327}, {715, 382}, {716, 390}, {716, 555}, {712, 559},
+            {625, 505}, {622, 500}, {623, 340}, {625, 333},
+        }},
+    }
+    local nativeRows = nil
+    local function nativeFallback(make, parent, level)
+        if not nativeRows then
+            nativeRows = {}
+            local step = 550 / 80
+            for _, path in ipairs(nativePaths) do
+                for row = 0, 79 do
+                    local y = 275 + (row + 0.5) * step
+                    local intersections = {}
+                    for index, first in ipairs(path.points) do
+                        local last = path.points[index % #path.points + 1]
+                        if (first[2] <= y and last[2] > y) or (last[2] <= y and first[2] > y) then
+                            intersections[#intersections + 1] = first[1]
+                                + (y - first[2]) * (last[1] - first[1]) / (last[2] - first[2])
+                        end
+                    end
+                    table.sort(intersections)
+                    for index = 1, #intersections - 1, 2 do
+                        local left, right = intersections[index], intersections[index + 1]
+                        if right > left then
+                            nativeRows[#nativeRows + 1] = {x = (left - 351) / 550,
+                                y = row / 80, width = (right - left) / 550, color = path.color}
+                        end
+                    end
+                end
+            end
+        end
+        local fallback = make("Frame", {Name = "LogoFallback", Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1, BorderSizePixel = 0, Visible = true,
+            Active = false, ZIndex = level}, parent)
+        for index, row in ipairs(nativeRows) do
+            make("Frame", {Name = "Emblem" .. tostring(index),
+                Position = UDim2.fromScale((row.x * 550 + 351) / 1254, (row.y * 550 + 275) / 1254),
+                Size = UDim2.fromScale(row.width * 550 / 1254, (550 / 80 + 1) / 1254),
+                BackgroundColor3 = row.color, BackgroundTransparency = 0,
+                BorderSizePixel = 0, Active = false, ZIndex = level}, fallback)
+        end
+        make("TextLabel", {Name = "SYDJAWordmark", Position = UDim2.fromScale(146 / 1254, 824 / 1254),
+            Size = UDim2.fromScale(610 / 1254, 128 / 1254), Text = "SYDJA", Font = Enum.Font.GothamBlack,
+            TextScaled = true, TextColor3 = Color3.fromRGB(18, 19, 21), TextTransparency = 0,
+            BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = level}, fallback)
+        make("TextLabel", {Name = "HUBWordmark", Position = UDim2.fromScale(769 / 1254, 834 / 1254),
+            Size = UDim2.fromScale(340 / 1254, 122 / 1254), Text = "HUB", Font = Enum.Font.Gotham,
+            TextScaled = true, TextColor3 = Color3.fromRGB(18, 19, 21), TextTransparency = 0,
+            BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = level}, fallback)
+        return fallback
+    end
+
     function brand.make(make, parent, properties)
         local frame = make("Frame", properties, parent)
         frame.ClipsDescendants = true
         local level = properties.ZIndex or 1
-        local fallback = make("TextLabel", {Name = "LogoFallback", Size = UDim2.fromScale(1, 1),
-            BackgroundTransparency = 1, Text = "SH", Font = Enum.Font.GothamBlack,
-            TextScaled = true, TextColor3 = Color3.fromRGB(96, 48, 246), TextTransparency = 0,
-            BorderSizePixel = 0, Visible = true, ZIndex = level}, frame)
-        make("UIPadding", {PaddingLeft = UDim.new(0.18, 0), PaddingRight = UDim.new(0.18, 0),
-            PaddingTop = UDim.new(0.18, 0), PaddingBottom = UDim.new(0.18, 0)}, fallback)
-        -- Clip the emblem from the transparent 1254px square image. Relative geometry also
-        -- works if the renderer downsamples the texture; the lettering is drawn separately.
+        local fallback = nativeFallback(make, frame, level)
+        -- Fit the entire transparent image; the original wordmark remains inside the view.
         local image = make("ImageLabel", {Name = "SYDJALogo", BackgroundTransparency = 1,
-            Position = UDim2.fromScale(-351 / 550, -275 / 550),
-            Size = UDim2.fromScale(1254 / 550, 1254 / 550), Image = "", ImageTransparency = 0,
-            ImageColor3 = Color3.fromRGB(255, 255, 255), ScaleType = Enum.ScaleType.Stretch,
+            Position = UDim2.fromScale(0, 0),
+            Size = UDim2.fromScale(1, 1), Image = "", ImageTransparency = 0,
+            ImageColor3 = Color3.fromRGB(255, 255, 255), ScaleType = Enum.ScaleType.Fit,
             BorderSizePixel = 0, Visible = false, ZIndex = level}, frame)
         local view = {frame = frame, image = image, fallback = fallback}
         view.connection = image:GetPropertyChangedSignal("IsLoaded"):Connect(function() refresh(view) end)
@@ -3377,6 +3442,13 @@ AAAAAAAAAAAAAAAAAAAAAG4D/38mh8zCUdqIoAAAAABJRU5ErkJggg==
         if brand.stopped or not assetOK or type(asset) ~= "string" or asset == "" then return end
         brand.asset = asset
         for _, view in ipairs(brand.views) do attach(view) end
+        -- Hidden ImageLabels can need an explicit preload. It must never block the menu.
+        task.spawn(function()
+            if brand.stopped then return end
+            pcall(function() ContentProvider:PreloadAsync({asset}) end)
+            if brand.stopped then return end
+            for _, view in ipairs(brand.views) do refresh(view) end
+        end)
     end
 
     function brand.stop()
@@ -3559,7 +3631,7 @@ do
     end
     UIRefs.Brand.make(make, card, {
         Name = "Mark", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0, 57),
-        Size = UDim2.fromOffset(32, 32), BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        Size = UDim2.fromOffset(48, 48), BackgroundColor3 = Color3.fromRGB(255, 255, 255),
         BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 3,
     })
     make("TextLabel", {
@@ -3823,7 +3895,6 @@ local CONFIG = {
     CoinFarmSpawnConfirm = 0.25, -- short confirmation once an actual coin is indexed
     CoinFarmRetryDelay = 4.0, -- unconfirmed coins are retried, never permanently counted as collected
     CoinFarmRoundLimit = 40, -- stop flight when observed bag reaches 40; conservative pickup fallback
-    DefaultStrafeSpeed = 60,
     DefaultLongJumpSpeed = 110,
     MinLongJumpSpeed = 40,
     MaxLongJumpSpeed = 180,
@@ -3831,10 +3902,6 @@ local CONFIG = {
     UltraJumpSpeed = 20000, -- theoretical 100k studs at five seconds (client physics; not a guarantee)
     UltraJumpDuration = 5.0,
     UltraJumpMaxDistance = 100000,
-    MinStrafeSpeed = 16,
-    MaxStrafeSpeed = 250,
-    StrafeAcceleration = 150,
-    StrafeTurnRate = 10,
     MinWalkSpeed = 16,
     MaxWalkSpeed = 150,
     MinJumpPower = 50,
@@ -3882,7 +3949,8 @@ local state = {
     lowGravity = false,
     spin = false,
     bunnyHop = false,
-    strafe = false,
+    strafe = false, -- instant ground turning from the supplied movement code
+    airStrafe = false, -- instant horizontal flight direction; normal jump Y is preserved
     longJump = false,
     ultraLongJump = false,
     esp = false,
@@ -3896,6 +3964,7 @@ local state = {
     fovIndicator = false, -- read-only FOV target preview, never alters camera or shot
     silentGun = false, -- desired setting; remains ON while Gun is absent / during respawn
     silentKnife = false,
+    knifeVisibleOnly = true, -- separate from Revolver visibility / Wallbang
     silentAutoPredict = true, -- AIM > Auto Prediction: personal ping; independent of manual lead
     aimVisibleOnly = true,
     wallbang = false, -- experimental: ignore client LOS checks for Silent Revolver/FOV
@@ -3914,11 +3983,12 @@ local values = {
     flySpeed = CONFIG.DefaultFlySpeed,
     spinSpeed = CONFIG.DefaultSpinSpeed,
     coinFarmSpeed = CONFIG.CoinFarmSpeed,
-    strafeSpeed = CONFIG.DefaultStrafeSpeed,
     longJumpSpeed = CONFIG.DefaultLongJumpSpeed,
     fov = CONFIG.DefaultFOV,
     silentLeadMs = 0, -- Manual milliseconds when Auto Prediction is OFF; 0 is direct aim
     aimRadius = 115, -- screen pixels (not camera field of view)
+    knifeFOV = 115, -- independent Knife circle radius, pixels
+    knifePrediction = 100, -- percent of personal ping prediction; zero is direct aim
     aimSmooth = 9, -- higher = faster camera tracking
     aimLeadMs = 140, -- B AimLock: predictive horizontal lead (0 disables)
     jumpLeadMs = 115, -- B AimLock: airborne vertical prediction (0 disables)
@@ -3969,7 +4039,6 @@ UIRefs.setJumpPowerSlider = nil
 UIRefs.setFlySpeedSlider = nil
 UIRefs.setCoinFarmSpeedSlider = nil
 UIRefs.setFOVSlider = nil
-UIRefs.setStrafeSpeedSlider = nil
 UIRefs.setLongJumpSpeedSlider = nil
 
 local enableFullBright
@@ -4004,7 +4073,7 @@ local aimLockBindingName = "ScriptMM2AimLock_" .. tostring(LocalPlayer.UserId) .
 
 --// Experimental remote-argument Silent Aim based on the supplied readable MM2 script.
 --// Does not turn the camera, fire weapons automatically, or promise server acceptance.
-local Silent = {installed = false, old = nil, error = nil, rawMeta = nil, wrapper = nil}
+local Silent = {}
 function Silent.target(name)
     local player = name and Players:FindFirstChild(name)
     local char = player and player.Character
@@ -4015,90 +4084,12 @@ function Silent.target(name)
     end
     return nil
 end
-function Silent.closest()
-    local mine = LocalPlayer.Character
-    local root = mine and mine:FindFirstChild("HumanoidRootPart")
-    if not root then return nil end
-    local best, distance = nil, math.huge
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local part = Silent.target(player.Name)
-            if part then
-                local d = (part.Position - root.Position).Magnitude
-                if d < distance then best, distance = part, d end
-            end
-        end
-    end
-    return best, distance
-end
-function Silent.redirect(object, method, args)
-    if state.unloaded then return end
-    local char = LocalPlayer.Character
-    if not char or not char:FindFirstChildOfClass("Humanoid") then return end
-    -- Only modify an expected Vector3 aim coordinate. Unknown remote signatures pass untouched.
-    if typeof(args[2]) ~= "Vector3" then return end
-    if state.silentGun and method == "InvokeServer" and object:IsA("RemoteFunction") and object.Name == "ShootGun" then
-        local target = rolesAvailable and Murder ~= "" and Silent.target(Murder)
-        if target then
-            local velocity = target.AssemblyLinearVelocity
-            args[2] = target.Position + Vector3.new(velocity.X, 0, velocity.Z) / 40
-        end
-    elseif state.silentKnife and method == "FireServer" and object:IsA("RemoteEvent") and object.Name == "Throw" then
-        local target, distance = Silent.closest()
-        if target then
-            local velocity = target.AssemblyLinearVelocity
-            -- Short lead rather than the source's long 0.5*distance/100 lead;
-            -- projectile velocity is unverified, so this is only an experiment.
-            local lead = math.clamp(distance / 180, 0.035, 0.22)
-            args[2] = target.Position + Vector3.new(velocity.X, 0, velocity.Z) * lead
-        end
-    end
-end
-function Silent.install()
-    if Silent.installed then return true end
-    if type(getnamecallmethod) ~= "function" or type(newcclosure) ~= "function" then
-        return false, "Xeno: getnamecallmethod/newcclosure unavailable"
-    end
-    if type(hookmetamethod) == "function" then
-        local old
-        local wrapper = newcclosure(function(object, ...)
-            local args = {...}
-            if not (type(checkcaller) == "function" and checkcaller()) then
-                pcall(Silent.redirect, object, getnamecallmethod(), args)
-            end
-            return old(object, (table.unpack or unpack)(args))
-        end)
-        local ok, result = pcall(function() return hookmetamethod(game, "__namecall", wrapper) end)
-        if not ok or type(result) ~= "function" then return false, "hookmetamethod failed" end
-        old = result
-        Silent.wrapper, Silent.old, Silent.installed = wrapper, old, true
-        return true
-    end
-    if type(getrawmetatable) ~= "function" or type(setreadonly) ~= "function" then
-        return false, "Xeno: __namecall hook API unavailable"
-    end
-    local ok, result = pcall(function()
-        local meta = getrawmetatable(game)
-        local old = meta.__namecall
-        local wrapper = newcclosure(function(object, ...)
-            local args = {...}
-            if not (type(checkcaller) == "function" and checkcaller()) then
-                pcall(Silent.redirect, object, getnamecallmethod(), args)
-            end
-            return old(object, (table.unpack or unpack)(args))
-        end)
-        setreadonly(meta, false)
-        meta.__namecall = wrapper
-        setreadonly(meta, true)
-        Silent.rawMeta, Silent.wrapper, Silent.old = meta, wrapper, old
-    end)
-    if not ok then return false, "__namecall installation failed: " .. tostring(result) end
-    Silent.installed = true
-    return true
+function Silent.resetKnife()
+    if UIRefs.KnifeSilent then UIRefs.KnifeSilent.resetPrediction() end
 end
 function Silent.stop()
     state.silentGun, state.silentKnife = false, false
-    -- Leave hook inert. Restoring a shared metatable would risk overwriting another script's hook.
+    if UIRefs.KnifeSilent then UIRefs.KnifeSilent.stop() end
 end
 
 --// V0.9.44 isolated experimental GunClient-activation replacement.
@@ -4110,6 +4101,7 @@ end
 --//     Gun.Shoot:FireServer(GunRaycastAttachment.WorldCFrame, targetCFrame)
 --// The server may still reject a redirected shot.
 function Silent.restoreXeno(keepEnabled)
+    Silent.gunCoverSearch = nil
     if not keepEnabled then state.silentGun = false end
     if Silent.xenoActivation then
         pcall(function() Silent.xenoActivation:Disconnect() end)
@@ -4150,8 +4142,7 @@ function Silent.gunAimPosition(chest, motionPart)
         if not Silent.isFiniteAimVector(velocity) then return position end
         local horizontal = Vector3.new(math.clamp(velocity.X, -150, 150), 0,
             math.clamp(velocity.Z, -150, 150)) * lead
-        if horizontal.Magnitude > 2 then horizontal = horizontal.Unit * 2 end
-        return position + horizontal
+        return position + Silent.boundHorizontalLead(chest, horizontal)
     end
     -- ON follows personal ping independently of the retained manual slider value.
     -- Preview/Silent OFF/spectate cannot activate the sampler.
@@ -4205,9 +4196,10 @@ function Silent.gunAimPosition(chest, motionPart)
             -- Never invent latency when the API is unavailable or its last result is stale.
             if not network.goodAt or at - network.goodAt > 3 then return nil end
             -- Uncertain latency shortens lead slightly instead of amplifying ping spikes.
-            -- The motion model still limits errors and keeps every offset within four studs.
+            -- Half RTT estimates outgoing delay; server/target replication timing is unknown.
+            -- Keep the correction short instead of aiming an entire RTT ahead of the live body.
             local uncertainty = math.min((network.jitter or 0) * 0.5, network.rtt * 0.20)
-            network.delaySeconds = math.clamp(network.rtt - uncertainty, 0, 0.35)
+            network.delaySeconds = math.clamp(network.rtt * 0.5 - uncertainty, 0, 0.12)
             return network.delaySeconds
         end
 
@@ -4243,6 +4235,8 @@ function Silent.gunAimPosition(chest, motionPart)
                 if speed < 0.3 then
                     motion.velocity, motion.steady, motion.turnAt = Vector3.zero, 0, nil
                     motion.turnConfirmed = false
+                    motion.position, motion.at, motion.movedAt = position, at, at
+                    return motion -- this click observes a fresh stop, not the previous packet's displacement
                 elseif speed > 1 and previous:Dot(reported) < previous.Magnitude * speed * 0.35 then
                     motion.velocity, motion.steady = reported, 0
                     motion.turnAt, motion.holdUntil, motion.turnConfirmed = at, at + 0.02, false
@@ -4321,29 +4315,6 @@ function Silent.gunAimPosition(chest, motionPart)
             return motion
         end
 
-        function auto.verticalOffset(chest, part, motion, delay, at)
-            if motion.yConfidence <= 0 or at - motion.yMovedAt > 0.10 then return 0 end
-            local humanoid = motion.humanoid
-            if not humanoid or humanoid.Health <= 0 then return 0 end
-            local stateOK, currentState = pcall(function() return humanoid:GetState() end)
-            if not stateOK then return 0 end
-            local isJump = currentState == Enum.HumanoidStateType.Jumping
-                or currentState == Enum.HumanoidStateType.Freefall
-            if not isJump or humanoid.FloorMaterial ~= Enum.Material.Air then return 0 end
-            local velocity = part.AssemblyLinearVelocity
-            if not Silent.isFiniteAimVector(velocity) or math.abs(velocity.Y) > 90 then return 0 end
-            local vy, confidence = motion.yVelocity, motion.yConfidence
-            if math.abs(velocity.Y - vy) > 12 then return 0 end
-            if vy * velocity.Y < 0 or math.abs(velocity.Y) < 2 then vy = velocity.Y end
-            local gravity = tonumber(Workspace.Gravity) or 196.2
-            if gravity ~= gravity or gravity < 0 or gravity > 500 then gravity = 196.2 end
-            local horizon = math.min(delay, 0.08)
-            local dy = (vy * horizon - 0.5 * gravity * horizon * horizon) * confidence
-            local size = chest.Size
-            local limit = Silent.isFiniteAimVector(size) and math.clamp(size.Y * 0.42, 0.35, 1.25) or 0.7
-            return math.clamp(dy, -limit, limit)
-        end
-
         function auto.offset(chest, part)
             local at = os.clock()
             local delay = auto.networkDelay(at)
@@ -4352,21 +4323,22 @@ function Silent.gunAimPosition(chest, motionPart)
             local motion = auto.sample(part, at)
             if not motion or at - motion.at > 0.12 then return Vector3.zero end
             local horizontal = Vector3.zero
+            local current = auto.readVelocity(part)
+            if not current then return Vector3.zero end
             local speed = motion.velocity.Magnitude
+            if current.Magnitude >= 0.3 and speed > 0 and motion.velocity:Dot(current) <= 0 then return Vector3.zero end
             if at >= motion.holdUntil and speed >= 0.3 then
                 local confidence = math.clamp(motion.steady / 0.07, 0, 1)
                 if motion.turnConfirmed then confidence = math.max(0.4, confidence) end
                 confidence *= math.clamp(1 - math.max(0, at - motion.movedAt - 0.05) / 0.05, 0, 1)
                 local size = chest.Size
                 local margin = Silent.isFiniteAimVector(size) and math.clamp(size.X * 0.45, 0.35, 1.25) or 0.7
-                local lead = math.min(delay, margin / math.max(motion.error, 0.01), 4 / speed) * confidence
+                local lead = math.min(delay, margin / math.max(motion.error, 0.01), 0.85 / speed) * confidence
                 horizontal, auto.leadSeconds = motion.velocity * lead, lead
             end
-            local vertical = at >= motion.holdUntil and auto.verticalOffset(chest, part, motion, delay, at) or 0
-            local result = horizontal + Vector3.new(0, vertical, 0)
-            if not Silent.isFiniteAimVector(result) then return Vector3.zero end
-            if result.Magnitude > 4 then result = result.Unit * 4 end
-            return result
+            -- Y always follows the current torso, including ascent, apex and descent.
+            -- An uncertain model cannot launch the aim above/below the live character.
+            return Silent.boundHorizontalLead(chest, horizontal)
         end
 
 
@@ -4409,12 +4381,13 @@ function Silent.gunAimPosition(chest, motionPart)
     end
     auto.context()
     -- RTT is seconds. Unknown ping uses direct aim; no distance/speed guess.
-    -- Horizontal direction follows fresh movement; verified airborne motion gets a short bounded Y lead.
+    -- Fresh horizontal movement gets short bounded lead; Y is the live torso height.
     return position + auto.offset(chest, motionPart)
 end
 
 function Silent.cancelGunShot(reason)
-    local message = reason == "Silent: target outside circle" and "Silent: shot cancelled; target outside circle"
+    local message = reason == "Silent: checking exposed edges" and "Silent: shot cancelled; no clear point found"
+        or reason == "Silent: target outside circle" and "Silent: shot cancelled; target outside circle"
         or reason == "Silent: path blocked" and "Silent: shot cancelled; path blocked"
         or reason == "Silent: aim data unavailable" and "Silent: shot cancelled; aim data unavailable"
         or "Silent: shot cancelled; target unavailable"
@@ -4462,8 +4435,174 @@ function Silent.bodyTouchesFOV(camera, part)
     return dx * dx + dy * dy <= radius * radius
 end
 
+function Silent.boundHorizontalLead(chest, offset)
+    if not Silent.isFiniteAimVector(offset) then return Vector3.zero end
+    offset = Vector3.new(offset.X, 0, offset.Z)
+    local size = chest.Size
+    local limit = Silent.isFiniteAimVector(size) and math.clamp(size.X * 0.35, 0.25, 0.85) or 0.7
+    if offset.Magnitude > limit then offset = offset.Unit * limit end
+    return offset
+end
+
+--// BEGIN SYDJA PIXEL COVER
+-- Direct chest shots keep the existing prediction. Partial cover uses a real visible
+-- body surface, without moving a one-pixel opening into the wall with extra lead.
+do
+    local names = {"Head", "UpperTorso", "Torso", "LowerTorso", "LeftUpperArm", "RightUpperArm",
+        "LeftLowerArm", "RightLowerArm", "LeftHand", "RightHand", "LeftUpperLeg", "RightUpperLeg",
+        "LeftLowerLeg", "RightLowerLeg", "LeftFoot", "RightFoot", "Left Arm", "Right Arm", "Left Leg", "Right Leg"}
+    function Silent.gunBodyParts(target, chest)
+        local character, result = target.Parent, {}
+        for _, name in ipairs(names) do
+            local part = character:FindFirstChild(name)
+            if part and part:IsA("BasePart") and Silent.isFiniteAimVector(part.Position)
+                and Silent.isFiniteAimVector(part.Size) and part.Size.X > 0 and part.Size.Y > 0 and part.Size.Z > 0 then
+                table.insert(result, part)
+            end
+        end
+        if #result == 0 then table.insert(result, chest) end
+        return result
+    end
+    function Silent.gunBodyTouchesFOV(camera, target, chest)
+        for _, part in ipairs(Silent.gunBodyParts(target, chest)) do
+            if Silent.bodyTouchesFOV(camera, part) then return true end
+        end
+        return false
+    end
+    local function insideFOV(camera, point)
+        local screen, onScreen = camera:WorldToViewportPoint(point)
+        if not onScreen or not Silent.isFiniteAimVector(screen) or screen.Z <= 0 then return false end
+        local viewport = camera.ViewportSize
+        local dx, dy = screen.X - viewport.X * 0.5, screen.Y - viewport.Y * 0.5
+        return dx * dx + dy * dy <= values.aimRadius * values.aimRadius
+    end
+    local function bounds(camera, part)
+        if not Silent.isFiniteAimVector(part.Size) then return nil end
+        local half, viewport = part.Size * 0.5, camera.ViewportSize
+        local left, right, top, bottom = math.huge, -math.huge, math.huge, -math.huge
+        for x = -1, 1, 2 do for y = -1, 1, 2 do for z = -1, 1, 2 do
+            local world = part.CFrame:PointToWorldSpace(Vector3.new(half.X*x, half.Y*y, half.Z*z))
+            local point = camera:WorldToViewportPoint(world)
+            if not Silent.isFiniteAimVector(point) or point.Z <= 0 then return nil end
+            left, right = math.min(left, point.X), math.max(right, point.X)
+            top, bottom = math.min(top, point.Y), math.max(bottom, point.Y)
+        end end end
+        local radius = values.aimRadius
+        left = math.max(0, math.ceil(math.max(left, viewport.X*0.5-radius)-0.5))
+        right = math.min(math.floor(viewport.X)-1, math.floor(math.min(right, viewport.X*0.5+radius)-0.5))
+        top = math.max(0, math.ceil(math.max(top, viewport.Y*0.5-radius)-0.5))
+        bottom = math.min(math.floor(viewport.Y)-1, math.floor(math.min(bottom, viewport.Y*0.5+radius)-0.5))
+        if left > right or top > bottom then return nil end
+        local width, height = right-left+1, bottom-top+1
+        return {part=part, x=left, y=top, width=width, height=height, total=9+width*height}
+    end
+    local landmarks = {{.5,.5},{.5,0},{.5,1},{0,.5},{1,.5},{0,0},{1,0},{0,1},{1,1}}
+    local function pixelAt(rect, index)
+        local width, height = rect.width, rect.height
+        if index < 9 then
+            local point = landmarks[index+1]
+            return rect.x+math.floor((width-1)*point[1])+.5, rect.y+math.floor((height-1)*point[2])+.5
+        end
+        index -= 9
+        if width <= 2 or height <= 2 then
+            return rect.x+index%width+.5, rect.y+math.floor(index/width)+.5
+        end
+        if index < width then return rect.x+index+.5, rect.y+.5 end
+        index -= width
+        if index < width then return rect.x+index+.5, rect.y+height-.5 end
+        index -= width
+        if index < height-2 then return rect.x+.5, rect.y+index+1.5 end
+        index -= height-2
+        if index < height-2 then return rect.x+width-.5, rect.y+index+1.5 end
+        index -= height-2
+        return rect.x+1+index%(width-2)+.5, rect.y+1+math.floor(index/(width-2))+.5
+    end
+    function Silent.visibleAimPosition(target, chest, origin, predicted, preview)
+        if not state.aimVisibleOnly or state.wallbang then return predicted end
+        local camera, character = Workspace.CurrentCamera, target.Parent
+        local rayOrigin = typeof(origin)=="CFrame" and origin.Position
+            or typeof(origin)=="Vector3" and origin or (camera and camera.CFrame.Position)
+        if not camera or not Silent.isFiniteAimVector(rayOrigin) then return nil end
+        local parts, partSet = Silent.gunBodyParts(target, chest), {}
+        local ignore = {LocalPlayer.Character}
+        for _, part in ipairs(parts) do partSet[part] = true end
+        if not partSet[target] then table.insert(ignore, target) end
+        for _, object in ipairs(character:GetChildren()) do
+            if object:IsA("Accessory") or object:IsA("Tool") then table.insert(ignore, object) end
+        end
+        local params = RaycastParams.new()
+        params.FilterType, params.FilterDescendantsInstances = Enum.RaycastFilterType.Exclude, ignore
+        params.IgnoreWater = true
+        local function clear(position)
+            if not Silent.isFiniteAimVector(position) then return false end
+            local hit = Workspace:Raycast(rayOrigin, position-rayOrigin, params)
+            return not hit or (hit.Instance and partSet[hit.Instance] == true)
+        end
+        -- Preserve the direct chest behavior and conservative prediction when unobstructed.
+        if Silent.bodyTouchesFOV(camera, chest) then
+            if clear(predicted) then return predicted end
+            if (predicted-chest.Position).Magnitude > .001 and clear(chest.Position) then return chest.Position end
+        end
+        local search = Silent.gunCoverSearch
+        if not search or search.character ~= character then
+            search = {character=character, cursors={}, nextPart=1}; Silent.gunCoverSearch=search
+        end
+        local function remember(part, point)
+            search.hitPart, search.hitLocal = part, part.CFrame:PointToObjectSpace(point)
+            return point
+        end
+        if search.hitPart and partSet[search.hitPart] and search.hitPart.Parent == character then
+            local point = search.hitPart.CFrame:PointToWorldSpace(search.hitLocal)
+            if insideFOV(camera, point) and clear(point) then return point end
+        end
+        search.hitPart, search.hitLocal = nil, nil
+        for _, part in ipairs(parts) do
+            if insideFOV(camera, part.Position) and clear(part.Position) then return remember(part, part.Position) end
+        end
+        if type(camera.ViewportPointToRay) ~= "function" then return nil end
+        local rects, remaining, maxDistance = {}, 0, 0
+        for _, part in ipairs(parts) do
+            local rect = bounds(camera, part)
+            if rect then table.insert(rects, rect); remaining += rect.total end
+            if Silent.isFiniteAimVector(part.Size) then
+                maxDistance = math.max(maxDistance, (part.Position-camera.CFrame.Position).Magnitude+part.Size.Magnitude+1)
+            end
+        end
+        if #rects == 0 or maxDistance <= 0 then return nil end
+        -- Cursor resumes across 10 Hz previews; shots get a larger bounded search.
+        -- Never scan the full screen, wait, fire automatically, or add a frame connection.
+        local budget, deadline = preview and 48 or 2048, os.clock() + (preview and .0015 or .008)
+        local visited, processed = {}, 0
+        while processed < budget and remaining > 0 and os.clock() <= deadline do
+            local index = (search.nextPart-1)%#rects+1
+            local rect = rects[index]; search.nextPart = index%#rects+1
+            local part = rect.part
+            local used = visited[part] or 0
+            if used < rect.total then
+                local cursor = (search.cursors[part] or 0)%rect.total
+                local x,y = pixelAt(rect, cursor)
+                search.cursors[part] = (cursor+1)%rect.total
+                visited[part] = used+1; processed += 1; remaining -= 1
+                local dx,dy = x-camera.ViewportSize.X*.5,y-camera.ViewportSize.Y*.5
+                if dx*dx+dy*dy <= values.aimRadius*values.aimRadius then
+                    local ray = camera:ViewportPointToRay(x,y,0)
+                    if Silent.isFiniteAimVector(ray.Origin) and Silent.isFiniteAimVector(ray.Direction) then
+                        local hit = Workspace:Raycast(ray.Origin, ray.Direction*maxDistance, params)
+                        if hit and partSet[hit.Instance] and Silent.isFiniteAimVector(hit.Position) then
+                            local point = hit.Position + ray.Direction*.002
+                            if insideFOV(camera,point) and clear(point) then return remember(hit.Instance,point) end
+                        end
+                    end
+                end
+            end
+        end
+        return nil, remaining > 0
+    end
+end
+--// END SYDJA PIXEL COVER
+
 -- Both the circle and the click handler use this exact selector.
-function Silent.selectGunTarget(origin)
+function Silent.selectGunTarget(origin, preview)
     if state.unloaded or not rolesAvailable or Murder == "" then
         return nil, "Silent: target unavailable"
     end
@@ -4477,21 +4616,12 @@ function Silent.selectGunTarget(origin)
     if not chest or not chest:IsA("BasePart") then chest = target end
     local predicted = Silent.gunAimPosition(chest, target)
     if not predicted then return nil, "Silent: aim data unavailable" end
-    if not Silent.bodyTouchesFOV(camera, chest) then
+    if not Silent.gunBodyTouchesFOV(camera, target, chest) then
         return nil, "Silent: target outside circle"
     end
-    if state.aimVisibleOnly and not state.wallbang then
-        local rayOrigin = typeof(origin) == "CFrame" and origin.Position or camera.CFrame.Position
-        if not Silent.isFiniteAimVector(rayOrigin) then return nil, "Silent: aim data unavailable" end
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = {mine}
-        params.IgnoreWater = true
-        local hit = Workspace:Raycast(rayOrigin, predicted - rayOrigin, params)
-        if hit and (not hit.Instance or not hit.Instance:IsDescendantOf(target.Parent)) then
-            return nil, "Silent: path blocked"
-        end
-    end
+    local searching
+    predicted, searching = Silent.visibleAimPosition(target, chest, origin, predicted, preview)
+    if not predicted then return nil, searching and "Silent: checking exposed edges" or "Silent: path blocked" end
     return CFrame.new(predicted), "Silent: target ready; hit unverified"
 end
 
@@ -4654,23 +4784,26 @@ local function getRoot()
     return character:FindFirstChild("HumanoidRootPart")
 end
 
+-- Shared rotation owner: Spin has priority over the source's ground/air Strafe.
 local function stopRegularSpin()
     local root, humanoid = spinState.root, spinState.humanoid
     local anotherOwner = flingBusy or (flyObjects.active and flyObjects.humanoid == humanoid)
     if not anotherOwner then
         if root and root.Parent and spinState.velocity then
-            pcall(function() root.AssemblyAngularVelocity = spinState.velocity end)
+            local velocity = spinState.mode == "strafe" and Vector3.zero or spinState.velocity
+            pcall(function() root.AssemblyAngularVelocity = velocity end)
         end
         if humanoid and humanoid.Parent and humanoid.AutoRotate == false then
             pcall(function() humanoid.AutoRotate = spinState.autoRotate end)
         end
     end
     spinState.root, spinState.humanoid, spinState.velocity = nil, nil, nil
-    spinState.autoRotate, spinState.yaw = nil, nil
+    spinState.autoRotate, spinState.yaw, spinState.mode = nil, nil, nil
 end
 
 function UIRefs.stepRegularSpin(deltaTime)
-    if not state.spin or state.unloaded or state.fly or state.coinFarm or teleportBusy or flingBusy then
+    if state.unloaded or state.fly or state.coinFarm or teleportBusy or flingBusy
+        or not (state.spin or state.strafe or state.airStrafe) then
         stopRegularSpin()
         return
     end
@@ -4680,22 +4813,52 @@ function UIRefs.stepRegularSpin(deltaTime)
         stopRegularSpin()
         return
     end
+    local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
+    local strafeActive = (grounded and state.strafe) or (not grounded and state.airStrafe)
+    if not state.spin and (not strafeActive or not windowFocused or UIS:GetFocusedTextBox()) then
+        stopRegularSpin()
+        return
+    end
     if spinState.root ~= root or spinState.humanoid ~= humanoid then
         stopRegularSpin()
-        local look = root.CFrame.LookVector
         spinState.root, spinState.humanoid = root, humanoid
         spinState.velocity, spinState.autoRotate = root.AssemblyAngularVelocity, humanoid.AutoRotate
-        spinState.yaw = math.atan2(-look.X, -look.Z)
     end
-    -- Keep an absolute yaw: Shift Lock can replace the root orientation earlier
-    -- in this frame. Multiplying its CFrame by a small delta would never accumulate.
     humanoid.AutoRotate = false
-    local dt = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
-    local speed = math.clamp(values.spinSpeed, CONFIG.MinSpinSpeed, CONFIG.MaxSpinSpeed)
-    spinState.yaw = (spinState.yaw + math.rad(speed) * dt) % (math.pi * 2)
-    root.AssemblyAngularVelocity = Vector3.zero
-    root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, spinState.yaw, 0)
-    -- Position and linear velocity belong to walking/jumping, never to Spin.
+    if state.spin then
+        if spinState.mode ~= "spin" then
+            local look = root.CFrame.LookVector
+            spinState.yaw = math.atan2(-look.X, -look.Z)
+        end
+        spinState.mode = "spin"
+        -- Absolute yaw keeps Spin accumulating while walking with Shift Lock.
+        local dt = math.clamp(tonumber(deltaTime) or 0, 0, 0.1)
+        local speed = math.clamp(values.spinSpeed, CONFIG.MinSpinSpeed, CONFIG.MaxSpinSpeed)
+        spinState.yaw = (spinState.yaw + math.rad(speed) * dt) % (math.pi * 2)
+        root.AssemblyAngularVelocity = Vector3.zero
+        root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, spinState.yaw, 0)
+    else
+        spinState.mode, spinState.yaw = "strafe", nil
+        -- Strafe from the supplied code: instantly face the horizontal MoveDirection.
+        -- Leave position, walking speed and all linear/jump velocity untouched.
+        local move = humanoid.MoveDirection
+        local horizontal = Vector3.new(move.X, 0, move.Z)
+        if horizontal.Magnitude > 0.05 then
+            horizontal = horizontal.Unit
+            root.CFrame = CFrame.lookAt(root.Position, root.Position + horizontal)
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
+end
+
+local function rotationFailed(reason)
+    state.spin, state.strafe, state.airStrafe = false, false, false
+    for _, key in ipairs({"setSpinToggle", "setStrafeToggle", "setAirStrafeToggle"}) do
+        if UIRefs[key] then pcall(UIRefs[key], false) end
+    end
+    UIRefs.setSpinBinding(false)
+    warn("[SYDJA HUB] Movement rotation stopped: " .. tostring(reason))
+    if UIRefs.Status then UIRefs.Status.Text = "Movement rotation stopped: see console" end
 end
 
 function UIRefs.setSpinBinding(enabled)
@@ -4711,14 +4874,7 @@ function UIRefs.setSpinBinding(enabled)
     local ok, err = pcall(function()
         RunService:BindToRenderStep(spinState.bindingName, Enum.RenderPriority.Character.Value + 1, function(dt)
             local stepped, stepError = pcall(UIRefs.stepRegularSpin, dt)
-            if not stepped then
-                if UIRefs.setSpinToggle then UIRefs.setSpinToggle(false) else
-                    state.spin = false
-                    UIRefs.setSpinBinding(false)
-                end
-                warn("[ScriptMM2] Spin stopped: " .. tostring(stepError))
-                if UIRefs.Status then UIRefs.Status.Text = "Spin stopped: see console" end
-            end
+            if not stepped then rotationFailed(stepError) end
         end)
     end)
     if not ok then
@@ -4728,6 +4884,13 @@ function UIRefs.setSpinBinding(enabled)
     spinState.bound = true
     return true
 end
+
+function UIRefs.syncMovementRotation()
+    local enabled = not state.unloaded and (state.spin or state.strafe or state.airStrafe)
+    local ok, err = UIRefs.setSpinBinding(enabled)
+    if not ok then rotationFailed(err) end
+end
+
 
 local function isAliveCharacter(player)
     local character = player.Character
@@ -4796,7 +4959,7 @@ local function isPointerEnd(input, source)
         and input.UserInputType == Enum.UserInputType.MouseButton1
 end
 
--- V1.0.7 PC: graphite / white design; common style for toggles and selected tabs.
+-- V1.1 PC: graphite / white design; common style for toggles and selected tabs.
 local UITheme = {
     panel = Color3.fromRGB(15, 21, 29), surface = Color3.fromRGB(27, 33, 44),
     item = Color3.fromRGB(31, 38, 49), active = Color3.fromRGB(43, 51, 64),
@@ -4820,6 +4983,31 @@ local Localization = {language = "en", sources = setmetatable({}, {__mode = "k"}
     rendered = setmetatable({}, {__mode = "k"}), busy = setmetatable({}, {__mode = "k"})}
 do
 local TEXT_TRANSLATIONS = {
+    ["Version Checker"] = {ru="Проверка версии", uk="Перевірка версії", de="Versionsprüfung"},
+    ["Check for Updates"] = {ru="Проверить обновления", uk="Перевірити оновлення", de="Nach Updates suchen"},
+    ["Load Latest Version"] = {ru="Загрузить последнюю версию", uk="Завантажити останню версію", de="Neueste Version laden"},
+    ["Current Version: "] = {ru="Текущая версия: ", uk="Поточна версія: ", de="Aktuelle Version: "},
+    ["Latest Version: "] = {ru="Последняя версия: ", uk="Остання версія: ", de="Neueste Version: "},
+    ["Latest Version: not checked"] = {ru="Последняя версия: не проверено", uk="Остання версія: не перевірено", de="Neueste Version: noch nicht geprüft"},
+    ["Latest Version: checking..."] = {ru="Последняя версия: проверка...", uk="Остання версія: перевірка...", de="Neueste Version: wird geprüft..."},
+    ["Latest Version: unavailable"] = {ru="Последняя версия: недоступна", uk="Остання версія: недоступна", de="Neueste Version: nicht verfügbar"},
+    ["You are using the latest version"] = {ru="У тебя последняя версия", uk="Ти використовуєш останню версію", de="Du verwendest die neueste Version"},
+    ["Update available: "] = {ru="Доступно обновление: ", uk="Доступне оновлення: ", de="Update verfügbar: "},
+    ["Press Check for Updates to check GitHub."] = {ru="Нажми «Проверить обновления», чтобы проверить GitHub.", uk="Натисни «Перевірити оновлення», щоб перевірити GitHub.", de="Klicke auf „Nach Updates suchen“, um GitHub zu prüfen."},
+    ["Checking..."] = {ru="Проверка...", uk="Перевірка...", de="Wird geprüft..."},
+    ["Loading..."] = {ru="Загрузка...", uk="Завантаження...", de="Wird geladen..."},
+    ["Checking GitHub for updates..."] = {ru="Проверка обновлений на GitHub...", uk="Перевірка оновлень на GitHub...", de="GitHub wird auf Updates geprüft..."},
+    ["Version Checker failed. Please try again."] = {ru="Ошибка проверки версии. Попробуй снова.", uk="Помилка перевірки версії. Спробуй знову.", de="Versionsprüfung fehlgeschlagen. Bitte erneut versuchen."},
+    ["version.txt was not found on GitHub. Add it to the repository root."] = {ru="Файл version.txt не найден на GitHub. Добавь его в корень репозитория.", uk="Файл version.txt не знайдено на GitHub. Додай його до кореня репозиторію.", de="version.txt fehlt auf GitHub. Lege die Datei im Stammordner des Repositorys an."},
+    ["Could not reach GitHub. Check your connection and try again."] = {ru="GitHub недоступен. Проверь соединение и попробуй снова.", uk="GitHub недоступний. Перевір з’єднання та спробуй знову.", de="GitHub ist nicht erreichbar. Prüfe die Verbindung und versuche es erneut."},
+    ["Invalid version.txt. Use a version such as 1.1.0."] = {ru="Неверный version.txt. Укажи версию, например 1.1.0.", uk="Некоректний version.txt. Укажи версію, наприклад 1.1.0.", de="Ungültige version.txt. Verwende eine Version wie 1.1.0."},
+    ["Downloading the latest version..."] = {ru="Загрузка последней версии...", uk="Завантаження останньої версії...", de="Neueste Version wird heruntergeladen..."},
+    ["Could not download the latest version from GitHub. Try again."] = {ru="Не удалось скачать последнюю версию с GitHub. Попробуй снова.", uk="Не вдалося завантажити останню версію з GitHub. Спробуй знову.", de="Neueste Version konnte nicht von GitHub geladen werden. Bitte erneut versuchen."},
+    ["GitHub returned an empty script. Please try again."] = {ru="GitHub вернул пустой скрипт. Попробуй снова.", uk="GitHub повернув порожній скрипт. Спробуй знову.", de="GitHub hat ein leeres Skript zurückgegeben. Bitte erneut versuchen."},
+    ["Could not compile the latest script. Please try again."] = {ru="Не удалось скомпилировать последний скрипт. Попробуй снова.", uk="Не вдалося скомпілювати останній скрипт. Спробуй знову.", de="Das neueste Skript konnte nicht kompiliert werden. Bitte erneut versuchen."},
+    ["Starting the latest version..."] = {ru="Запуск последней версии...", uk="Запуск останньої версії...", de="Neueste Version wird gestartet..."},
+    ["Could not start the latest script. See console for details."] = {ru="Не удалось запустить последний скрипт. Подробности в консоли.", uk="Не вдалося запустити останній скрипт. Подробиці в консолі.", de="Das neueste Skript konnte nicht gestartet werden. Details in der Konsole."},
+    ["Latest script started."] = {ru="Последний скрипт запущен.", uk="Останній скрипт запущено.", de="Neuestes Skript gestartet."},
     ["Crash SYDJA HUB"] = {ru="Crash SYDJA HUB", uk="Crash SYDJA HUB", de="Crash SYDJA HUB"},
     ["Watermark"] = {ru="Ватермарка", uk="Водяний знак", de="Wasserzeichen"},
     ["WHITE"] = {ru="БЕЛЫЙ", uk="БІЛИЙ", de="WEISS"},
@@ -4883,6 +5071,8 @@ local TEXT_TRANSLATIONS = {
     ["Silent: weapon unavailable"] = {ru="Silent: оружие недоступно", uk="Silent: зброя недоступна", de="Silent: Waffe nicht verfügbar"},
     ["Silent: target unavailable"] = {ru="Silent: цель недоступна", uk="Silent: ціль недоступна", de="Silent: Ziel nicht verfügbar"},
     ["Silent: target outside circle"] = {ru="Silent: цель вне круга", uk="Silent: ціль поза колом", de="Silent: Ziel außerhalb des Kreises"},
+    ["Silent: checking exposed edges"] = {ru="Silent: поиск открытого участка", uk="Silent: пошук відкритої ділянки", de="Silent: suche freie Körperstelle"},
+    ["Silent: shot cancelled; no clear point found"] = {ru="Silent: открытая точка не найдена", uk="Silent: відкриту точку не знайдено", de="Silent: keine freie Stelle gefunden"},
     ["Silent: path blocked"] = {ru="Silent: линия выстрела перекрыта", uk="Silent: лінію пострілу перекрито", de="Silent: Schussweg blockiert"},
     ["Silent: target ready; hit unverified"] = {ru="Silent: цель готова; попадание не подтверждено", uk="Silent: ціль готова; влучання не підтверджено", de="Silent: Ziel bereit; Treffer unbestätigt"},
     ["Silent: shot sent; hit unverified"] = {ru="Silent: выстрел отправлен; попадание не подтверждено", uk="Silent: постріл надіслано; влучання не підтверджено", de="Silent: Schuss gesendet; Treffer unbestätigt"},
@@ -4901,12 +5091,13 @@ local TEXT_TRANSLATIONS = {
     ["Fly"] = {ru="Полёт", uk="Політ", de="Fliegen"},
     ["Infinite Jump"] = {ru="Бесконечный прыжок", uk="Нескінченний стрибок", de="Endlos springen"},
     ["Bunny Hop"] = {ru="Автопрыжки", uk="Автострибки", de="Automatisch springen"},
-    ["Air Strafe"] = {ru="Управление в воздухе", uk="Керування в повітрі", de="Luftsteuerung"},
+    ["Strafe"] = {ru="Стрейф", uk="Стрейф", de="Strafe"},
+    ["AirStrafe"] = {ru="Стрейф в воздухе", uk="Стрейф у повітрі", de="Luft-Strafe"},
+    ["Movement rotation stopped: see console"] = {ru="Вращение остановлено: см. консоль", uk="Обертання зупинено: див. консоль", de="Drehung gestoppt: siehe Konsole"},
     ["Long Jump (press Jump)"] = {ru="Дальний прыжок (нажми прыжок)", uk="Далекий стрибок (натисни стрибок)", de="Weitsprung (Springen drücken)"},
     ["Ultra Long Jump (100k studs)"] = {ru="Ультрадальний прыжок (100 тыс. studs)", uk="Ультрадалекий стрибок (100 тис. studs)", de="Ultraweitsprung (100.000 Studs)"},
     ["WalkSpeed"] = {ru="Скорость ходьбы", uk="Швидкість ходьби", de="Lauftempo"},
     ["FlySpeed"] = {ru="Скорость полёта", uk="Швидкість польоту", de="Flugtempo"},
-    ["StrafeSpeed"] = {ru="Скорость стрейфа", uk="Швидкість стрейфу", de="Strafe-Tempo"},
     ["Long Jump Speed"] = {ru="Скорость дальнего прыжка", uk="Швидкість далекого стрибка", de="Weitsprungtempo"},
     ["AimLock Murderer [B]"] = {ru="Наводка на убийцу [B]", uk="Наведення на вбивцю [B]", de="Zielerfassung Mörder [B]"},
     ["Silent Revolver (experimental)"] = {ru="Тихий револьвер (эксперимент)", uk="Тихий револьвер (експеримент)", de="Silent-Revolver (experimentell)"},
@@ -4915,7 +5106,31 @@ local TEXT_TRANSLATIONS = {
     ["Silent Revolver"] = {ru="Тихий револьвер", uk="Тихий револьвер", de="Silent-Revolver"},
     ["Silent V2 armed: one client shot; server hit unverified"] = {ru="Silent V2 включён: один выстрел; серверное попадание не проверено", uk="Silent V2 увімкнено: один постріл; серверне влучання не перевірено", de="Silent V2 aktiv: ein Schuss; Servertreffer ungeprüft"},
     ["Xeno Silent Gun: FOV target enabled • server hit unverified"] = {ru="Xeno Silent Gun: цель в FOV • попадание сервером не проверено", uk="Xeno Silent Gun: ціль у FOV • влучання сервером не перевірене", de="Xeno Silent Gun: FOV-Ziel aktiv • Servertreffer ungeprüft"},
-    ["Silent Knife Throw (short lead)"] = {ru="Тихий бросок ножа (упреждение)", uk="Тихий кидок ножа (випередження)", de="Silent-Messerwurf (kurzer Vorhalt)"},
+    ["Silent Knife ON: throws only"] = {ru="Тихий нож ВКЛ: броски ножа", uk="Тихий ніж УВІМК: кидки ножа", de="Silent-Messer AN: Messerwürfe"},
+    ["Knife: OFF"] = {ru="Нож: ВЫКЛ", uk="Ніж: ВИМК", de="Messer: AUS"},
+    ["Knife: equip knife"] = {ru="Нож: возьми нож в руки", uk="Ніж: візьми ніж у руки", de="Messer: Messer ausrüsten"},
+    ["Knife: weapon unavailable"] = {ru="Нож: оружие недоступно", uk="Ніж: зброя недоступна", de="Messer: Waffe nicht verfügbar"},
+    ["Knife: weapon cooling down"] = {ru="Нож: перезарядка", uk="Ніж: перезаряджання", de="Messer: Abklingzeit"},
+    ["Knife: throw remote unavailable"] = {ru="Нож: обработчик броска недоступен", uk="Ніж: обробник кидка недоступний", de="Messer: Wurf-Remote fehlt"},
+    ["Knife: aim data unavailable"] = {ru="Нож: данные цели недоступны", uk="Ніж: дані цілі недоступні", de="Messer: Zieldaten fehlen"},
+    ["Knife: target unavailable"] = {ru="Нож: цель недоступна", uk="Ніж: ціль недоступна", de="Messer: Ziel nicht verfügbar"},
+    ["Knife: target outside circle"] = {ru="Нож: цель вне круга", uk="Ніж: ціль поза колом", de="Messer: Ziel außerhalb des Kreises"},
+    ["Knife: path blocked"] = {ru="Нож: путь перекрыт", uk="Ніж: шлях перекрито", de="Messer: Weg blockiert"},
+    ["Knife: target ready; hit unverified"] = {ru="Нож: цель выбрана; попадание не подтверждено", uk="Ніж: ціль обрано; влучання не підтверджено", de="Messer: Ziel bereit; Treffer unbestätigt"},
+    ["Knife: throw redirected; hit unverified"] = {ru="Нож: бросок направлен; попадание не подтверждено", uk="Ніж: кидок спрямовано; влучання не підтверджено", de="Messer: Wurf umgelenkt; Treffer unbestätigt"},
+    ["Knife: cannot connect (see status)"] = {ru="Нож: подключение недоступно (см. статус)", uk="Ніж: підключення недоступне (див. статус)", de="Messer: Verbindung fehlt (siehe Status)"},
+    ["SILENT KNIFE"] = {ru="ТИХИЙ НОЖ", uk="ТИХИЙ НІЖ", de="SILENT-MESSER"},
+    ["Knife FOV"] = {ru="Круг ножа", uk="Коло ножа", de="Messer-FOV"},
+    ["Knife Prediction"] = {ru="Предикт ножа", uk="Передбачення ножа", de="Messer-Vorhalt"},
+    ["Visible Check"] = {ru="Проверка видимости ножа", uk="Перевірка видимості ножа", de="Messer-Sichtprüfung"},
+    ["Knife Prediction: 0 disables; 100 uses your ping."] = {ru="Предикт ножа: 0 выключает; 100 учитывает твой пинг.", uk="Передбачення ножа: 0 вимикає; 100 враховує твій пінг.", de="Messer-Vorhalt: 0 deaktiviert; 100 berücksichtigt deinen Ping."},
+    ["Knife: waiting for Knife"] = {ru="Нож: ожидание Knife", uk="Ніж: очікування Knife", de="Messer: warte auf Knife"},
+    ["Knife: waiting for Events / KnifeClient"] = {ru="Нож: ожидание Events / KnifeClient", uk="Ніж: очікування Events / KnifeClient", de="Messer: warte auf Events / KnifeClient"},
+    ["Knife: cannot connect to targeting (see console)"] = {ru="Нож: не удалось подключить наведение (см. консоль)", uk="Ніж: не вдалося підключити наведення (див. консоль)", de="Messer: Zielhilfe nicht verfügbar (siehe Konsole)"},
+    ["Knife: waiting for WeaponService"] = {ru="Нож: ожидание WeaponService", uk="Ніж: очікування WeaponService", de="Messer: warte auf WeaponService"},
+    ["Knife: waiting for Handle"] = {ru="Нож: ожидание Handle", uk="Ніж: очікування Handle", de="Messer: warte auf Handle"},
+    ["Knife: adapter failed (see console)"] = {ru="Нож: ошибка адаптера (см. консоль)", uk="Ніж: помилка адаптера (див. консоль)", de="Messer: Adapterfehler (siehe Konsole)"},
+    ["Silent Knife"] = {ru="Тихий нож", uk="Тихий ніж", de="Silent-Messer"},
     ["B AimLock prediction (ms)"] = {ru="Упреждение AimLock B (мс)", uk="Випередження AimLock B (мс)", de="AimLock-B-Vorhalt (ms)"},
     ["B Jump prediction (ms)"] = {ru="Упреждение прыжка B (мс)", uk="Випередження стрибка B (мс)", de="B-Sprungvorhersage (ms)"},
     ["Air prediction (ms)"] = {ru="Упреждение в воздухе (мс)", uk="Випередження в повітрі (мс)", de="Luft-Vorhersage (ms)"},
@@ -4925,12 +5140,18 @@ local TEXT_TRANSLATIONS = {
     ["Wallbang (experimental)"] = {ru="Стрельба через стены (эксперимент)", uk="Стрільба крізь стіни (експеримент)", de="Wallbang (experimentell)"},
     ["AntiFling"] = {ru="Антифлинг", uk="Антифлінг", de="Anti-Fling"},
     ["YARHM Fling Murderer"] = {ru="YARHM: флинг убийцы", uk="YARHM: флінг убивці", de="YARHM: Mörder schleudern"},
+    ["YARHM Fling Hero"] = {ru="YARHM: флинг героя", uk="YARHM: флінг героя", de="YARHM: Held schleudern"},
+    ["Spectate Hero"] = {ru="Смотреть за героем", uk="Дивитися за героєм", de="Held beobachten"},
+    ["Fling: waiting for living Hero"] = {ru="Флинг: ожидание живого героя", uk="Флінг: очікування живого героя", de="Fling: warte auf lebenden Held"},
+    ["Stop Hero Fling"] = {ru="Остановить флинг героя", uk="Зупинити флінг героя", de="Held-Fling stoppen"},
+    ["Spectate: waiting for Hero..."] = {ru="Наблюдение: ожидание героя...", uk="Спостереження: очікування героя...", de="Beobachten: warte auf Held..."},
+    [" • Hero"] = {ru=" • Герой", uk=" • Герой", de=" • Held"},
     ["YARHM Fling Sheriff"] = {ru="YARHM: флинг шерифа", uk="YARHM: флінг шерифа", de="YARHM: Sheriff schleudern"},
     ["WATCH A ROLE"] = {ru="НАБЛЮДЕНИЕ ЗА РОЛЬЮ", uk="СПОСТЕРЕЖЕННЯ ЗА РОЛЛЮ", de="ROLLE BEOBACHTEN"},
     ["Spectate Murderer"] = {ru="Смотреть за убийцей", uk="Дивитися за вбивцею", de="Mörder beobachten"},
     ["Spectate Sheriff"] = {ru="Смотреть за шерифом", uk="Дивитися за шерифом", de="Sheriff beobachten"},
     ["Return to My Camera"] = {ru="Вернуть свою камеру", uk="Повернути свою камеру", de="Zur eigenen Kamera"},
-    ["Select Murderer, Sheriff, or a player below."] = {ru="Выбери убийцу, шерифа или игрока ниже.", uk="Обери вбивцю, шерифа або гравця нижче.", de="Wähle Mörder, Sheriff oder einen Spieler unten."},
+    ["Select Murderer, Sheriff, Hero, or a player below."] = {ru="Выбери убийцу, шерифа, героя или игрока ниже.", uk="Обери вбивцю, шерифа, героя або гравця нижче.", de="Wähle Mörder, Sheriff, Held oder einen Spieler unten."},
     ["PLAYERS (CLICK TO WATCH)"] = {ru="ИГРОКИ (НАЖМИ ДЛЯ ПРОСМОТРА)", uk="ГРАВЦІ (НАТИСНИ ДЛЯ ПЕРЕГЛЯДУ)", de="SPIELER (KLICKEN ZUM ZUSCHAUEN)"},
     ["TELEPORT TO PLAYER"] = {ru="ТП К ИГРОКУ", uk="ТП ДО ГРАВЦЯ", de="ZU SPIELER TELEPORTIEREN"},
     ["BRING (LOCAL / SERVER UNVERIFIED)"] = {ru="ПРИТЯГИВАНИЕ (ЛОКАЛЬНО / СЕРВЕР НЕ ПОДТВЕРЖДЁН)", uk="ПРИТЯГУВАННЯ (ЛОКАЛЬНО / СЕРВЕР НЕ ПІДТВЕРДЖЕНО)", de="HERANHOLEN (LOKAL / SERVER UNBESTÄTIGT)"},
@@ -5200,7 +5421,7 @@ local function translateText(source)
     end
     -- Dynamic role button labels retain their ON/OFF suffix and remain translatable.
     if result == source then
-        for _, prefix in ipairs({"Spectate Murderer", "Spectate Sheriff", "Bring All"}) do
+        for _, prefix in ipairs({"Spectate Murderer", "Spectate Sheriff", "Spectate Hero", "Bring All"}) do
             if string.sub(source, 1, #prefix) == prefix and TEXT_TRANSLATIONS[prefix] then
                 result = TEXT_TRANSLATIONS[prefix][lang] .. string.sub(source, #prefix + 1)
                 break
@@ -5348,14 +5569,14 @@ create("UICorner", {
     CornerRadius = UDim.new(0, 16),
 }, UIRefs.TopBar)
 UIRefs.MenuLogo = UIRefs.Brand.make(create, UIRefs.TopBar, {
-    Name = "SYDJAMenuLogo", Position = UDim2.fromOffset(28, 20), Size = UDim2.fromOffset(44, 44),
+    Name = "SYDJAMenuLogo", Position = UDim2.fromOffset(28, 10), Size = UDim2.fromOffset(64, 64),
     BackgroundColor3 = Color3.fromRGB(255, 255, 255), BackgroundTransparency = 1, BorderSizePixel = 0,
 })
 UIRefs.Title = create("TextLabel", {
     Name = "Title",
     BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(88, 23),
-    Size = UDim2.new(1, -112, 0, 29),
+    Position = UDim2.fromOffset(108, 23),
+    Size = UDim2.new(1, -132, 0, 29),
     Font = Enum.Font.GothamBold,
     Text = "SYDJA HUB",
     TextColor3 = UITheme.text,
@@ -5366,8 +5587,8 @@ UIRefs.Title = create("TextLabel", {
 UIRefs.Status = create("TextLabel", {
     Name = "Status",
     BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(89, 57),
-    Size = UDim2.new(1, -112, 0, 20),
+    Position = UDim2.fromOffset(109, 57),
+    Size = UDim2.new(1, -132, 0, 20),
     Font = Enum.Font.Gotham,
     Text = "Mouse4 (G) = hide/show • B = AimLock",
     TextColor3 = UITheme.muted,
@@ -5945,10 +6166,13 @@ UIRefs.bunnyButton, UIRefs.setBunnyToggle = addToggle("Bunny Hop", 7, function(e
     state.bunnyHop = enabled
 end)
 
-UIRefs.strafeButton = nil
-UIRefs.setStrafeToggle = nil
-UIRefs.strafeButton, UIRefs.setStrafeToggle = addToggle("Air Strafe", 8, function(enabled)
+UIRefs.strafeButton, UIRefs.setStrafeToggle = addToggle("Strafe", 8, function(enabled)
     state.strafe = enabled
+    UIRefs.syncMovementRotation()
+end)
+UIRefs.airStrafeButton, UIRefs.setAirStrafeToggle = addToggle("AirStrafe", 8.05, function(enabled)
+    state.airStrafe = enabled
+    UIRefs.syncMovementRotation()
 end)
 
 UIRefs.longJumpButton, UIRefs.setLongJumpToggle = addToggle("Long Jump (press Jump)", 8.1, function(enabled)
@@ -5980,11 +6204,6 @@ UIRefs._unused, UIRefs.setFlySpeedSliderValue = addSlider("FlySpeed", CONFIG.Min
     values.flySpeed = value
 end)
 UIRefs.setFlySpeedSlider = UIRefs.setFlySpeedSliderValue
-
-UIRefs._unused, UIRefs.setStrafeSpeedSliderValue = addSlider("StrafeSpeed", CONFIG.MinStrafeSpeed, CONFIG.MaxStrafeSpeed, values.strafeSpeed, 12, function(value)
-    values.strafeSpeed = value
-end)
-UIRefs.setStrafeSpeedSlider = UIRefs.setStrafeSpeedSliderValue
 
 UIRefs._unused, UIRefs.setLongJumpSpeedSliderValue = addSlider("Long Jump Speed", CONFIG.MinLongJumpSpeed, CONFIG.MaxLongJumpSpeed, values.longJumpSpeed, 12.1, function(value)
     values.longJumpSpeed = value
@@ -6087,20 +6306,422 @@ UIRefs._unused, UIRefs.setSilentGunToggle = addToggle("Silent Revolver", 14.101,
         if not state.unloaded then UIRefs.Status.Text = "Silent Revolver OFF" end
     end
 end)
-UIRefs.setSilentKnifeToggle = nil
-UIRefs._unused, UIRefs.setSilentKnifeToggle = addToggle("Silent Knife Throw (short lead)", 14.102, function(enabled)
-    if enabled then
-        local ok, why = Silent.install()
-        state.silentKnife = ok
-        if not ok then UIRefs.setSilentKnifeToggle(false); UIRefs.Status.Text = "Silent Knife OFF: " .. tostring(why); return end
-    else state.silentKnife = false end
-    UIRefs.Status.Text = state.silentKnife and "Silent Knife armed • no auto throw • server unverified" or "Silent Knife OFF"
+--// BEGIN SYDJA SILENT KNIFE
+-- The supplied KnifeClient charges first, then gets its target from WeaponService:
+--     throwKnife(v1:GetMouseTargetCFrame())
+--     local v40 = v1:GetTargetPosition(x, y); throwKnife(v40)  -- touch hold
+-- Its original throwKnife sends Events.KnifeThrown(Handle.CFrame, target).
+-- Keep that function, its two arguments, input, cooldowns, stab and animations intact.
+-- Wrap only the returned target. No remote interception or executor-only API is used.
+UIRefs.KnifeThrowAdapter = {}
+function UIRefs.KnifeThrowAdapter.connect(knife, resolveAimPoint)
+    local services = ReplicatedStorage:FindFirstChild("ClientServices")
+    local module = services and services:FindFirstChild("WeaponService")
+    if not module or not module:IsA("ModuleScript") then return nil, "Knife: waiting for WeaponService" end
+    local handle = knife:FindFirstChild("Handle")
+    if not handle or not handle:IsA("BasePart") then return nil, "Knife: waiting for Handle" end
+    local ok, service = pcall(require, module)
+    if not ok or type(service) ~= "table" then
+        warn("[SYDJA HUB Knife] WeaponService unavailable: " .. tostring(service))
+        return nil, "Knife: cannot connect to targeting (see console)"
+    end
+    local controller = UIRefs.KnifeSilent
+    if state.unloaded or not state.silentKnife or not controller or controller.disposed or controller.tool ~= knife then
+        return nil, "Knife: OFF"
+    end
+    if type(service.GetMouseTargetCFrame) ~= "function" then
+        return nil, "Knife: cannot connect to targeting (see console)"
+    end
+    local active, changes = true, {}
+    local function cleanup()
+        active = false
+        for i = #changes, 1, -1 do
+            local entry = changes[i]
+            if service[entry.name] == entry.wrapper then
+                local restored, err = pcall(function() service[entry.name] = entry.original end)
+                if not restored then warn("[SYDJA HUB Knife] Restore failed: " .. tostring(err)) end
+            end
+        end
+        table.clear(changes)
+    end
+    local function canRedirect()
+        local character = LocalPlayer.Character
+        if not active or not controller.isEquipped() or handle.Parent ~= knife then return false end
+        -- WeaponService is shared: a simultaneous equipped Gun must keep its ordinary target.
+        local gun = character and character:FindFirstChild("Gun")
+        if gun and gun:IsA("Tool") then return false end
+        return knife:GetAttribute("Disabled") ~= true
+    end
+    for _, name in ipairs({"GetMouseTargetCFrame", "GetTargetPosition"}) do
+        local original = service[name]
+        if type(original) == "function" then
+            local function wrapper(self, ...)
+                local result = table.pack(original(self, ...))
+                if not canRedirect() then return table.unpack(result, 1, result.n) end
+                local target = result[1]
+                local kind = typeof(target)
+                if kind ~= "CFrame" and kind ~= "Vector3" then return table.unpack(result, 1, result.n) end
+                local point = kind == "CFrame" and target.Position or target
+                local resolved, redirected = resolveAimPoint(handle.CFrame.Position, point)
+                if redirected and Silent.isFiniteAimVector(resolved) then
+                    -- Aim CFrame keeps the target position and points toward it. KnifeClient still owns the send.
+                    local direction = resolved-handle.CFrame.Position
+                    result[1] = kind == "CFrame" and (direction.Magnitude > .001
+                        and CFrame.lookAt(resolved, resolved+direction) or CFrame.new(resolved)) or resolved
+                end
+                return table.unpack(result, 1, result.n)
+            end
+            local installed, err = pcall(function() service[name] = wrapper end)
+            if not installed or service[name] ~= wrapper then
+                cleanup()
+                warn("[SYDJA HUB Knife] Target provider cannot be changed: " .. tostring(err))
+                return nil, "Knife: cannot connect to targeting (see console)"
+            end
+            table.insert(changes, {name = name, original = original, wrapper = wrapper})
+        end
+    end
+    return cleanup
+end
+
+do
+    local K = {tool = nil, connected = false, disposed = false,
+        bindingGeneration = 0, playerLinks = {}, characterLinks = {}, bagLinks = {}, toolLinks = {}}
+    UIRefs.KnifeSilent = K
+    local function disconnect(links)
+        for i = #links, 1, -1 do pcall(function() links[i]:Disconnect() end); links[i] = nil end
+    end
+    local function listen(event, callback, links)
+        if event then table.insert(links, event:Connect(callback)) end
+    end
+    function K.resetPrediction() K.network = nil end
+    function K.message(message)
+        if state.unloaded or K.disposed then return end
+        K.status = message
+        if UIRefs.knifeSilentStatus then Localization.setText(UIRefs.knifeSilentStatus, message) end
+        if UIRefs.knifeAimStatus then Localization.setText(UIRefs.knifeAimStatus, message) end
+    end
+    function K.detach()
+        K.bindingGeneration += 1
+        local connection = K.adapterConnection
+        K.adapterConnection, K.connected = nil, false
+        if connection then
+            local ok, err = pcall(function()
+                if type(connection) == "function" then connection() else connection:Disconnect() end
+            end)
+            if not ok then warn("[SYDJA HUB Knife] Adapter cleanup failed: " .. tostring(err)) end
+        end
+        K.resetPrediction()
+    end
+    function K.holdingKnife()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local gun = char and char:FindFirstChild("Gun")
+        return not state.unloaded and not K.disposed and K.tool ~= nil
+            and K.tool.Parent == char and hum ~= nil and hum.Health > 0
+            and not (gun and gun:IsA("Tool"))
+    end
+    function K.isEquipped() return state.silentKnife and K.holdingKnife() end
+    local function ownedKnife()
+        local char, bag = LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")
+        for _, container in ipairs({char or false, bag or false}) do
+            local knife = container and container:FindFirstChild("Knife")
+            if knife and knife:IsA("Tool") then return knife end
+        end
+        return nil
+    end
+    function K.context()
+        if state.unloaded or K.disposed or not state.silentKnife then return nil, "Knife: OFF" end
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return nil, "Knife: weapon unavailable" end
+        local knife = K.tool
+        if not knife or not knife.Parent then return nil, "Knife: waiting for Knife" end
+        if knife.Parent ~= char then return nil, "Knife: equip knife" end
+        local gun = char:FindFirstChild("Gun")
+        if gun and gun:IsA("Tool") then return nil, "Knife: equip knife" end
+        if knife:GetAttribute("Disabled") == true then return nil, "Knife: weapon unavailable" end
+        -- The real throw handler owns Tool.Enabled / charge / cooldown checks.
+        -- It may already have disabled the Tool when it resolves the throw point.
+        if not K.connected then return nil, K.bindingReason or "Knife: cannot connect to targeting (see console)" end
+        return knife
+    end
+    local function pingDelay()
+        local at = os.clock()
+        local network = K.network
+        if not network then network = {nextAt = 0, samples = {}}; K.network = network end
+        if at >= network.nextAt then
+            network.nextAt = at + 0.25
+            local ok, rtt = pcall(function() return LocalPlayer:GetNetworkPing() end)
+            if ok and type(rtt) == "number" and rtt == rtt and rtt >= 0 and rtt < math.huge then
+                if not network.goodAt or at - network.goodAt > 3 then table.clear(network.samples) end
+                table.insert(network.samples, math.clamp(rtt, 0, 2))
+                if #network.samples > 3 then table.remove(network.samples, 1) end
+                local sorted = table.clone(network.samples); table.sort(sorted)
+                network.rtt, network.goodAt = sorted[math.ceil(#sorted / 2)], at
+            end
+        end
+        if not network.goodAt or at - network.goodAt > 3 then return 0 end
+        -- Outgoing-delay estimate only; projectile flight speed is unknown in the supplied code.
+        return math.clamp(network.rtt * 0.5, 0, 0.12)
+    end
+    function K.predict(chest, root, humanoid)
+        local position = chest.Position
+        if not Silent.isFiniteAimVector(position) then return nil end
+        local scale = math.clamp(tonumber(values.knifePrediction) or 0, 0, 200) / 100
+        if scale <= 0 then return position end
+        local horizon = math.clamp(pingDelay() * scale, 0, 0.18)
+        if horizon <= 0 then return position end
+        local velocity = root.AssemblyLinearVelocity
+        if not Silent.isFiniteAimVector(velocity) then return position end
+        local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
+        if horizontal.Magnitude > 90 or math.abs(velocity.Y) > 90 then return position end
+        horizontal *= horizon
+        if horizontal.Magnitude > 2 then horizontal = horizontal.Unit * 2 end
+        local vertical = 0
+        local motionState = humanoid:GetState()
+        if humanoid.FloorMaterial == Enum.Material.Air and (motionState == Enum.HumanoidStateType.Jumping
+            or motionState == Enum.HumanoidStateType.Freefall) then
+            local gravity = tonumber(Workspace.Gravity) or 196.2
+            if gravity ~= gravity or gravity < 0 or gravity > 500 then gravity = 196.2 end
+            local size = chest.Size
+            local limit = Silent.isFiniteAimVector(size) and math.clamp(size.Y * 0.35, 0.35, 1.25) or 0.7
+            vertical = math.clamp(velocity.Y * horizon - 0.5 * gravity * horizon * horizon, -limit, limit)
+        end
+        local result = position + horizontal + Vector3.new(0, vertical, 0)
+        return Silent.isFiniteAimVector(result) and result or position
+    end
+    function K.selectTarget(origin, preview)
+        if not (K.isEquipped() or (preview and K.holdingKnife())) or state.spectateMurderer then return nil, "Knife: target unavailable" end
+        local camera = Workspace.CurrentCamera
+        if not camera then return nil, "Knife: target unavailable" end
+        if typeof(origin) == "CFrame" then origin = origin.Position end
+        if not Silent.isFiniteAimVector(origin) then origin = camera.CFrame.Position end
+        if not Silent.isFiniteAimVector(origin) then return nil, "Knife: aim data unavailable" end
+        local viewport = camera.ViewportSize
+        local best, bestDistance, inCircle = nil, math.huge, false
+        local radius = math.clamp(tonumber(values.knifeFOV) or 115, 35, 350)
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                local char = player.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                local role = rolesAvailable and roles[player.Name] or nil
+                local living = hum and hum.Health > 0 and not (type(role) == "table" and (role.Killed or role.Dead))
+                local root = living and char:FindFirstChild("HumanoidRootPart")
+                local chest = living and (char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or root)
+                if root and root:IsA("BasePart") and chest and chest:IsA("BasePart")
+                    and Silent.isFiniteAimVector(chest.Position) then
+                    local screen, visible = camera:WorldToViewportPoint(chest.Position)
+                    if visible and Silent.isFiniteAimVector(screen) and screen.Z > 0 then
+                        local dx, dy = screen.X - viewport.X * 0.5, screen.Y - viewport.Y * 0.5
+                        local distance = dx * dx + dy * dy
+                        if distance <= radius * radius and distance < bestDistance then
+                            inCircle = true
+                            local predicted = state.silentKnife and K.predict(chest, root, hum) or chest.Position
+                            if predicted and state.knifeVisibleOnly then
+                                local params = RaycastParams.new()
+                                params.FilterType = Enum.RaycastFilterType.Exclude
+                                params.FilterDescendantsInstances = {LocalPlayer.Character}
+                                params.IgnoreWater = true
+                                local function clear(point)
+                                    local hit = Workspace:Raycast(origin, point - origin, params)
+                                    return not hit or (hit.Instance and hit.Instance:IsDescendantOf(char))
+                                end
+                                if not clear(predicted) then
+                                    predicted = clear(chest.Position) and chest.Position or nil
+                                end
+                            end
+                            if predicted then best, bestDistance = predicted, distance end
+                        end
+                    end
+                end
+            end
+        end
+        return best, best and "Knife: target ready; hit unverified"
+            or inCircle and "Knife: path blocked" or "Knife: target outside circle"
+    end
+    function K.resolveAimPoint(knife, originalOrigin, originalTarget)
+        -- Called by the REAL throw handler through the connector. Stab never calls this.
+        if knife ~= K.tool or not K.context() or not Silent.isFiniteAimVector(originalOrigin)
+            or not Silent.isFiniteAimVector(originalTarget) then return originalTarget, false end
+        local ok, aim, reason = pcall(K.selectTarget, originalOrigin)
+        if not ok then K.message("Knife: aim data unavailable"); return originalTarget, false end
+        if aim then K.message("Knife: throw redirected; hit unverified"); return aim, true end
+        K.message(reason)
+        return originalTarget, false
+    end
+    function K.tryConnect()
+        K.detach()
+        if not state.silentKnife or state.unloaded or K.disposed or not K.tool then return end
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then K.bindingReason = "Knife: weapon unavailable"; K.message(K.bindingReason); return end
+        local knife = K.tool
+        local events, client = knife:FindFirstChild("Events"), knife:FindFirstChild("KnifeClient")
+        if not events or not events:FindFirstChild("KnifeThrown") or not events:FindFirstChild("KnifeStabbed")
+            or not events:FindFirstChild("HandleTouched") or not client or not client:IsA("LocalScript") then
+            K.bindingReason = "Knife: waiting for Events / KnifeClient"
+            K.message(K.bindingReason)
+            return
+        end
+        local generation = K.bindingGeneration
+        local ok, connection, reason = pcall(UIRefs.KnifeThrowAdapter.connect, knife, function(origin, target)
+            return K.resolveAimPoint(knife, origin, target)
+        end)
+        local valid = type(connection) == "function"
+            or typeof(connection) == "RBXScriptConnection"
+            or (type(connection) == "table" and type(connection.Disconnect) == "function")
+        if generation ~= K.bindingGeneration or knife ~= K.tool or not state.silentKnife or K.disposed then
+            if ok and valid then pcall(function() if type(connection) == "function" then connection() else connection:Disconnect() end end) end
+            return
+        end
+        K.adapterConnection, K.connected = ok and valid and connection or nil, ok and valid
+        if K.connected then
+            K.bindingReason = nil
+        elseif ok and type(reason) == "string" then
+            K.bindingReason = reason
+        else
+            K.bindingReason = "Knife: adapter failed (see console)"
+        end
+        if not ok then warn("[SYDJA HUB Knife] " .. tostring(connection)) end
+        K.message(K.connected and "Knife: equip knife" or (K.bindingReason or "Knife: cannot connect to targeting (see console)"))
+    end
+    function K.refreshTool()
+        if K.disposed or state.unloaded then return end
+        local knife = ownedKnife()
+        if knife == K.tool then return end
+        K.detach(); disconnect(K.toolLinks)
+        K.tool, K.bindingReason = knife, nil
+        if knife then
+            listen(knife.DescendantAdded, function(part)
+                if part.Name == "Handle" or part.Name == "Events" or part.Name == "KnifeClient" or part.Name == "KnifeThrown"
+                    or part.Name == "KnifeStabbed" or part.Name == "HandleTouched" then K.tryConnect() end
+            end, K.toolLinks)
+            listen(knife.AncestryChanged, K.refreshTool, K.toolLinks)
+        end
+        if state.silentKnife then K.tryConnect(); if not knife then K.message("Knife: waiting for Knife") end end
+    end
+    function K.bindCharacter(character)
+        K.detach(); disconnect(K.characterLinks); disconnect(K.toolLinks); K.tool = nil
+        if K.disposed then return end
+        if character then
+            listen(character.ChildAdded, function(child)
+                if child:IsA("Humanoid") then K.bindCharacter(character) else K.refreshTool() end
+            end, K.characterLinks)
+            listen(character.ChildRemoved, K.refreshTool, K.characterLinks)
+            local hum = character:FindFirstChildOfClass("Humanoid")
+            if hum then listen(hum.Died, function() K.detach(); K.message("Knife: weapon unavailable") end, K.characterLinks) end
+        end
+        K.refreshTool()
+    end
+    function K.bindBag(bag)
+        disconnect(K.bagLinks)
+        if bag then
+            listen(bag.ChildAdded, K.refreshTool, K.bagLinks)
+            listen(bag.ChildRemoved, K.refreshTool, K.bagLinks)
+        end
+        K.refreshTool()
+    end
+    function K.setEnabled(enabled)
+        local previous = K.tool
+        state.silentKnife = enabled
+        K.refreshTool()
+        if enabled then
+            if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(true) end
+            if previous == K.tool then K.tryConnect() end
+            if not K.tool then K.message("Knife: waiting for Knife") end
+        else K.detach(); K.message("Knife: OFF") end
+    end
+    function K.setAdapter(connector)
+        if type(connector) ~= "function" then return false, "Knife adapter must be a function" end
+        UIRefs.KnifeThrowAdapter.connect = connector
+        K.tryConnect()
+        return true
+    end
+    function K.attachOverlay()
+        UIRefs.knifeAimCircle = create("Frame", {Name = "KnifeFOV", AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(values.knifeFOV * 2, values.knifeFOV * 2),
+            BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false, ZIndex = 4}, UIRefs.AimCircleGui)
+        create("UICorner", {CornerRadius = UDim.new(1, 0)}, UIRefs.knifeAimCircle)
+        UIRefs.knifeAimStroke = create("UIStroke", {Thickness = 1, Transparency = 0.25,
+            Color = UITheme.accent}, UIRefs.knifeAimCircle)
+        UIRefs.knifeAimStatus = create("TextLabel", {Name = "KnifeAimStatus", AnchorPoint = Vector2.new(0.5, 0),
+            Size = UDim2.fromOffset(400, 42), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+            Text = "Knife: OFF", TextSize = 11, TextWrapped = true, Visible = false,
+            TextColor3 = UITheme.accent, ZIndex = 4}, UIRefs.AimCircleGui)
+        listen(LocalPlayer.CharacterAdded, K.bindCharacter, K.playerLinks)
+        listen(LocalPlayer.ChildAdded, function(child) if child:IsA("Backpack") then K.bindBag(child) end end, K.playerLinks)
+        listen(LocalPlayer.ChildRemoved, function(child) if child:IsA("Backpack") then K.bindBag(nil) end end, K.playerLinks)
+        listen(ReplicatedStorage.DescendantAdded, function(part)
+            if state.silentKnife and K.tool and not K.connected
+                and (part.Name == "ClientServices" or part.Name == "WeaponService") then K.tryConnect() end
+        end, K.playerLinks)
+        K.bindCharacter(LocalPlayer.Character); K.bindBag(LocalPlayer:FindFirstChild("Backpack"))
+        local elapsed = 0
+        K.previewConnection = RunService.Heartbeat:Connect(function(dt)
+            if K.disposed or state.unloaded then return end
+            elapsed += dt or 0; if elapsed < 0.10 then return end; elapsed = 0
+            local circle, caption = UIRefs.knifeAimCircle, UIRefs.knifeAimStatus
+            local visible = state.fovIndicator and K.holdingKnife() and not state.spectateMurderer
+            circle.Visible, caption.Visible = visible, visible
+            if not visible then return end
+            local _, reason = K.context()
+            if not state.silentKnife then reason = nil end
+            local handle = K.tool:FindFirstChild("Handle")
+            local origin = handle and handle:IsA("BasePart") and handle.Position or nil
+            local aim, targetReason
+            if not reason then aim, targetReason = K.selectTarget(origin, not state.silentKnife) end
+            local camera = Workspace.CurrentCamera
+            local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
+            circle.Size = UDim2.fromOffset(values.knifeFOV * 2, values.knifeFOV * 2)
+            caption.Position = UDim2.fromOffset(viewport.X * 0.5,
+                math.clamp(viewport.Y * 0.5 + values.knifeFOV + 14, 0, math.max(0, viewport.Y - 46)))
+            caption.Size = UDim2.fromOffset(math.max(80, math.min(400, viewport.X - 24)), 42)
+            local color = reason and Color3.fromRGB(245, 180, 65)
+                or aim and (state.silentKnife and Color3.fromRGB(80, 235, 120) or Color3.fromRGB(90, 165, 245))
+                or Color3.fromRGB(150, 150, 150)
+            UIRefs.knifeAimStroke.Color, caption.TextColor3 = color, color
+            K.message(not state.silentKnife and "Knife: OFF" or reason or targetReason or "Knife: target unavailable")
+        end)
+    end
+    function K.stop()
+        if K.disposed then return end
+        K.disposed = true; K.detach()
+        if K.previewConnection then K.previewConnection:Disconnect(); K.previewConnection = nil end
+        disconnect(K.playerLinks); disconnect(K.characterLinks); disconnect(K.bagLinks); disconnect(K.toolLinks)
+        K.tool = nil
+    end
+end
+--// END SYDJA SILENT KNIFE
+addSection("SILENT KNIFE", 14.201)
+UIRefs.silentKnifeButton, UIRefs.setSilentKnifeToggle = addToggle("Silent Knife", 14.202, function(enabled)
+    UIRefs.KnifeSilent.setEnabled(enabled)
 end)
+UIRefs.knifeFOVSlider, UIRefs.setKnifeFOV = addSlider("Knife FOV", 35, 350, values.knifeFOV, 14.204, function(value)
+    values.knifeFOV = value
+end)
+UIRefs.knifePredictionSlider, UIRefs.setKnifePrediction = addSlider("Knife Prediction", 0, 200,
+    values.knifePrediction, 14.205, function(value)
+        values.knifePrediction = value
+        UIRefs.KnifeSilent.resetPrediction()
+    end)
+UIRefs.knifeVisibleButton, UIRefs.setKnifeVisibleCheck = addToggle("Visible Check", 14.206, function(enabled)
+    state.knifeVisibleOnly = enabled
+end)
+UIRefs.setKnifeVisibleCheck(true)
+UIRefs.knifeSilentStatus = create("TextLabel", {Name = "KnifeSilentStatus", LayoutOrder = 14.207,
+    Size = UDim2.new(1, -4, 0, 46), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+    Text = "Knife: OFF", TextColor3 = UITheme.muted, TextSize = 12,
+    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left}, UIRefs.Content)
+create("TextLabel", {Name = "KnifePredictionHint", LayoutOrder = 14.208,
+    Size = UDim2.new(1, -4, 0, 38), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+    Text = "Knife Prediction: 0 disables; 100 uses your ping.", TextColor3 = UITheme.muted,
+    TextSize = 11, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left}, UIRefs.Content)
 
 -- Auto mode is independent of the manual slider and never activates Silent by itself.
 UIRefs.autoPredictionButton, UIRefs.setAutoPredictionToggle = addToggle("Auto Prediction", 14, function(enabled)
     state.silentAutoPredict = enabled
     if Silent.gunAuto then Silent.gunAuto.reset(true) end
+    Silent.resetKnife()
     if not state.unloaded and UIRefs.Status then
         Localization.setText(UIRefs.Status, enabled
             and "Auto Prediction ON: follows your ping"
@@ -6165,6 +6786,7 @@ UIRefs.AimStatus = create("TextLabel", {
 }, UIRefs.AimCircleGui)
 -- This overlay is outside the main menu; keep an explicit English text source.
 Localization.setText(UIRefs.AimStatus, Silent.feedbackMessage or "Silent: OFF")
+UIRefs.KnifeSilent.attachOverlay()
 
 UIRefs.flingMurdererButton = create("TextButton", {
     Name = "FlingMurderer",
@@ -6194,6 +6816,15 @@ UIRefs.flingSheriffButton = create("TextButton", {
 }, UIRefs.Content)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.flingSheriffButton)
 
+UIRefs.flingHeroButton = create("TextButton", {
+    Name = "FlingHero", Size = UDim2.new(1, -4, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(100, 82, 38), BorderSizePixel = 0,
+    Font = Enum.Font.GothamSemibold, Text = "YARHM Fling Hero",
+    TextColor3 = Color3.fromRGB(255, 245, 200), TextSize = 13,
+    AutoButtonColor = false, LayoutOrder = 15.15,
+}, UIRefs.Content)
+create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.flingHeroButton)
+
 --// Spectate page: role shortcuts + selectable list of all other players.
 do
     local function spectateButton(name, label, order)
@@ -6216,11 +6847,12 @@ do
     }, UIRefs.SpectateContent)
     UIRefs.spectateMurdererButton = spectateButton("SpectateMurderer", "Spectate Murderer [OFF]", 2)
     UIRefs.spectateSheriffButton = spectateButton("SpectateSheriff", "Spectate Sheriff [OFF]", 3)
+    UIRefs.spectateHeroButton = spectateButton("SpectateHero", "Spectate Hero [OFF]", 3.5)
     UIRefs.spectateReturnButton = spectateButton("SpectateReturn", "Return to My Camera", 4)
     UIRefs.spectateStatus = create("TextLabel", {
         Name = "SpectateStatus", Size = UDim2.new(1, -4, 0, 42),
         BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-        Text = "Select Murderer, Sheriff, or a player below.",
+        Text = "Select Murderer, Sheriff, Hero, or a player below.",
         TextColor3 = Color3.fromRGB(180, 185, 195), TextSize = 12,
         TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = 5,
@@ -6363,12 +6995,7 @@ UIRefs.spinButton = nil
 UIRefs.setSpinToggle = nil
 UIRefs.spinButton, UIRefs.setSpinToggle = addToggle("Spin", 23, function(enabled)
     state.spin = enabled
-    local ok, err = UIRefs.setSpinBinding(enabled)
-    if not ok then
-        UIRefs.setSpinToggle(false)
-        warn("[ScriptMM2] Spin binding failed: " .. tostring(err))
-        if UIRefs.Status then UIRefs.Status.Text = "Spin stopped: see console" end
-    end
+    UIRefs.syncMovementRotation()
 end)
 
 UIRefs._unused, UIRefs.setSpinSpeedSlider = addSlider(
@@ -6487,7 +7114,7 @@ do
     create("UICorner", {CornerRadius = UDim.new(0, 17)}, watermark.card)
     chrome.decorate(watermark.card, 17)
     watermark.logo = UIRefs.Brand.make(create, watermark.card, {Name = "Mark",
-        Position = UDim2.fromOffset(12, 11), Size = UDim2.fromOffset(30, 30),
+        Position = UDim2.fromOffset(12, 6), Size = UDim2.fromOffset(40, 40),
         BackgroundColor3 = white, BackgroundTransparency = 1, BorderSizePixel = 0})
     watermark.brand = create("TextLabel", {Name = "Brand", Position = UDim2.fromOffset(61, 11),
         Size = UDim2.fromOffset(88, 16), BackgroundTransparency = 1, Text = "SYDJA",
@@ -6941,6 +7568,148 @@ UIRefs.crashButton = create("TextButton", {
 }, UIRefs.SettingsContent)
 create("UICorner", {CornerRadius = UDim.new(0, 8)}, UIRefs.crashButton)
 
+--// BEGIN SYDJA VERSION CHECKER
+-- Explicit button actions only: no automatic HTTP polling or frame callbacks.
+do
+    local SCRIPT_URL = "https://raw.githubusercontent.com/JornyZipper/myscripts/refs/heads/main/MM2"
+    local VERSION_URL = "https://raw.githubusercontent.com/JornyZipper/myscripts/refs/heads/main/version.txt"
+    local page = UIRefs.SettingsContent
+    local checker = {currentVersion = CURRENT_VERSION, latestVersion = nil,
+        busy = false, disposed = false, generation = 0}
+    UIRefs.VersionChecker = checker
+
+    local function label(name, text, order, height, color)
+        return create("TextLabel", {Name = name, LayoutOrder = order,
+            Size = UDim2.new(1, -4, 0, height), BackgroundTransparency = 1,
+            Font = Enum.Font.GothamSemibold, Text = text, TextSize = 12,
+            TextColor3 = color, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left}, page)
+    end
+    local function button(name, text, order)
+        local control = create("TextButton", {Name = name, LayoutOrder = order,
+            Size = UDim2.new(1, -4, 0, 40), BackgroundColor3 = UITheme.item,
+            BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamSemibold,
+            TextSize = 13, TextColor3 = UITheme.text, Text = text}, page)
+        create("UICorner", {CornerRadius = UDim.new(0, 9)}, control)
+        create("UIStroke", {Color = UITheme.border, Thickness = 1, Transparency = 0.45}, control)
+        return control
+    end
+    UIRefs.versionCheckerTitle = label("VersionCheckerTitle", "Version Checker", 12.1, 26, UITheme.text)
+    UIRefs.versionCheckerTitle.TextSize = 16
+    UIRefs.currentVersionLabel = label("CurrentVersion", "Current Version: v" .. CURRENT_VERSION, 12.2, 23, UITheme.muted)
+    UIRefs.latestVersionLabel = label("LatestVersion", "Latest Version: not checked", 12.3, 23, UITheme.muted)
+    UIRefs.checkUpdatesButton = button("CheckForUpdates", "Check for Updates", 12.4)
+    UIRefs.loadLatestVersionButton = button("LoadLatestVersion", "Load Latest Version", 12.5)
+    UIRefs.loadLatestVersionButton.Visible = false
+    UIRefs.versionCheckerStatus = label("VersionCheckerStatus", "Press Check for Updates to check GitHub.", 12.6, 52, UITheme.accent)
+
+    local function active(generation)
+        return not checker.disposed and not state.unloaded and UIRefs.versionCheckerStatus.Parent ~= nil
+            and (generation == nil or generation == checker.generation)
+    end
+    local function status(message)
+        if active() then Localization.setText(UIRefs.versionCheckerStatus, message) end
+    end
+    local function setBusy(busy, loading)
+        checker.busy = busy
+        if not active() then return end
+        UIRefs.checkUpdatesButton.Active = not busy
+        UIRefs.loadLatestVersionButton.Active = not busy
+        Localization.setText(UIRefs.checkUpdatesButton, busy and not loading and "Checking..." or "Check for Updates")
+        Localization.setText(UIRefs.loadLatestVersionButton, busy and loading and "Loading..." or "Load Latest Version")
+    end
+    local function reportFailure(message, detail)
+        status(message)
+        if detail then warn("[SYDJA HUB Version Checker] " .. tostring(detail)) end
+    end
+    local function runAction(loading, action)
+        if not active() or checker.busy then return end
+        checker.generation += 1
+        local generation = checker.generation
+        setBusy(true, loading)
+        task.spawn(function()
+            if not active(generation) then return end
+            local ok, errorMessage = pcall(action, generation)
+            if not active(generation) then return end
+            if not ok then reportFailure("Version Checker failed. Please try again.", errorMessage) end
+            setBusy(false, loading)
+        end)
+    end
+
+    function checker.check()
+        runAction(false, function(generation)
+            checker.latestVersion = nil
+            UIRefs.loadLatestVersionButton.Visible = false
+            Localization.setText(UIRefs.latestVersionLabel, "Latest Version: checking...")
+            status("Checking GitHub for updates...")
+            local ok, response = pcall(function() return game:HttpGet(VERSION_URL) end)
+            if not active(generation) then return end
+            if not ok then
+                Localization.setText(UIRefs.latestVersionLabel, "Latest Version: unavailable")
+                reportFailure(tostring(response):find("404", 1, true)
+                    and "version.txt was not found on GitHub. Add it to the repository root."
+                    or "Could not reach GitHub. Check your connection and try again.", response)
+                return
+            end
+            -- Apply the exact requested whitespace/newline normalization before comparison.
+            local latest = type(response) == "string" and response:gsub("%s+", "") or ""
+            if #latest > 64 or not latest:match("^%d+%.%d+%.%d+$") then
+                Localization.setText(UIRefs.latestVersionLabel, "Latest Version: unavailable")
+                reportFailure("Invalid version.txt. Use a version such as 1.1.0.")
+                return
+            end
+            checker.latestVersion = latest
+            Localization.setText(UIRefs.latestVersionLabel, "Latest Version: v" .. latest)
+            local different = latest ~= CURRENT_VERSION
+            UIRefs.loadLatestVersionButton.Visible = different
+            status(different and ("Update available: v" .. latest) or "You are using the latest version")
+        end)
+    end
+
+    function checker.load()
+        if not checker.latestVersion or checker.latestVersion == CURRENT_VERSION then return end
+        runAction(true, function(generation)
+            status("Downloading the latest version...")
+            local ok, source = pcall(function() return game:HttpGet(SCRIPT_URL) end)
+            if not active(generation) then return end
+            if not ok then
+                reportFailure("Could not download the latest version from GitHub. Try again.", source)
+                return
+            end
+            if type(source) ~= "string" or source:match("^%s*$") then
+                reportFailure("GitHub returned an empty script. Please try again.")
+                return
+            end
+            -- Equivalent to loadstring(game:HttpGet(SCRIPT_URL))(), with separate UI errors.
+            -- Compile before running: HTTP/compile failures keep the current menu operational.
+            local compileOK, latestScript, compileError = pcall(function()
+                return loadstring(source, "@SYDJA_HUB_Latest")
+            end)
+            if not active(generation) then return end
+            if not compileOK or type(latestScript) ~= "function" then
+                reportFailure("Could not compile the latest script. Please try again.", compileOK and compileError or latestScript)
+                return
+            end
+            status("Starting the latest version...")
+            local runOK, runError = pcall(latestScript)
+            -- The downloaded script owns the existing reload cleanup. Do not destroy the
+            -- current menu before a download has succeeded or touch an unloaded old menu.
+            if not active(generation) then return end
+            if not runOK then
+                reportFailure("Could not start the latest script. See console for details.", runError)
+                return
+            end
+            status("Latest script started.")
+        end)
+    end
+
+    function checker.stop()
+        checker.disposed, checker.busy = true, false
+        checker.generation += 1 -- in-flight responses cannot update or execute after unloading
+    end
+    addConnection(UIRefs.checkUpdatesButton.MouseButton1Click:Connect(checker.check))
+    addConnection(UIRefs.loadLatestVersionButton.MouseButton1Click:Connect(checker.load))
+end
+--// END SYDJA VERSION CHECKER
 --// Auto-run belongs to Settings, independently of gameplay toggles.
 do
     UIRefs.autoRunButton = create("TextButton", {
@@ -8051,6 +8820,13 @@ local function refreshRoles()
 end
 
 
+function UIRefs.rolePlayerName(roleName)
+    if roleName == "Murderer" then return Murder end
+    if roleName == "Sheriff" then return Sheriff end
+    if roleName == "Hero" then return Hero end
+    return ""
+end
+
 --// Camera-only spectate: role targets and manually selected players.
 --// The compatibility flag state.spectateMurderer means any spectate mode is active.
 do
@@ -8066,10 +8842,13 @@ do
     local function paintSpectateButtons()
         local murder = spectate.mode == "Murderer"
         local sheriff = spectate.mode == "Sheriff"
+        local hero = spectate.mode == "Hero"
         UIRefs.spectateMurdererButton.Text = "Spectate Murderer " .. (murder and "[ON]" or "[OFF]")
         UIRefs.spectateSheriffButton.Text = "Spectate Sheriff " .. (sheriff and "[ON]" or "[OFF]")
+        UIRefs.spectateHeroButton.Text = "Spectate Hero " .. (hero and "[ON]" or "[OFF]")
         setButtonVisual(UIRefs.spectateMurdererButton, murder)
         setButtonVisual(UIRefs.spectateSheriffButton, sheriff)
+        setButtonVisual(UIRefs.spectateHeroButton, hero)
         if UIRefs.spectatePlayerButtons then
             for player, button in pairs(UIRefs.spectatePlayerButtons) do
                 if button and button.Parent then
@@ -8133,6 +8912,7 @@ do
     end
     toggleSpectateMurderer = function() startSpectate("Murderer") end
     UIRefs.toggleSpectateSheriff = function() startSpectate("Sheriff") end
+    UIRefs.toggleSpectateHero = function() startSpectate("Hero") end
     UIRefs.selectSpectatePlayer = function(player) startSpectate("Player", player) end
     UIRefs.stopSpectate = function() stopSpectateMurderer("Spectate OFF • own camera") end
 
@@ -8282,7 +9062,7 @@ do
             end
         else
             if not rolesAvailable then return end
-            local roleName = (spectate.mode == "Murderer") and Murder or Sheriff
+            local roleName = UIRefs.rolePlayerName(spectate.mode)
             if roleName == "" then
                 if spectate.target then stopSpectateMurderer("Spectate stopped: round ended") end
                 return
@@ -8296,7 +9076,8 @@ do
         end
         local character = player and player.Character
         local targetHumanoid = character and character:FindFirstChildOfClass("Humanoid")
-        if not player or player == LocalPlayer or not targetHumanoid or targetHumanoid.Health <= 0 then
+        if not player or player == LocalPlayer or not targetHumanoid or targetHumanoid.Health <= 0
+            or (spectate.mode == "Hero" and not roleAlive(player.Name)) then
             if spectate.target or spectate.mode == "Player" then
                 stopSpectateMurderer("Spectate stopped: target unavailable / eliminated")
             end
@@ -8683,13 +9464,15 @@ do
         local circle = UIRefs.AimCircle
         if not circle or not UIRefs.AimCircleStroke then return end
         local enabled = state.fovIndicator and not state.unloaded and not state.spectateMurderer
+            and not (UIRefs.KnifeSilent and UIRefs.KnifeSilent.holdingKnife())
         circle.Visible = enabled
         if UIRefs.AimStatus then UIRefs.AimStatus.Visible = enabled and state.silentGun end
         if not enabled then return end
         circle.Size = UDim2.fromOffset(values.aimRadius * 2, values.aimRadius * 2)
         local context, reason = Silent.shotContext()
-        local aim, targetReason = Silent.selectGunTarget(context and context.origin)
-        local color = Color3.fromRGB(150, 150, 150)
+        local aim, targetReason = Silent.selectGunTarget(context and context.origin, true)
+        local color = targetReason == "Silent: checking exposed edges" and Color3.fromRGB(245, 180, 65)
+            or Color3.fromRGB(150, 150, 150)
         if aim then
             if not state.silentGun then color = Color3.fromRGB(90, 165, 245)
             elseif not context then color = Color3.fromRGB(245, 180, 65)
@@ -8705,13 +9488,14 @@ do
             UIRefs.AimStatus.TextColor3 = color
         end
         if state.silentGun then
-            -- A stale "shot sent" must not hide the current reason for a gray circle.
+            local lastMessage, lastAt = Silent.lastShotMessage, Silent.lastShotAt
+            -- A stale send message must not hide the current reason for a gray circle.
             if not context then
                 Silent.feedback(reason)
             elseif not aim then
                 Silent.feedback(targetReason)
-            elseif Silent.lastShotMessage and os.clock() - Silent.lastShotAt < 2 then
-                Silent.feedback(Silent.lastShotMessage)
+            elseif lastMessage and lastAt and os.clock() - lastAt < 2 then
+                Silent.feedback(lastMessage)
             else
                 Silent.feedback(targetReason)
             end
@@ -8810,8 +9594,10 @@ stopRoleFling = function(_releaseBurst)
     if not state.unloaded then
         UIRefs.flingMurdererButton.Text = "YARHM Fling Murderer"
         UIRefs.flingSheriffButton.Text = "YARHM Fling Sheriff"
+        UIRefs.flingHeroButton.Text = "YARHM Fling Hero"
         setButtonVisual(UIRefs.flingMurdererButton, false)
         setButtonVisual(UIRefs.flingSheriffButton, false)
+        setButtonVisual(UIRefs.flingHeroButton, false)
     end
     return returned, returnError
 end
@@ -8823,7 +9609,6 @@ local function flingRole(roleName, chosenPlayer, selectedGeneration)
         return
     end
     local isPlayer = roleName == "Player"
-    local isMurderer = roleName == "Murderer"
     if isPlayer and (not flingAllActive or selectedGeneration ~= flingAllGeneration) then return end
     if flingBusy then
         if flingTrip and flingTrip.roleName == roleName then
@@ -8856,7 +9641,8 @@ local function flingRole(roleName, chosenPlayer, selectedGeneration)
     }
     flingTrip, flingBusy = trip, true
     if not isPlayer then
-        local button = isMurderer and UIRefs.flingMurdererButton or UIRefs.flingSheriffButton
+        local button = roleName == "Murderer" and UIRefs.flingMurdererButton
+            or roleName == "Hero" and UIRefs.flingHeroButton or UIRefs.flingSheriffButton
         button.Text = "Stop " .. roleName .. " Fling [ON]"
         setButtonVisual(button, true)
     end
@@ -8868,7 +9654,7 @@ local function flingRole(roleName, chosenPlayer, selectedGeneration)
     local function targetMatches(player)
         if not player or player == LocalPlayer or player.Parent ~= Players then return false end
         if isPlayer then return player == chosenPlayer end
-        return (isMurderer and Murder or Sheriff) == player.Name
+        return UIRefs.rolePlayerName(roleName) == player.Name
     end
     local outcome = "Fling: attempt ended; server result unverified"
     local ok, err = pcall(function()
@@ -8880,7 +9666,7 @@ local function flingRole(roleName, chosenPlayer, selectedGeneration)
             -- Role lookup can yield. A cancelled worker must not acquire physics again.
             if cancelled() then return end
             local name = isPlayer and (chosenPlayer and chosenPlayer.Name or "")
-                or (isMurderer and Murder or Sheriff)
+                or UIRefs.rolePlayerName(roleName)
             target = isPlayer and chosenPlayer or (name ~= "" and Players:FindFirstChild(name) or nil)
             if targetMatches(target) and roleAlive(target.Name) then break end
             UIRefs.Status.Text = "Fling: waiting for living " .. roleName
@@ -9640,7 +10426,7 @@ guardAntiFling = function()
     if not char or char ~= LocalPlayer.Character or not root or not root.Parent
         or not humanoid or humanoid.Health <= 0 or humanoid.Sit or root.Anchored then return end
     -- Do not fight intentional movement features or scripted round/TP transitions.
-    if teleportBusy or flingBusy or state.fly or state.coinFarm or state.strafe
+    if teleportBusy or flingBusy or state.fly or state.coinFarm
         or longJumpState.active or os.clock() < g.teleportUntil then return end
     local linear, angular = root.AssemblyLinearVelocity, root.AssemblyAngularVelocity
     local now = os.clock()
@@ -9670,23 +10456,22 @@ guardAntiFling = function()
     end
 end
 
---// Air steering preserves vertical motion and existing momentum above the cap.
-local function calculateStrafeVelocity(velocity, moveDirection, maxSpeed, deltaTime)
-    local wish = Vector3.new(moveDirection.X, 0, moveDirection.Z)
-    if wish.Magnitude <= 0.05 then return velocity end
-    wish = wish.Unit
-    local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
-    local speed = horizontal.Magnitude
-    if speed > maxSpeed + 0.001 then return velocity end
-    local dt = math.clamp(deltaTime, 0, 0.1)
-    local angle = math.atan2(wish.Z, wish.X)
-    if speed > 0.001 then
-        local currentAngle = math.atan2(horizontal.Z, horizontal.X)
-        local difference = math.atan2(math.sin(angle - currentAngle), math.cos(angle - currentAngle))
-        angle = currentAngle + difference * (1 - math.exp(-CONFIG.StrafeTurnRate * dt))
-    end
-    speed = math.min(maxSpeed, speed + CONFIG.StrafeAcceleration * dt)
-    return Vector3.new(math.cos(angle) * speed, velocity.Y, math.sin(angle) * speed)
+-- AirStrafe redirects existing flight momentum immediately; jump/fall Y is unchanged.
+function UIRefs.stepAirStrafe(humanoid, root)
+    if not state.airStrafe or state.unloaded or state.fly or state.coinFarm
+        or teleportBusy or flingBusy or (flingTrip and flingTrip.active)
+        or not windowFocused or UIS:GetFocusedTextBox() then return end
+    if not humanoid or not root or humanoid.Health <= 0 or root.Anchored
+        or humanoid.Sit or humanoid.PlatformStand or humanoid.FloorMaterial ~= Enum.Material.Air then return end
+    local movementState = humanoid:GetState()
+    if movementState ~= Enum.HumanoidStateType.Jumping and movementState ~= Enum.HumanoidStateType.Freefall then return end
+    local move, velocity = humanoid.MoveDirection, root.AssemblyLinearVelocity
+    local wish = Vector3.new(move.X, 0, move.Z)
+    local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+    if wish.Magnitude <= 0.05 or speed <= 0.001 or speed ~= speed or speed == math.huge
+        or velocity.Y ~= velocity.Y or math.abs(velocity.Y) == math.huge then return end
+    local direction = wish.Unit
+    root.AssemblyLinearVelocity = Vector3.new(direction.X * speed, velocity.Y, direction.Z * speed)
 end
 
 --// Physics movement runs after input, before the simulation.
@@ -9744,8 +10529,12 @@ local function updateMovement(deltaTime)
                     local wish = humanoid.MoveDirection
                     wish = Vector3.new(wish.X, 0, wish.Z)
                     if wish.Magnitude > 0.05 then
-                        local blended = longJumpState.direction:Lerp(wish.Unit, math.clamp(deltaTime * 3, 0, 0.25))
-                        if blended.Magnitude > 0.05 then longJumpState.direction = blended.Unit end
+                        if state.airStrafe then
+                            longJumpState.direction = wish.Unit
+                        else
+                            local blended = longJumpState.direction:Lerp(wish.Unit, math.clamp(deltaTime * 3, 0, 0.25))
+                            if blended.Magnitude > 0.05 then longJumpState.direction = blended.Unit end
+                        end
                     end
                     local v = root.AssemblyLinearVelocity
                     local dir = longJumpState.direction
@@ -9758,11 +10547,7 @@ local function updateMovement(deltaTime)
                 end
             end
         end
-        if state.strafe and not longJumpState.active and not grounded and (movementState == Enum.HumanoidStateType.Jumping
-            or movementState == Enum.HumanoidStateType.Freefall) then
-            root.AssemblyLinearVelocity = calculateStrafeVelocity(root.AssemblyLinearVelocity,
-                humanoid.MoveDirection, values.strafeSpeed, deltaTime)
-        end
+        UIRefs.stepAirStrafe(humanoid, root)
     end
 
     if state.noclip and not (state.coinFarm and coinFarm.paused) then
@@ -9911,6 +10696,7 @@ local function onCharacterAdded(character)
         Silent.restoreXeno(true)
         Silent.xenoStatusKey = nil
     end
+    Silent.resetKnife()
     disconnectBucket(characterConnections)
     clearLongJump()
     if UIRefs.stopBring then UIRefs.stopBring("Bring stopped: respawn") end
@@ -10222,6 +11008,7 @@ local function unload(reason)
     if state.unloaded then
         return
     end
+    if UIRefs.VersionChecker then UIRefs.VersionChecker.stop() end
     if UIRefs.Loading then UIRefs.Loading.destroy() end
     if UIRefs.Brand then UIRefs.Brand.stop() end
     if UIRefs.AutoRun then UIRefs.AutoRun.stop(reason == "reload") end
@@ -10251,6 +11038,7 @@ local function unload(reason)
     UIRefs.setSpinToggle(false)
     UIRefs.setBunnyToggle(false)
     UIRefs.setStrafeToggle(false)
+    UIRefs.setAirStrafeToggle(false)
     if UIRefs.setUltraLongJumpToggle then UIRefs.setUltraLongJumpToggle(false) end
     if UIRefs.setLongJumpToggle then UIRefs.setLongJumpToggle(false) end
     UIRefs.setESPToggle(false)
@@ -10644,9 +11432,13 @@ end))
 addConnection(UIRefs.flingSheriffButton.MouseButton1Click:Connect(function()
     task.spawn(flingRole, "Sheriff")
 end))
+addConnection(UIRefs.flingHeroButton.MouseButton1Click:Connect(function()
+    task.spawn(flingRole, "Hero")
+end))
 addConnection(UIRefs.flingSelectButton.MouseButton1Click:Connect(flingSelectedPlayer))
 addConnection(UIRefs.spectateMurdererButton.MouseButton1Click:Connect(toggleSpectateMurderer))
 addConnection(UIRefs.spectateSheriffButton.MouseButton1Click:Connect(UIRefs.toggleSpectateSheriff))
+addConnection(UIRefs.spectateHeroButton.MouseButton1Click:Connect(UIRefs.toggleSpectateHero))
 addConnection(UIRefs.spectateReturnButton.MouseButton1Click:Connect(UIRefs.stopSpectate))
 UIRefs.rebuildSpectatorList()
 
@@ -10687,6 +11479,7 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     UIRefs.setSpinToggle(false)
     UIRefs.setBunnyToggle(false)
     UIRefs.setStrafeToggle(false)
+    UIRefs.setAirStrafeToggle(false)
     if UIRefs.setUltraLongJumpToggle then UIRefs.setUltraLongJumpToggle(false) end
     if UIRefs.setLongJumpToggle then UIRefs.setLongJumpToggle(false) end
     UIRefs.setESPToggle(false)
@@ -10706,19 +11499,22 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     values.flySpeed = CONFIG.DefaultFlySpeed
     values.spinSpeed = CONFIG.DefaultSpinSpeed
     values.coinFarmSpeed = CONFIG.CoinFarmSpeed
-    values.strafeSpeed = CONFIG.DefaultStrafeSpeed
     values.longJumpSpeed = CONFIG.DefaultLongJumpSpeed
     values.fov = CONFIG.DefaultFOV
     values.silentLeadMs = 0
     if UIRefs.setSilentLead then UIRefs.setSilentLead(0) end
     if UIRefs.setAutoPredictionToggle then UIRefs.setAutoPredictionToggle(true) end
     values.aimRadius = 115
+    values.knifeFOV, values.knifePrediction = 115, 100
     values.aimSmooth = 9
     values.aimLeadMs = 140
     values.jumpLeadMs = 115
     if UIRefs.setAimLead then UIRefs.setAimLead(140) end
     if UIRefs.setJumpAimLead then UIRefs.setJumpAimLead(115) end
     if UIRefs.setAimRadius then UIRefs.setAimRadius(115) end
+    if UIRefs.setKnifeFOV then UIRefs.setKnifeFOV(115) end
+    if UIRefs.setKnifePrediction then UIRefs.setKnifePrediction(100) end
+    if UIRefs.setKnifeVisibleCheck then UIRefs.setKnifeVisibleCheck(true) end
     if UIRefs.setAimSmooth then UIRefs.setAimSmooth(9) end
     if UIRefs.setAimVisibleToggle then UIRefs.setAimVisibleToggle(true) end
 
@@ -10727,7 +11523,6 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     if UIRefs.setFlySpeedSlider then UIRefs.setFlySpeedSlider(CONFIG.DefaultFlySpeed) end
     if UIRefs.setSpinSpeedSlider then UIRefs.setSpinSpeedSlider(CONFIG.DefaultSpinSpeed) end
     if UIRefs.setCoinFarmSpeedSlider then UIRefs.setCoinFarmSpeedSlider(CONFIG.CoinFarmSpeed) end
-    if UIRefs.setStrafeSpeedSlider then UIRefs.setStrafeSpeedSlider(CONFIG.DefaultStrafeSpeed) end
     if UIRefs.setLongJumpSpeedSlider then UIRefs.setLongJumpSpeedSlider(CONFIG.DefaultLongJumpSpeed) end
     if UIRefs.setFOVSlider then UIRefs.setFOVSlider(CONFIG.DefaultFOV, true) end
     setCharacterMovement()
@@ -10767,6 +11562,6 @@ refreshRoles()
 
 print("[SYDJA HUB PC] " .. VERSION .. " loaded successfully. PC-only build; YARHM SkidFling ready.")
 ]====]
-local run, compileError = loadstring(program, "@SYDJA_HUB_V1.0.7")
+local run, compileError = loadstring(program, "@SYDJA_HUB_V1.1")
 if type(run) ~= "function" then error(compileError or "Could not compile SYDJA HUB", 0) end
 run(program, false)
