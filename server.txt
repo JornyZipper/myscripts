@@ -4,10 +4,9 @@
 -- executor's workspace into its Autoexec folder. Executor attachment is required.
 -- The long string contains the editable full program, used for its local cache.
 local program = [====[
---// SYDJA HUB V1.1 PC — instant air steering and Silent Knife / Revolver
---// Silent Knife reads the existing KnifeClient target provider; original throw/stab remain active.
---// No require of WeaponService / game modules and no changes to thread identity or game inputs.
---// KnifeThrown retains its original Handle.CFrame and target; camera is never steered.
+--// SYDJA HUB V1.1.2 PC — Silent Revolver and selected-player Hitbox Panther
+--// Knife uses the game's original stab and throw handlers without targeting wrappers.
+--// Panther changes only the invisible local root; server weapon registration is unchanged.
 --// Spin Speed: independent yaw after character controls; walking/Shift Lock supported.
 --// Revolver cover check: exposed R6/R15 body parts and one-pixel viewport search; bounded work per call.
 --// The overlay shows the current reason whenever the target/weapon is unavailable.
@@ -41,7 +40,7 @@ local program = [====[
 --// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
 --// Client menu. Body AimLock; YARHM Fling for roles and a selected player.
 
-local CURRENT_VERSION = "1.1.1"
+local CURRENT_VERSION = "1.1.2"
 local VERSION = "V" .. CURRENT_VERSION
 local PC_ONLY_BUILD = true -- V1.0: Android/mobile branch retired
 local UIRefs = {}
@@ -3964,9 +3963,7 @@ local state = {
     aimLock = false,
     fovIndicator = false, -- read-only FOV target preview, never alters camera or shot
     silentGun = false, -- desired setting; remains ON while Gun is absent / during respawn
-    silentKnife = false,
     hitboxPanther = false, -- selected invisible local root only; default OFF
-    knifeVisibleOnly = true, -- separate from Revolver visibility / Wallbang
     silentAutoPredict = true, -- AIM > Auto Prediction: personal ping; independent of manual lead
     aimVisibleOnly = true,
     wallbang = false, -- experimental: ignore client LOS checks for Silent Revolver/FOV
@@ -3989,8 +3986,6 @@ local values = {
     fov = CONFIG.DefaultFOV,
     silentLeadMs = 0, -- Manual milliseconds when Auto Prediction is OFF; 0 is direct aim
     aimRadius = 115, -- screen pixels (not camera field of view)
-    knifeFOV = 115, -- independent Knife circle radius, pixels
-    knifePrediction = 100, -- percent of personal ping prediction; zero is direct aim
     hitboxPantherSize = 6, -- minimum root dimensions, studs; slider 2..30
     aimSmooth = 9, -- higher = faster camera tracking
     aimLeadMs = 140, -- B AimLock: predictive horizontal lead (0 disables)
@@ -4087,12 +4082,8 @@ function Silent.target(name)
     end
     return nil
 end
-function Silent.resetKnife()
-    if UIRefs.KnifeSilent then UIRefs.KnifeSilent.resetPrediction() end
-end
 function Silent.stop()
-    state.silentGun, state.silentKnife = false, false
-    if UIRefs.KnifeSilent then UIRefs.KnifeSilent.stop() end
+    state.silentGun = false
 end
 
 --// V0.9.44 isolated experimental GunClient-activation replacement.
@@ -5124,34 +5115,6 @@ local TEXT_TRANSLATIONS = {
     ["Silent Revolver"] = {ru="Тихий револьвер", uk="Тихий револьвер", de="Silent-Revolver"},
     ["Silent V2 armed: one client shot; server hit unverified"] = {ru="Silent V2 включён: один выстрел; серверное попадание не проверено", uk="Silent V2 увімкнено: один постріл; серверне влучання не перевірено", de="Silent V2 aktiv: ein Schuss; Servertreffer ungeprüft"},
     ["Xeno Silent Gun: FOV target enabled • server hit unverified"] = {ru="Xeno Silent Gun: цель в FOV • попадание сервером не проверено", uk="Xeno Silent Gun: ціль у FOV • влучання сервером не перевірене", de="Xeno Silent Gun: FOV-Ziel aktiv • Servertreffer ungeprüft"},
-    ["Silent Knife ON: throws only"] = {ru="Тихий нож ВКЛ: броски ножа", uk="Тихий ніж УВІМК: кидки ножа", de="Silent-Messer AN: Messerwürfe"},
-    ["Knife: OFF"] = {ru="Нож: ВЫКЛ", uk="Ніж: ВИМК", de="Messer: AUS"},
-    ["Knife: equip knife"] = {ru="Нож: возьми нож в руки", uk="Ніж: візьми ніж у руки", de="Messer: Messer ausrüsten"},
-    ["Knife: weapon unavailable"] = {ru="Нож: оружие недоступно", uk="Ніж: зброя недоступна", de="Messer: Waffe nicht verfügbar"},
-    ["Knife: weapon cooling down"] = {ru="Нож: перезарядка", uk="Ніж: перезаряджання", de="Messer: Abklingzeit"},
-    ["Knife: throw remote unavailable"] = {ru="Нож: обработчик броска недоступен", uk="Ніж: обробник кидка недоступний", de="Messer: Wurf-Remote fehlt"},
-    ["Knife: aim data unavailable"] = {ru="Нож: данные цели недоступны", uk="Ніж: дані цілі недоступні", de="Messer: Zieldaten fehlen"},
-    ["Knife: target unavailable"] = {ru="Нож: цель недоступна", uk="Ніж: ціль недоступна", de="Messer: Ziel nicht verfügbar"},
-    ["Knife: target outside circle"] = {ru="Нож: цель вне круга", uk="Ніж: ціль поза колом", de="Messer: Ziel außerhalb des Kreises"},
-    ["Knife: path blocked"] = {ru="Нож: путь перекрыт", uk="Ніж: шлях перекрито", de="Messer: Weg blockiert"},
-    ["Knife: target ready; hit unverified"] = {ru="Нож: цель выбрана; попадание не подтверждено", uk="Ніж: ціль обрано; влучання не підтверджено", de="Messer: Ziel bereit; Treffer unbestätigt"},
-    ["Knife: throw redirected; hit unverified"] = {ru="Нож: бросок направлен; попадание не подтверждено", uk="Ніж: кидок спрямовано; влучання не підтверджено", de="Messer: Wurf umgelenkt; Treffer unbestätigt"},
-    ["Knife: cannot connect (see status)"] = {ru="Нож: подключение недоступно (см. статус)", uk="Ніж: підключення недоступне (див. статус)", de="Messer: Verbindung fehlt (siehe Status)"},
-    ["SILENT KNIFE"] = {ru="ТИХИЙ НОЖ", uk="ТИХИЙ НІЖ", de="SILENT-MESSER"},
-    ["Knife FOV"] = {ru="Круг ножа", uk="Коло ножа", de="Messer-FOV"},
-    ["Knife Prediction"] = {ru="Предикт ножа", uk="Передбачення ножа", de="Messer-Vorhalt"},
-    ["Visible Check"] = {ru="Проверка видимости ножа", uk="Перевірка видимості ножа", de="Messer-Sichtprüfung"},
-    ["Knife Prediction: 0 disables; 100 uses your ping."] = {ru="Предикт ножа: 0 выключает; 100 учитывает твой пинг.", uk="Передбачення ножа: 0 вимикає; 100 враховує твій пінг.", de="Messer-Vorhalt: 0 deaktiviert; 100 berücksichtigt deinen Ping."},
-    ["Knife: waiting for Knife"] = {ru="Нож: ожидание Knife", uk="Ніж: очікування Knife", de="Messer: warte auf Knife"},
-    ["Knife: waiting for Events / KnifeClient"] = {ru="Нож: ожидание Events / KnifeClient", uk="Ніж: очікування Events / KnifeClient", de="Messer: warte auf Events / KnifeClient"},
-    ["Knife: cannot connect to targeting (see console)"] = {ru="Нож: не удалось подключить наведение (см. консоль)", uk="Ніж: не вдалося підключити наведення (див. консоль)", de="Messer: Zielhilfe nicht verfügbar (siehe Konsole)"},
-    ["Knife: executor cannot inspect KnifeClient"] = {ru="Нож: executor не поддерживает подключение KnifeClient", uk="Ніж: executor не підтримує підключення KnifeClient", de="Messer: Executor unterstützt KnifeClient nicht"},
-    ["Knife: waiting for KnifeClient handler"] = {ru="Нож: ожидание обработчика KnifeClient", uk="Ніж: очікування обробника KnifeClient", de="Messer: warte auf KnifeClient-Eingabe"},
-    ["Knife: ambiguous KnifeClient handler"] = {ru="Нож: найдено несколько обработчиков; переподключись", uk="Ніж: знайдено кілька обробників; перепідключись", de="Messer: mehrere Handler; erneut beitreten"},
-    ["Knife: waiting for WeaponService"] = {ru="Нож: ожидание WeaponService", uk="Ніж: очікування WeaponService", de="Messer: warte auf WeaponService"},
-    ["Knife: waiting for Handle"] = {ru="Нож: ожидание Handle", uk="Ніж: очікування Handle", de="Messer: warte auf Handle"},
-    ["Knife: adapter failed (see console)"] = {ru="Нож: ошибка адаптера (см. консоль)", uk="Ніж: помилка адаптера (див. консоль)", de="Messer: Adapterfehler (siehe Konsole)"},
-    ["Silent Knife"] = {ru="Тихий нож", uk="Тихий ніж", de="Silent-Messer"},
     ["B AimLock prediction (ms)"] = {ru="Упреждение AimLock B (мс)", uk="Випередження AimLock B (мс)", de="AimLock-B-Vorhalt (ms)"},
     ["B Jump prediction (ms)"] = {ru="Упреждение прыжка B (мс)", uk="Випередження стрибка B (мс)", de="B-Sprungvorhersage (ms)"},
     ["Air prediction (ms)"] = {ru="Упреждение в воздухе (мс)", uk="Випередження в повітрі (мс)", de="Luft-Vorhersage (ms)"},
@@ -5243,7 +5206,6 @@ local TEXT_TRANSLATIONS = {
     ["AimLock: ON • B = OFF"] = {ru="Наводка: ВКЛ • B = ВЫКЛ", uk="Наведення: УВІМК • B = ВИМК", de="Zielerfassung: AN • B = AUS"},
     ["AimLock: OFF • B = ON"] = {ru="Наводка: ВЫКЛ • B = ВКЛ", uk="Наведення: ВИМК • B = УВІМК", de="Zielerfassung: AUS • B = AN"},
     ["Silent Revolver armed • server hit unverified"] = {ru="Тихий револьвер включён • попадание сервером не подтверждено", uk="Тихий револьвер увімкнено • влучання сервером не підтверджено", de="Silent-Revolver bereit • Servertreffer unbestätigt"},
-    ["Silent Knife armed • no auto throw • server unverified"] = {ru="Тихий нож включён • без автоброска • сервер не проверен", uk="Тихий ніж увімкнено • без автокидка • сервер не перевірено", de="Silent-Messer bereit • kein automatischer Wurf • Server unbestätigt"},
     ["Role ESP: GetPlayerData not found"] = {ru="ESP ролей: GetPlayerData не найден", uk="ESP ролей: GetPlayerData не знайдено", de="Rollen-ESP: GetPlayerData nicht gefunden"},
     ["Role ESP: failed to read roles"] = {ru="ESP ролей: не удалось прочитать роли", uk="ESP ролей: не вдалося зчитати ролі", de="Rollen-ESP: Rollen konnten nicht gelesen werden"},
     ["Role: Murderer"] = {ru="Роль: Убийца", uk="Роль: Вбивця", de="Rolle: Mörder"},
@@ -5347,7 +5309,6 @@ local TEXT_TRANSLATIONS = {
     ["TP "] = {ru="ТП ", uk="ТП ", de="TP "},
     ["Shoot error: "] = {ru="Ошибка выстрела: ", uk="Помилка пострілу: ", de="Schussfehler: "},
     ["Silent Revolver OFF: "] = {ru="Тихий револьвер ВЫКЛ: ", uk="Тихий револьвер ВИМК: ", de="Silent-Revolver AUS: "},
-    ["Silent Knife OFF: "] = {ru="Тихий нож ВЫКЛ: ", uk="Тихий ніж ВИМК: ", de="Silent-Messer AUS: "},
     ["SYDJA HUB | PC  •  "] = {ru="SYDJA HUB | ПК  •  ", uk="SYDJA HUB | ПК  •  ", de="SYDJA HUB | PC  •  "},
     ["Real replicated roots, not preview hitboxes:"] = {ru="Настоящие позиции игроков, не предпросмотр хитбоксов:", uk="Справжні позиції гравців, не попередній перегляд хітбоксів:", de="Echte replizierte Positionen, keine Vorschau-Hitboxen:"},
     ["No living player roots currently replicated."] = {ru="Сейчас нет доступных позиций живых игроков.", uk="Зараз немає доступних позицій живих гравців.", de="Derzeit keine Positionen lebender Spieler repliziert."},
@@ -6327,537 +6288,6 @@ UIRefs._unused, UIRefs.setSilentGunToggle = addToggle("Silent Revolver", 14.101,
         if not state.unloaded then UIRefs.Status.Text = "Silent Revolver OFF" end
     end
 end)
---// BEGIN SYDJA SILENT KNIFE
--- The supplied KnifeClient charges first, then gets its target from WeaponService:
---     throwKnife(v1:GetMouseTargetCFrame())
---     local v40 = v1:GetTargetPosition(x, y); throwKnife(v40)  -- touch hold
--- Its original throwKnife sends Events.KnifeThrown(Handle.CFrame, target).
--- Keep that function, its two arguments, input, cooldowns, stab and animations intact.
--- Read the live client callback and wrap its target provider; never require a game module.
--- Optional callback inspection is checked before use; unsupported executors keep normal Knife input.
--- Inspect the supplied KnifeClient's EXISTING callbacks. Never execute a ModuleScript:
--- calling require from an executor can mark a shared module with the wrong context.
-UIRefs.KnifeThrowAdapter = {}
-do
-    local function field(object, key)
-        local ok, value = pcall(function() return object[key] end)
-        if ok then return value end
-        return nil
-    end
-    local function serviceTable(value)
-        return type(value) == "table" and type(field(value,"GetMouseTargetCFrame")) == "function"
-            and type(field(value,"GetTargetPosition")) == "function"
-    end
-    function UIRefs.KnifeThrowAdapter.findLoadedService(knife)
-        local bulk = type(debug)=="table" and debug.getupvalues or nil
-        if type(bulk) ~= "function" and type(getupvalues)=="function" then bulk=getupvalues end
-        local single = type(debug)=="table" and debug.getupvalue or nil
-        if type(single) ~= "function" and type(getupvalue)=="function" then single=getupvalue end
-        if type(getconnections) ~= "function" or (type(bulk) ~= "function" and type(single) ~= "function") then
-            return nil, "Knife: executor cannot inspect KnifeClient"
-        end
-        local client, handle, events = knife:FindFirstChild("KnifeClient"), knife:FindFirstChild("Handle"), knife:FindFirstChild("Events")
-        if not client or not client:IsA("LocalScript") then return nil, "Knife: waiting for Events / KnifeClient" end
-        local signals, signalSet = {}, {}
-        local function add(event)
-            if event and not signalSet[event] then signalSet[event]=true; table.insert(signals,event) end
-        end
-        -- Touch captures WeaponService directly; PC InputEnded and Throw.Pressed
-        -- capture startThrowKnife -> WeaponService + throwKnife -> this Handle/Events.
-        add(UserInputService.TouchTapInWorld); add(UserInputService.InputEnded)
-        local gui = LocalPlayer:FindFirstChild("PlayerGui")
-        local input = gui and gui:FindFirstChild("InputContext")
-        local gameplay = input and input:FindFirstChild("GameplayContext")
-        local action = gameplay and gameplay:FindFirstChild("Throw")
-        if action then add(field(action,"Pressed")) end
-        add(knife.Activated); add(knife.Unequipped); add(knife.Equipped)
-        local chosen, functionsRead, valuesRead, callbacksRead = nil, 0, 0, 0
-        local seenCallbacks = {}
-        local deadline = os.clock()+.025
-        local function readValues(fn)
-            functionsRead += 1
-            if type(bulk)=="function" then
-                local ok, values = pcall(bulk,fn)
-                if ok and type(values)=="table" then return values end
-            end
-            if type(single)~="function" then return nil end
-            local values = {}
-            for index=1,64 do
-                if valuesRead>=512 or os.clock()>deadline then break end
-                valuesRead += 1
-                local ok, first, second = pcall(single,fn,index)
-                if not ok or (first==nil and second==nil) then break end
-                -- Both executor value-only and Lua name/value results are supported.
-                local value = second~=nil and second or first
-                if value~=nil then table.insert(values,value) end
-            end
-            return values
-        end
-        for _, event in ipairs(signals) do
-            if os.clock()>deadline or functionsRead>=128 or callbacksRead>=96 then break end
-            local ok, list = pcall(getconnections,event)
-            if ok and type(list)=="table" then
-                for _, connection in ipairs(list) do
-                    if os.clock()>deadline or functionsRead>=128 or callbacksRead>=96 then break end
-                    callbacksRead += 1
-                    local fn = field(connection,"Function")
-                    local enabled = field(connection,"State")
-                    if type(fn)=="function" and enabled~=false and not seenCallbacks[fn] then
-                        seenCallbacks[fn] = true
-                        local owner = field(connection,"Script")
-                        if not owner and type(getfenv)=="function" then
-                            local envOK, env = pcall(getfenv,fn)
-                            if envOK and type(env)=="table" then owner=rawget(env,"script") end
-                        end
-                        if owner==nil or owner==client then
-                            local queue, seen, candidates = {{fn=fn,depth=0}}, {}, {}
-                            local head, bound = 1, owner==client
-                            while head<=#queue and functionsRead<128 and os.clock()<=deadline do
-                                local item=queue[head];head+=1
-                                if not seen[item.fn] then
-                                    seen[item.fn]=true
-                                    local upvalues=readValues(item.fn)
-                                    if upvalues then
-                                        local inspected=0
-                                        for _, value in pairs(upvalues) do
-                                            inspected+=1
-                                            if inspected>64 or (type(bulk)=="function" and valuesRead>=512) then break end
-                                            if type(bulk)=="function" then valuesRead+=1 end
-                                            if value==knife or (handle and value==handle) or (events and value==events) or value==client then
-                                                bound=true
-                                            elseif serviceTable(value) then
-                                                candidates[value]=true
-                                            elseif type(value)=="function" and item.depth<3 and #queue<48 then
-                                                table.insert(queue,{fn=value,depth=item.depth+1})
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-                            if bound then
-                                for service in pairs(candidates) do
-                                    if chosen and chosen~=service then return nil,"Knife: ambiguous KnifeClient handler" end
-                                    chosen=service
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        if chosen then return chosen end
-        return nil,"Knife: waiting for KnifeClient handler"
-    end
-end
-function UIRefs.KnifeThrowAdapter.connect(knife, resolveAimPoint)
-    local handle = knife:FindFirstChild("Handle")
-    if not handle or not handle:IsA("BasePart") then return nil, "Knife: waiting for Handle" end
-    local service, reason = UIRefs.KnifeThrowAdapter.findLoadedService(knife)
-    if not service then return nil, reason end
-    local controller = UIRefs.KnifeSilent
-    if state.unloaded or not state.silentKnife or not controller or controller.disposed or controller.tool ~= knife then
-        return nil, "Knife: OFF"
-    end
-    if type(service.GetMouseTargetCFrame) ~= "function" then
-        return nil, "Knife: cannot connect to targeting (see console)"
-    end
-    local active, changes = true, {}
-    local function cleanup()
-        active = false
-        for i = #changes, 1, -1 do
-            local entry = changes[i]
-            if service[entry.name] == entry.wrapper then
-                local restored, err = pcall(function() service[entry.name] = entry.originalRaw end)
-                if not restored then warn("[SYDJA HUB Knife] Restore failed: " .. tostring(err)) end
-            end
-        end
-        table.clear(changes)
-    end
-    local function canRedirect()
-        local character = LocalPlayer.Character
-        if not active or not controller.isEquipped() or handle.Parent ~= knife then return false end
-        -- WeaponService is shared: a simultaneous equipped Gun must keep its ordinary target.
-        local gun = character and character:FindFirstChild("Gun")
-        if gun and gun:IsA("Tool") then return false end
-        return knife:GetAttribute("Disabled") ~= true
-    end
-    for _, name in ipairs({"GetMouseTargetCFrame", "GetTargetPosition"}) do
-        local original = service[name]
-        local originalRaw = rawget(service,name)
-        if type(original) == "function" then
-            local function wrapper(self, ...)
-                local result = table.pack(original(self, ...))
-                if not canRedirect() then return table.unpack(result, 1, result.n) end
-                local target = result[1]
-                local kind = typeof(target)
-                if kind ~= "CFrame" and kind ~= "Vector3" then return table.unpack(result, 1, result.n) end
-                local point = kind == "CFrame" and target.Position or target
-                local resolved, redirected = resolveAimPoint(handle.CFrame.Position, point)
-                if redirected and Silent.isFiniteAimVector(resolved) then
-                    -- Aim CFrame keeps the target position and points toward it. KnifeClient still owns the send.
-                    local direction = resolved-handle.CFrame.Position
-                    result[1] = kind == "CFrame" and (direction.Magnitude > .001
-                        and CFrame.lookAt(resolved, resolved+direction) or CFrame.new(resolved)) or resolved
-                end
-                return table.unpack(result, 1, result.n)
-            end
-            local installed, err = pcall(function() service[name] = wrapper end)
-            if not installed or service[name] ~= wrapper then
-                cleanup()
-                warn("[SYDJA HUB Knife] Target provider cannot be changed: " .. tostring(err))
-                return nil, "Knife: cannot connect to targeting (see console)"
-            end
-            table.insert(changes, {name = name, original = original, originalRaw = originalRaw, wrapper = wrapper})
-        end
-    end
-    return cleanup
-end
-
-do
-    local K = {tool = nil, connected = false, disposed = false,
-        bindingGeneration = 0, playerLinks = {}, characterLinks = {}, bagLinks = {}, toolLinks = {}}
-    UIRefs.KnifeSilent = K
-    local function disconnect(links)
-        for i = #links, 1, -1 do pcall(function() links[i]:Disconnect() end); links[i] = nil end
-    end
-    local function listen(event, callback, links)
-        if event then table.insert(links, event:Connect(callback)) end
-    end
-    function K.resetPrediction() K.network = nil end
-    function K.message(message)
-        if state.unloaded or K.disposed then return end
-        K.status = message
-        if UIRefs.knifeSilentStatus then Localization.setText(UIRefs.knifeSilentStatus, message) end
-        if UIRefs.knifeAimStatus then Localization.setText(UIRefs.knifeAimStatus, message) end
-    end
-    function K.detach()
-        K.bindingGeneration += 1
-        local pending=K.pendingRetry;K.pendingRetry=nil
-        if pending and type(task.cancel)=="function" then pcall(task.cancel,pending) end
-        local connection = K.adapterConnection
-        K.adapterConnection, K.connected = nil, false
-        if connection then
-            local ok, err = pcall(function()
-                if type(connection) == "function" then connection() else connection:Disconnect() end
-            end)
-            if not ok then warn("[SYDJA HUB Knife] Adapter cleanup failed: " .. tostring(err)) end
-        end
-        K.resetPrediction()
-    end
-    function K.holdingKnife()
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        local gun = char and char:FindFirstChild("Gun")
-        return not state.unloaded and not K.disposed and K.tool ~= nil
-            and K.tool.Parent == char and hum ~= nil and hum.Health > 0
-            and not (gun and gun:IsA("Tool"))
-    end
-    function K.isEquipped() return state.silentKnife and K.holdingKnife() end
-    local function ownedKnife()
-        local char, bag = LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")
-        for _, container in ipairs({char or false, bag or false}) do
-            local knife = container and container:FindFirstChild("Knife")
-            if knife and knife:IsA("Tool") then return knife end
-        end
-        return nil
-    end
-    function K.context()
-        if state.unloaded or K.disposed or not state.silentKnife then return nil, "Knife: OFF" end
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not hum or hum.Health <= 0 then return nil, "Knife: weapon unavailable" end
-        local knife = K.tool
-        if not knife or not knife.Parent then return nil, "Knife: waiting for Knife" end
-        if knife.Parent ~= char then return nil, "Knife: equip knife" end
-        local gun = char:FindFirstChild("Gun")
-        if gun and gun:IsA("Tool") then return nil, "Knife: equip knife" end
-        if knife:GetAttribute("Disabled") == true then return nil, "Knife: weapon unavailable" end
-        -- The real throw handler owns Tool.Enabled / charge / cooldown checks.
-        -- It may already have disabled the Tool when it resolves the throw point.
-        if not K.connected then return nil, K.bindingReason or "Knife: cannot connect to targeting (see console)" end
-        return knife
-    end
-    local function pingDelay()
-        local at = os.clock()
-        local network = K.network
-        if not network then network = {nextAt = 0, samples = {}}; K.network = network end
-        if at >= network.nextAt then
-            network.nextAt = at + 0.25
-            local ok, rtt = pcall(function() return LocalPlayer:GetNetworkPing() end)
-            if ok and type(rtt) == "number" and rtt == rtt and rtt >= 0 and rtt < math.huge then
-                if not network.goodAt or at - network.goodAt > 3 then table.clear(network.samples) end
-                table.insert(network.samples, math.clamp(rtt, 0, 2))
-                if #network.samples > 3 then table.remove(network.samples, 1) end
-                local sorted = table.clone(network.samples); table.sort(sorted)
-                network.rtt, network.goodAt = sorted[math.ceil(#sorted / 2)], at
-            end
-        end
-        if not network.goodAt or at - network.goodAt > 3 then return 0 end
-        -- Outgoing-delay estimate only; projectile flight speed is unknown in the supplied code.
-        return math.clamp(network.rtt * 0.5, 0, 0.12)
-    end
-    function K.predict(chest, root, humanoid)
-        local position = chest.Position
-        if not Silent.isFiniteAimVector(position) then return nil end
-        local scale = math.clamp(tonumber(values.knifePrediction) or 0, 0, 200) / 100
-        if scale <= 0 then return position end
-        local horizon = math.clamp(pingDelay() * scale, 0, 0.18)
-        if horizon <= 0 then return position end
-        local velocity = root.AssemblyLinearVelocity
-        if not Silent.isFiniteAimVector(velocity) then return position end
-        local horizontal = Vector3.new(velocity.X, 0, velocity.Z)
-        if horizontal.Magnitude > 90 or math.abs(velocity.Y) > 90 then return position end
-        horizontal *= horizon
-        if horizontal.Magnitude > 2 then horizontal = horizontal.Unit * 2 end
-        local vertical = 0
-        local motionState = humanoid:GetState()
-        if humanoid.FloorMaterial == Enum.Material.Air and (motionState == Enum.HumanoidStateType.Jumping
-            or motionState == Enum.HumanoidStateType.Freefall) then
-            local gravity = tonumber(Workspace.Gravity) or 196.2
-            if gravity ~= gravity or gravity < 0 or gravity > 500 then gravity = 196.2 end
-            local size = chest.Size
-            local limit = Silent.isFiniteAimVector(size) and math.clamp(size.Y * 0.35, 0.35, 1.25) or 0.7
-            vertical = math.clamp(velocity.Y * horizon - 0.5 * gravity * horizon * horizon, -limit, limit)
-        end
-        local result = position + horizontal + Vector3.new(0, vertical, 0)
-        return Silent.isFiniteAimVector(result) and result or position
-    end
-    function K.selectTarget(origin, preview)
-        if not (K.isEquipped() or (preview and K.holdingKnife())) or state.spectateMurderer then return nil, "Knife: target unavailable" end
-        local camera = Workspace.CurrentCamera
-        if not camera then return nil, "Knife: target unavailable" end
-        if typeof(origin) == "CFrame" then origin = origin.Position end
-        if not Silent.isFiniteAimVector(origin) then origin = camera.CFrame.Position end
-        if not Silent.isFiniteAimVector(origin) then return nil, "Knife: aim data unavailable" end
-        local viewport = camera.ViewportSize
-        local best, bestDistance, inCircle = nil, math.huge, false
-        local radius = math.clamp(tonumber(values.knifeFOV) or 115, 35, 350)
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer then
-                local char = player.Character
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
-                local role = rolesAvailable and roles[player.Name] or nil
-                local living = hum and hum.Health > 0 and not (type(role) == "table" and (role.Killed or role.Dead))
-                local root = living and char:FindFirstChild("HumanoidRootPart")
-                local chest = living and (char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or root)
-                if root and root:IsA("BasePart") and chest and chest:IsA("BasePart")
-                    and Silent.isFiniteAimVector(chest.Position) then
-                    local screen, visible = camera:WorldToViewportPoint(chest.Position)
-                    if visible and Silent.isFiniteAimVector(screen) and screen.Z > 0 then
-                        local dx, dy = screen.X - viewport.X * 0.5, screen.Y - viewport.Y * 0.5
-                        local distance = dx * dx + dy * dy
-                        if distance <= radius * radius and distance < bestDistance then
-                            inCircle = true
-                            local predicted = state.silentKnife and K.predict(chest, root, hum) or chest.Position
-                            if predicted and state.knifeVisibleOnly then
-                                local params = RaycastParams.new()
-                                params.FilterType = Enum.RaycastFilterType.Exclude
-                                params.FilterDescendantsInstances = {LocalPlayer.Character}
-                                params.IgnoreWater = true
-                                local function clear(point)
-                                    local hit = Workspace:Raycast(origin, point - origin, params)
-                                    return not hit or (hit.Instance and hit.Instance:IsDescendantOf(char))
-                                end
-                                if not clear(predicted) then
-                                    predicted = clear(chest.Position) and chest.Position or nil
-                                end
-                            end
-                            if predicted then best, bestDistance = predicted, distance end
-                        end
-                    end
-                end
-            end
-        end
-        return best, best and "Knife: target ready; hit unverified"
-            or inCircle and "Knife: path blocked" or "Knife: target outside circle"
-    end
-    function K.resolveAimPoint(knife, originalOrigin, originalTarget)
-        -- Called by the REAL throw handler through the connector. Stab never calls this.
-        if knife ~= K.tool or not K.context() or not Silent.isFiniteAimVector(originalOrigin)
-            or not Silent.isFiniteAimVector(originalTarget) then return originalTarget, false end
-        local ok, aim, reason = pcall(K.selectTarget, originalOrigin)
-        if not ok then K.message("Knife: aim data unavailable"); return originalTarget, false end
-        if aim then K.message("Knife: throw redirected; hit unverified"); return aim, true end
-        K.message(reason)
-        return originalTarget, false
-    end
-    function K.tryConnect(retryAttempt)
-        retryAttempt=type(retryAttempt)=="number" and retryAttempt or 0
-        K.detach()
-        if not state.silentKnife or state.unloaded or K.disposed or not K.tool then return end
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not hum or hum.Health <= 0 then K.bindingReason = "Knife: weapon unavailable"; K.message(K.bindingReason); return end
-        local knife = K.tool
-        local events, client = knife:FindFirstChild("Events"), knife:FindFirstChild("KnifeClient")
-        if not events or not events:FindFirstChild("KnifeThrown") or not events:FindFirstChild("KnifeStabbed")
-            or not events:FindFirstChild("HandleTouched") or not client or not client:IsA("LocalScript") then
-            K.bindingReason = "Knife: waiting for Events / KnifeClient"
-            K.message(K.bindingReason)
-            return
-        end
-        local generation = K.bindingGeneration
-        local ok, connection, reason = pcall(UIRefs.KnifeThrowAdapter.connect, knife, function(origin, target)
-            return K.resolveAimPoint(knife, origin, target)
-        end)
-        local valid = type(connection) == "function"
-            or typeof(connection) == "RBXScriptConnection"
-            or (type(connection) == "table" and type(connection.Disconnect) == "function")
-        if generation ~= K.bindingGeneration or knife ~= K.tool or not state.silentKnife or K.disposed then
-            if ok and valid then pcall(function() if type(connection) == "function" then connection() else connection:Disconnect() end end) end
-            return
-        end
-        K.adapterConnection, K.connected = ok and valid and connection or nil, ok and valid
-        if K.connected then
-            K.bindingReason = nil
-        elseif ok and type(reason) == "string" then
-            K.bindingReason = reason
-        else
-            K.bindingReason = "Knife: adapter failed (see console)"
-        end
-        if not ok then warn("[SYDJA HUB Knife] " .. tostring(connection)) end
-        K.message(K.connected and "Knife: equip knife" or (K.bindingReason or "Knife: cannot connect to targeting (see console)"))
-        -- KnifeClient may still be initializing its input callbacks. Three delayed
-        -- setup attempts only; no RenderStepped/Heartbeat retries or module loading.
-        if not K.connected and K.bindingReason=="Knife: waiting for KnifeClient handler"
-            and retryAttempt<3 and type(task.delay)=="function" then
-            local delays={.12,.35,.9}
-            K.pendingRetry=task.delay(delays[retryAttempt+1],function()
-                if generation~=K.bindingGeneration or knife~=K.tool or K.disposed or state.unloaded or not state.silentKnife then return end
-                K.pendingRetry=nil
-                K.tryConnect(retryAttempt+1)
-            end)
-        end
-    end
-    function K.refreshTool()
-        if K.disposed or state.unloaded then return end
-        local knife = ownedKnife()
-        if knife == K.tool then return end
-        K.detach(); disconnect(K.toolLinks)
-        K.tool, K.bindingReason = knife, nil
-        if knife then
-            listen(knife.DescendantAdded, function(part)
-                if part.Name == "Handle" or part.Name == "Events" or part.Name == "KnifeClient" or part.Name == "KnifeThrown"
-                    or part.Name == "KnifeStabbed" or part.Name == "HandleTouched" then K.tryConnect() end
-            end, K.toolLinks)
-            listen(knife.AncestryChanged, K.refreshTool, K.toolLinks)
-            listen(knife.Equipped, function() if state.silentKnife and not K.connected then K.tryConnect() end end, K.toolLinks)
-        end
-        if state.silentKnife then K.tryConnect(); if not knife then K.message("Knife: waiting for Knife") end end
-    end
-    function K.bindCharacter(character)
-        K.detach(); disconnect(K.characterLinks); disconnect(K.toolLinks); K.tool = nil
-        if K.disposed then return end
-        if character then
-            listen(character.ChildAdded, function(child)
-                if child:IsA("Humanoid") then K.bindCharacter(character) else K.refreshTool() end
-            end, K.characterLinks)
-            listen(character.ChildRemoved, K.refreshTool, K.characterLinks)
-            local hum = character:FindFirstChildOfClass("Humanoid")
-            if hum then listen(hum.Died, function() K.detach(); K.message("Knife: weapon unavailable") end, K.characterLinks) end
-        end
-        K.refreshTool()
-    end
-    function K.bindBag(bag)
-        disconnect(K.bagLinks)
-        if bag then
-            listen(bag.ChildAdded, K.refreshTool, K.bagLinks)
-            listen(bag.ChildRemoved, K.refreshTool, K.bagLinks)
-        end
-        K.refreshTool()
-    end
-    function K.setEnabled(enabled)
-        local previous = K.tool
-        state.silentKnife = enabled
-        K.refreshTool()
-        if enabled then
-            if UIRefs.setFOVIndicatorToggle then UIRefs.setFOVIndicatorToggle(true) end
-            if previous == K.tool then K.tryConnect() end
-            if not K.tool then K.message("Knife: waiting for Knife") end
-        else K.detach(); K.message("Knife: OFF") end
-    end
-    function K.setAdapter(connector)
-        if type(connector) ~= "function" then return false, "Knife adapter must be a function" end
-        UIRefs.KnifeThrowAdapter.connect = connector
-        K.tryConnect()
-        return true
-    end
-    function K.attachOverlay()
-        UIRefs.knifeAimCircle = create("Frame", {Name = "KnifeFOV", AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(values.knifeFOV * 2, values.knifeFOV * 2),
-            BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false, ZIndex = 4}, UIRefs.AimCircleGui)
-        create("UICorner", {CornerRadius = UDim.new(1, 0)}, UIRefs.knifeAimCircle)
-        UIRefs.knifeAimStroke = create("UIStroke", {Thickness = 1, Transparency = 0.25,
-            Color = UITheme.accent}, UIRefs.knifeAimCircle)
-        UIRefs.knifeAimStatus = create("TextLabel", {Name = "KnifeAimStatus", AnchorPoint = Vector2.new(0.5, 0),
-            Size = UDim2.fromOffset(400, 42), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-            Text = "Knife: OFF", TextSize = 11, TextWrapped = true, Visible = false,
-            TextColor3 = UITheme.accent, ZIndex = 4}, UIRefs.AimCircleGui)
-        listen(LocalPlayer.CharacterAdded, K.bindCharacter, K.playerLinks)
-        listen(LocalPlayer.ChildAdded, function(child) if child:IsA("Backpack") then K.bindBag(child) end end, K.playerLinks)
-        listen(LocalPlayer.ChildRemoved, function(child) if child:IsA("Backpack") then K.bindBag(nil) end end, K.playerLinks)
-        K.bindCharacter(LocalPlayer.Character); K.bindBag(LocalPlayer:FindFirstChild("Backpack"))
-        local elapsed = 0
-        K.previewConnection = RunService.Heartbeat:Connect(function(dt)
-            if K.disposed or state.unloaded then return end
-            elapsed += dt or 0; if elapsed < 0.10 then return end; elapsed = 0
-            local circle, caption = UIRefs.knifeAimCircle, UIRefs.knifeAimStatus
-            local visible = state.fovIndicator and K.holdingKnife() and not state.spectateMurderer
-            circle.Visible, caption.Visible = visible, visible
-            if not visible then return end
-            local _, reason = K.context()
-            if not state.silentKnife then reason = nil end
-            local handle = K.tool:FindFirstChild("Handle")
-            local origin = handle and handle:IsA("BasePart") and handle.Position or nil
-            local aim, targetReason
-            if not reason then aim, targetReason = K.selectTarget(origin, not state.silentKnife) end
-            local camera = Workspace.CurrentCamera
-            local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
-            circle.Size = UDim2.fromOffset(values.knifeFOV * 2, values.knifeFOV * 2)
-            caption.Position = UDim2.fromOffset(viewport.X * 0.5,
-                math.clamp(viewport.Y * 0.5 + values.knifeFOV + 14, 0, math.max(0, viewport.Y - 46)))
-            caption.Size = UDim2.fromOffset(math.max(80, math.min(400, viewport.X - 24)), 42)
-            local color = reason and Color3.fromRGB(245, 180, 65)
-                or aim and (state.silentKnife and Color3.fromRGB(80, 235, 120) or Color3.fromRGB(90, 165, 245))
-                or Color3.fromRGB(150, 150, 150)
-            UIRefs.knifeAimStroke.Color, caption.TextColor3 = color, color
-            K.message(not state.silentKnife and "Knife: OFF" or reason or targetReason or "Knife: target unavailable")
-        end)
-    end
-    function K.stop()
-        if K.disposed then return end
-        K.disposed = true; K.detach()
-        if K.previewConnection then K.previewConnection:Disconnect(); K.previewConnection = nil end
-        disconnect(K.playerLinks); disconnect(K.characterLinks); disconnect(K.bagLinks); disconnect(K.toolLinks)
-        K.tool = nil
-    end
-end
---// END SYDJA SILENT KNIFE
-addSection("SILENT KNIFE", 14.201)
-UIRefs.silentKnifeButton, UIRefs.setSilentKnifeToggle = addToggle("Silent Knife", 14.202, function(enabled)
-    UIRefs.KnifeSilent.setEnabled(enabled)
-end)
-UIRefs.knifeFOVSlider, UIRefs.setKnifeFOV = addSlider("Knife FOV", 35, 350, values.knifeFOV, 14.204, function(value)
-    values.knifeFOV = value
-end)
-UIRefs.knifePredictionSlider, UIRefs.setKnifePrediction = addSlider("Knife Prediction", 0, 200,
-    values.knifePrediction, 14.205, function(value)
-        values.knifePrediction = value
-        UIRefs.KnifeSilent.resetPrediction()
-    end)
-UIRefs.knifeVisibleButton, UIRefs.setKnifeVisibleCheck = addToggle("Visible Check", 14.206, function(enabled)
-    state.knifeVisibleOnly = enabled
-end)
-UIRefs.setKnifeVisibleCheck(true)
-UIRefs.knifeSilentStatus = create("TextLabel", {Name = "KnifeSilentStatus", LayoutOrder = 14.207,
-    Size = UDim2.new(1, -4, 0, 46), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-    Text = "Knife: OFF", TextColor3 = UITheme.muted, TextSize = 12,
-    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left}, UIRefs.Content)
-create("TextLabel", {Name = "KnifePredictionHint", LayoutOrder = 14.208,
-    Size = UDim2.new(1, -4, 0, 38), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-    Text = "Knife Prediction: 0 disables; 100 uses your ping.", TextColor3 = UITheme.muted,
-    TextSize = 11, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left}, UIRefs.Content)
-
 --// BEGIN SYDJA HITBOX PANTHER
 -- Local, invisible HumanoidRootPart only. No server registration/damage claim.
 -- Keep the actual render parts, collision/query flags, CFrames and weapon handlers unchanged.
@@ -7149,7 +6579,6 @@ end
 UIRefs.autoPredictionButton, UIRefs.setAutoPredictionToggle = addToggle("Auto Prediction", 14, function(enabled)
     state.silentAutoPredict = enabled
     if Silent.gunAuto then Silent.gunAuto.reset(true) end
-    Silent.resetKnife()
     if not state.unloaded and UIRefs.Status then
         Localization.setText(UIRefs.Status, enabled
             and "Auto Prediction ON: follows your ping"
@@ -7214,7 +6643,6 @@ UIRefs.AimStatus = create("TextLabel", {
 }, UIRefs.AimCircleGui)
 -- This overlay is outside the main menu; keep an explicit English text source.
 Localization.setText(UIRefs.AimStatus, Silent.feedbackMessage or "Silent: OFF")
-UIRefs.KnifeSilent.attachOverlay()
 
 UIRefs.flingMurdererButton = create("TextButton", {
     Name = "FlingMurderer",
@@ -9891,8 +9319,12 @@ do
         elapsed = 0
         local circle = UIRefs.AimCircle
         if not circle or not UIRefs.AimCircleStroke then return end
+        local character = LocalPlayer.Character
+        local knife = character and character:FindFirstChild("Knife")
+        local gun = character and character:FindFirstChild("Gun")
+        local knifeEquipped = knife and knife:IsA("Tool") and not (gun and gun:IsA("Tool"))
         local enabled = state.fovIndicator and not state.unloaded and not state.spectateMurderer
-            and not (UIRefs.KnifeSilent and UIRefs.KnifeSilent.holdingKnife())
+            and not knifeEquipped
         circle.Visible = enabled
         if UIRefs.AimStatus then UIRefs.AimStatus.Visible = enabled and state.silentGun end
         if not enabled then return end
@@ -11124,7 +10556,6 @@ local function onCharacterAdded(character)
         Silent.restoreXeno(true)
         Silent.xenoStatusKey = nil
     end
-    Silent.resetKnife()
     disconnectBucket(characterConnections)
     clearLongJump()
     if UIRefs.stopBring then UIRefs.stopBring("Bring stopped: respawn") end
@@ -11894,7 +11325,6 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     if UIRefs.clearAttackSelection then UIRefs.clearAttackSelection() end
     Silent.stop()
     if UIRefs.setSilentGunToggle then UIRefs.setSilentGunToggle(false) end
-    if UIRefs.setSilentKnifeToggle then UIRefs.setSilentKnifeToggle(false) end
     finishMurdererShot()
     finishRevolverTrip()
     stopRoleFling()
@@ -11934,16 +11364,12 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     if UIRefs.setSilentLead then UIRefs.setSilentLead(0) end
     if UIRefs.setAutoPredictionToggle then UIRefs.setAutoPredictionToggle(true) end
     values.aimRadius = 115
-    values.knifeFOV, values.knifePrediction = 115, 100
     values.aimSmooth = 9
     values.aimLeadMs = 140
     values.jumpLeadMs = 115
     if UIRefs.setAimLead then UIRefs.setAimLead(140) end
     if UIRefs.setJumpAimLead then UIRefs.setJumpAimLead(115) end
     if UIRefs.setAimRadius then UIRefs.setAimRadius(115) end
-    if UIRefs.setKnifeFOV then UIRefs.setKnifeFOV(115) end
-    if UIRefs.setKnifePrediction then UIRefs.setKnifePrediction(100) end
-    if UIRefs.setKnifeVisibleCheck then UIRefs.setKnifeVisibleCheck(true) end
     if UIRefs.setAimSmooth then UIRefs.setAimSmooth(9) end
     if UIRefs.setAimVisibleToggle then UIRefs.setAimVisibleToggle(true) end
 
