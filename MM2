@@ -4,7 +4,7 @@
 -- executor's workspace into its Autoexec folder. Executor attachment is required.
 -- The long string contains the editable full program, used for its local cache.
 local program = [====[
---// SYDJA HUB V1.1.2 PC — Silent Revolver and selected-player Hitbox Panther
+--// SYDJA HUB V1.1.3 PC — CFG profiles, Silent Revolver and selected-player Hitbox Panther
 --// Knife uses the game's original stab and throw handlers without targeting wrappers.
 --// Panther changes only the invisible local root; server weapon registration is unchanged.
 --// Spin Speed: independent yaw after character controls; walking/Shift Lock supported.
@@ -40,7 +40,7 @@ local program = [====[
 --// V0.9.26: distinguish uncollected coins from stale/hidden ones and avoid a false HUD zero.
 --// Client menu. Body AimLock; YARHM Fling for roles and a selected player.
 
-local CURRENT_VERSION = "1.1.2"
+local CURRENT_VERSION = "1.1.3"
 local VERSION = "V" .. CURRENT_VERSION
 local PC_ONLY_BUILD = true -- V1.0: Android/mobile branch retired
 local UIRefs = {}
@@ -4205,6 +4205,40 @@ function Silent.gunAimPosition(chest, motionPart)
             return horizontal.Magnitude <= 90 and horizontal or nil
         end
 
+        -- Observe ground/jump transitions at the click too, before short sample returns.
+        -- A new jump must never inherit the previous descent or horizontal stop.
+        function auto.observeVertical(motion, rawY, at)
+            local humanoid = motion.humanoid
+            local ok, currentState = pcall(function() return humanoid and humanoid:GetState() end)
+            local alive = ok and currentState ~= nil and humanoid and humanoid.Health > 0
+            motion.yCanObserve = alive and currentState ~= Enum.HumanoidStateType.Landed
+                and currentState ~= Enum.HumanoidStateType.Seated and currentState ~= Enum.HumanoidStateType.Dead
+                and currentState ~= Enum.HumanoidStateType.Swimming and currentState ~= Enum.HumanoidStateType.Climbing
+                and (currentState == Enum.HumanoidStateType.Jumping or humanoid.FloorMaterial == Enum.Material.Air)
+            if not motion.yCanObserve then motion.yVerifiedAt = -math.huge end
+            local airborne = alive
+                and (currentState == Enum.HumanoidStateType.Jumping
+                    or (currentState == Enum.HumanoidStateType.Freefall
+                        and humanoid.FloorMaterial == Enum.Material.Air))
+            airborne = airborne or (motion.yCanObserve and at - motion.yVerifiedAt <= 0.10)
+            local wasAirborne, previousY = motion.airborne, motion.yReported
+            motion.airborne, motion.yReported = airborne == true, rawY
+            if not airborne or rawY == nil then
+                motion.yVelocity, motion.yConfidence, motion.yMovedAt = 0, 0, -math.huge
+                motion.yFreshUntil = -math.huge
+                return
+            end
+            local changed = previousY and math.abs(rawY - previousY) > 12
+            local reversed = previousY and previousY * rawY < 0
+            if not wasAirborne or changed or reversed then
+                motion.yVelocity, motion.yConfidence = rawY, 0.5
+                motion.yMovedAt, motion.yFreshUntil = at, at + 0.035
+            elseif motion.yConfidence > 0 then
+                motion.yVelocity = rawY -- use this click's ascent/apex/descent, not the last tick's
+                if previousY and math.abs(rawY - previousY) >= 0.2 then motion.yMovedAt = at end
+            end
+        end
+
         function auto.sample(part, at)
             local position = part.Position
             if not Silent.isFiniteAimVector(position) then auto.reset(false); return nil end
@@ -4217,10 +4251,14 @@ function Silent.gunAimPosition(chest, motionPart)
                 motion = {part = part, position = position, at = at, velocity = Vector3.zero,
                     reported = reported, steady = 0, error = 0, movedAt = at, holdUntil = at,
                     yVelocity = 0, yConfidence = 0, yMovedAt = -math.huge,
+                    airborne = false, yReported = rawY, yHoldUntil = at, yFreshUntil = -math.huge,
+                    yVerifiedAt = -math.huge, yCanObserve = false,
                     humanoid = part.Parent and part.Parent:FindFirstChildOfClass("Humanoid")}
                 auto.motion = motion
                 return motion
             end
+
+            auto.observeVertical(motion, rawY, at)
 
             -- A fresh click must not retain the old strafe direction between ticks.
             local previous = motion.reported
@@ -4230,6 +4268,7 @@ function Silent.gunAimPosition(chest, motionPart)
                     motion.velocity, motion.steady, motion.turnAt = Vector3.zero, 0, nil
                     motion.turnConfirmed = false
                     motion.position, motion.at, motion.movedAt = position, at, at
+                    motion.reported = reported
                     return motion -- this click observes a fresh stop, not the previous packet's displacement
                 elseif speed > 1 and previous:Dot(reported) < previous.Magnitude * speed * 0.35 then
                     motion.velocity, motion.steady = reported, 0
@@ -4245,13 +4284,28 @@ function Silent.gunAimPosition(chest, motionPart)
             if displacement.Magnitude > 12 or measured.Magnitude > 90 or math.abs(measuredY) > 90 then
                 motion.velocity, motion.steady, motion.error = Vector3.zero, 0, 0
                 motion.yVelocity, motion.yConfidence, motion.yMovedAt = 0, 0, -math.huge
+                motion.yHoldUntil, motion.yFreshUntil = at + 0.15, -math.huge
+                motion.yVerifiedAt = -math.huge
                 motion.turnAt, motion.turnConfirmed = nil, false
                 motion.movedAt, motion.holdUntil = at, at + 0.15
                 return motion
             end
 
+            -- Corroborated displacement can recover a delayed remote Humanoid state.
+            -- Floor contact/Landed/death still clear it immediately; raw velocity alone is insufficient.
+            if motion.yCanObserve and rawY and math.abs(rawY)>=2 and math.abs(measuredY)>=2
+                and rawY*measuredY>0 and math.abs(measuredY-rawY)<=math.max(12,(Workspace.Gravity or 196.2)*dt+6) then
+                motion.yVerifiedAt,motion.airborne=at,true
+            end
+
             -- Learn vertical motion separately; jumping in place needs no horizontal speed.
-            if math.abs(measuredY) >= 0.6 then
+            if not motion.airborne then
+                motion.yVelocity, motion.yConfidence, motion.yMovedAt = 0, 0, -math.huge
+            elseif rawY and at <= motion.yFreshUntil
+                and (math.abs(measuredY) < 0.6 or measuredY * rawY <= 0) then
+                -- A packet spanning landing/rejump can average two opposing phases to zero.
+                motion.yVelocity, motion.yConfidence, motion.yMovedAt = rawY, 0.5, at
+            elseif math.abs(measuredY) >= 0.6 then
                 motion.yMovedAt = at
                 local gravity = tonumber(Workspace.Gravity) or 196.2
                 if gravity ~= gravity or gravity < 0 or gravity > 500 then gravity = 196.2 end
@@ -4259,6 +4313,8 @@ function Silent.gunAimPosition(chest, motionPart)
                 local tolerance = math.max(12, gravity * dt + 6)
                 if rawY and difference <= tolerance then
                     motion.yVelocity, motion.yConfidence = rawY, 1
+                elseif rawY and at <= motion.yFreshUntil then
+                    motion.yVelocity, motion.yConfidence = rawY, 0.5
                 elseif rawY and math.abs(rawY) < 0.6 then
                     motion.yVelocity, motion.yConfidence = measuredY, 0.45
                 else
@@ -4309,6 +4365,24 @@ function Silent.gunAimPosition(chest, motionPart)
             return motion
         end
 
+        function auto.verticalOffset(chest, part, motion, delay, at)
+            if not motion.airborne or motion.yConfidence <= 0
+                or at < motion.yHoldUntil or at - motion.yMovedAt > 0.10 then return 0 end
+            local velocity = part.AssemblyLinearVelocity
+            if not Silent.isFiniteAimVector(velocity) or math.abs(velocity.Y) > 90 then return 0 end
+            local vy = motion.yVelocity
+            if math.abs(velocity.Y - vy) > 12 then return 0 end
+            local gravity = tonumber(Workspace.Gravity) or 196.2
+            if gravity ~= gravity or gravity < 0 or gravity > 500 then gravity = 196.2 end
+            local horizon = math.min(delay, 0.08)
+            local dy = (vy * horizon - 0.5 * gravity * horizon * horizon) * motion.yConfidence
+            -- Stay inside the live torso instead of aiming several studs above a jumping player.
+            -- The selected player's expanded Panther root must not enlarge this correction.
+            local size = chest.Size
+            local limit = Silent.isFiniteAimVector(size) and math.clamp(size.Y * 0.35, 0.25, 0.8) or 0.7
+            return math.clamp(dy, -limit, limit)
+        end
+
         function auto.offset(chest, part)
             local at = os.clock()
             local delay = auto.networkDelay(at)
@@ -4320,8 +4394,8 @@ function Silent.gunAimPosition(chest, motionPart)
             local current = auto.readVelocity(part)
             if not current then return Vector3.zero end
             local speed = motion.velocity.Magnitude
-            if current.Magnitude >= 0.3 and speed > 0 and motion.velocity:Dot(current) <= 0 then return Vector3.zero end
-            if at >= motion.holdUntil and speed >= 0.3 then
+            local aligned = current.Magnitude < 0.3 or speed <= 0 or motion.velocity:Dot(current) > 0
+            if aligned and at >= motion.holdUntil and speed >= 0.3 then
                 local confidence = math.clamp(motion.steady / 0.07, 0, 1)
                 if motion.turnConfirmed then confidence = math.max(0.4, confidence) end
                 confidence *= math.clamp(1 - math.max(0, at - motion.movedAt - 0.05) / 0.05, 0, 1)
@@ -4330,9 +4404,8 @@ function Silent.gunAimPosition(chest, motionPart)
                 local lead = math.min(delay, margin / math.max(motion.error, 0.01), 0.85 / speed) * confidence
                 horizontal, auto.leadSeconds = motion.velocity * lead, lead
             end
-            -- Y always follows the current torso, including ascent, apex and descent.
-            -- An uncertain model cannot launch the aim above/below the live character.
-            return Silent.boundHorizontalLead(chest, horizontal)
+            local vertical = auto.verticalOffset(chest, part, motion, delay, at)
+            return Silent.boundHorizontalLead(chest, horizontal) + Vector3.new(0, vertical, 0)
         end
 
 
@@ -4375,7 +4448,7 @@ function Silent.gunAimPosition(chest, motionPart)
     end
     auto.context()
     -- RTT is seconds. Unknown ping uses direct aim; no distance/speed guess.
-    -- Fresh horizontal movement gets short bounded lead; Y is the live torso height.
+    -- XZ and verified airborne Y receive independent, torso-bounded outgoing-delay lead.
     return position + auto.offset(chest, motionPart)
 end
 
@@ -5064,6 +5137,41 @@ local TEXT_TRANSLATIONS = {
     ["Panther: resize failed (see console)"] = {ru="Panther: размер не изменён (см. консоль)", uk="Panther: розмір не змінено (див. консоль)", de="Panther: Größe nicht geändert (Konsole)"},
     ["Panther: local hitbox active; server hits unverified"] = {ru="Panther: локальный хитбокс включён; попадания сервером не подтверждены", uk="Panther: локальний хітбокс увімкнено; влучання сервером не підтверджено", de="Panther: lokale Hitbox aktiv; Servertreffer unbestätigt"},
     ["Only the invisible local root is expanded. MM2 server registration is unchanged."] = {ru="Расширяется только невидимая локальная корневая часть. Серверная регистрация MM2 не изменяется.", uk="Збільшується лише невидима локальна коренева частина. Серверна реєстрація MM2 не змінюється.", de="Nur der unsichtbare lokale Root wächst. MM2-Servertreffer bleiben unverändert."},
+    ["CFG PROFILES"] = {ru="CFG-ПРОФИЛИ", uk="CFG-ПРОФІЛІ", de="CFG-PROFILE"},
+    ["CFG profile name"] = {ru="Имя CFG-профиля", uk="Назва CFG-профілю", de="CFG-Profilname"},
+    ["Save CFG"] = {ru="Сохранить CFG", uk="Зберегти CFG", de="CFG speichern"},
+    ["Load CFG"] = {ru="Загрузить CFG", uk="Завантажити CFG", de="CFG laden"},
+    ["Refresh CFG"] = {ru="Обновить CFG", uk="Оновити CFG", de="CFG aktualisieren"},
+    ["Saved CFG profiles"] = {ru="Сохранённые CFG-профили", uk="Збережені CFG-профілі", de="Gespeicherte CFG-Profile"},
+    ["No CFG files found"] = {ru="CFG-файлы не найдены", uk="CFG-файлів не знайдено", de="Keine CFG-Dateien gefunden"},
+    ["CFG: ready"] = {ru="CFG: готово", uk="CFG: готово", de="CFG: bereit"},
+    ["CFG: saving..."] = {ru="CFG: сохранение...", uk="CFG: збереження...", de="CFG: wird gespeichert..."},
+    ["CFG: loading..."] = {ru="CFG: загрузка...", uk="CFG: завантаження...", de="CFG: wird geladen..."},
+    ["CFG: incompatible profile format."] = {ru="CFG: несовместимый формат профиля.", uk="CFG: несумісний формат профілю.", de="CFG: inkompatibles Profilformat."},
+    ["CFG: invalid settings."] = {ru="CFG: некорректные настройки.", uk="CFG: некоректні налаштування.", de="CFG: ungültige Einstellungen."},
+    ["CFG: invalid profile name."] = {ru="CFG: некорректное имя профиля.", uk="CFG: некоректна назва профілю.", de="CFG: ungültiger Profilname."},
+    ["CFG: operation failed. See console."] = {ru="CFG: ошибка операции. См. консоль.", uk="CFG: помилка операції. Див. консоль.", de="CFG: Vorgang fehlgeschlagen. Siehe Konsole."},
+    ["CFG: file listing unavailable. Enter the profile name manually."] = {ru="CFG: список файлов недоступен. Введи имя профиля вручную.", uk="CFG: список файлів недоступний. Введи назву профілю вручну.", de="CFG: Dateiliste nicht verfügbar. Profilnamen manuell eingeben."},
+    ["CFG: could not list files."] = {ru="CFG: не удалось получить список файлов.", uk="CFG: не вдалося отримати список файлів.", de="CFG: Dateiliste konnte nicht gelesen werden."},
+    ["CFG: file list refreshed."] = {ru="CFG: список файлов обновлён.", uk="CFG: список файлів оновлено.", de="CFG: Dateiliste aktualisiert."},
+    ["CFG: executor cannot save files."] = {ru="CFG: executor не поддерживает сохранение файлов.", uk="CFG: executor не підтримує збереження файлів.", de="CFG: Executor kann keine Dateien speichern."},
+    ["CFG: executor cannot read files."] = {ru="CFG: executor не поддерживает чтение файлов.", uk="CFG: executor не підтримує читання файлів.", de="CFG: Executor kann keine Dateien lesen."},
+    ["CFG: JSON service unavailable."] = {ru="CFG: сервис JSON недоступен.", uk="CFG: служба JSON недоступна.", de="CFG: JSON-Dienst nicht verfügbar."},
+    ["CFG: could not encode settings."] = {ru="CFG: не удалось записать настройки в JSON.", uk="CFG: не вдалося записати налаштування в JSON.", de="CFG: Einstellungen konnten nicht codiert werden."},
+    ["CFG: could not save file."] = {ru="CFG: не удалось сохранить файл.", uk="CFG: не вдалося зберегти файл.", de="CFG: Datei konnte nicht gespeichert werden."},
+    ["CFG: saved file verification failed."] = {ru="CFG: сохранённый файл не прошёл проверку.", uk="CFG: збережений файл не пройшов перевірку.", de="CFG: Prüfung der gespeicherten Datei fehlgeschlagen."},
+    ["CFG: file not found or unreadable."] = {ru="CFG: файл не найден или недоступен для чтения.", uk="CFG: файл не знайдено або неможливо прочитати.", de="CFG: Datei fehlt oder ist nicht lesbar."},
+    ["CFG: empty or oversized file."] = {ru="CFG: файл пустой или слишком большой.", uk="CFG: файл порожній або завеликий.", de="CFG: Datei leer oder zu groß."},
+    ["CFG: invalid JSON file."] = {ru="CFG: некорректный JSON-файл.", uk="CFG: некоректний JSON-файл.", de="CFG: ungültige JSON-Datei."},
+    ["CFG: finish TP / Fling / shot first."] = {ru="CFG: сначала заверши ТП / флинг / выстрел.", uk="CFG: спочатку заверши ТП / флінг / постріл.", de="CFG: erst TP / Fling / Schuss beenden."},
+    ["CFG: load failed; previous settings restored."] = {ru="CFG: загрузка не удалась; прежние настройки восстановлены.", uk="CFG: завантаження не вдалося; попередні налаштування відновлено.", de="CFG: Laden fehlgeschlagen; vorherige Einstellungen wiederhergestellt."},
+    ["CFG: load failed; restore incomplete. See console."] = {ru="CFG: ошибка загрузки; восстановление неполное. См. консоль.", uk="CFG: помилка завантаження; відновлення неповне. Див. консоль.", de="CFG: Laden fehlgeschlagen; Wiederherstellung unvollständig. Siehe Konsole."},
+    ["CFG saved: "] = {ru="CFG сохранён: ", uk="CFG збережено: ", de="CFG gespeichert: "},
+    ["CFG loaded: "] = {ru="CFG загружен: ", uk="CFG завантажено: ", de="CFG geladen: "},
+    ["CFG loaded; Panther player is absent: "] = {ru="CFG загружен; игрок Panther отсутствует: ", uk="CFG завантажено; гравець Panther відсутній: ", de="CFG geladen; Panther-Spieler nicht anwesend: "},
+    ["Save CFG writes SYDJA_HUB_<name>.cfg to your executor workspace. Load CFG restores saved settings. Auto Run is saved separately."] = {ru="Save CFG сохраняет SYDJA_HUB_<имя>.cfg в workspace исполнителя. Load CFG восстанавливает настройки. Автозапуск сохраняется отдельно.", uk="Save CFG зберігає SYDJA_HUB_<назва>.cfg у workspace виконавця. Load CFG відновлює налаштування. Автозапуск зберігається окремо.", de="Save CFG schreibt SYDJA_HUB_<Name>.cfg in den Executor-Workspace. Load CFG lädt Einstellungen. Autostart wird separat gespeichert."},
+    ["TP Map: multiple maps found; destination is ambiguous"] = {ru="ТП на карту: найдено несколько карт; нельзя определить активную", uk="ТП на мапу: знайдено кілька мап; неможливо визначити активну", de="Karten-TP: mehrere Karten gefunden; Ziel nicht eindeutig"},
+    ["TP: character or destination changed; cancelled"] = {ru="ТП: персонаж или точка назначения изменились; отменено", uk="ТП: персонаж або місце призначення змінилися; скасовано", de="TP: Charakter oder Ziel geändert; abgebrochen"},
     ["AIM"] = {ru="ПРИЦЕЛ", uk="ПРИЦІЛ", de="ZIELEN"},
     ["FOV Target Indicator (visual only)"] = {ru="Индикатор цели FOV (только визуально)", uk="Індикатор цілі FOV (лише візуально)", de="FOV-Zielanzeige (nur visuell)"},
     ["FOV preview: shows targets only; no shot redirection"] = {ru="FOV: только показывает цели; не перенаправляет выстрел", uk="FOV: лише показує цілі; не перенаправляє постріл", de="FOV-Vorschau: nur Zielanzeige, keine Schussumleitung"},
@@ -5778,6 +5886,27 @@ do
     }
     local chosen = 1
     local swatches = {}
+    UIRefs.appearancePalette="WHITE"
+    local function applyPalette(index)
+        local palette=palettes[index]
+        if not palette or state.unloaded then return false end
+        chosen=index;UIRefs.appearancePalette=palette.name
+        for key,value in pairs(palette)do if key~="name" then UITheme[key]=value end end
+        for object,props in pairs(UIStyling.colors)do
+            if object.Parent then
+                for property,themeKey in pairs(props)do pcall(function()object[property]=UITheme[themeKey]end) end
+            end
+        end
+        for button,enabled in pairs(UIStyling.buttons)do
+            if button.Parent then setButtonVisual(button,enabled) end
+        end
+        for i,stroke in ipairs(swatches)do stroke.Thickness=i==chosen and 2 or 0 end
+        return true
+    end
+    function UIRefs.setAppearancePalette(name)
+        for index,palette in ipairs(palettes)do if palette.name==name then return applyPalette(index) end end
+        return false
+    end
     local function textRow(name, label, order, height, size)
         return create("TextLabel", {Name=name, LayoutOrder=order,
             Size=UDim2.new(1,-4,0,height), BackgroundTransparency=1,
@@ -5801,23 +5930,7 @@ do
         create("UICorner", {CornerRadius=UDim.new(0,8)},btn)
         swatches[index]=create("UIStroke", {Color=palette.accent, Thickness=index==1 and 2 or 0,
             Transparency=0.15},btn)
-        addConnection(btn.MouseButton1Click:Connect(function()
-            chosen=index
-            for key, value in pairs(palette) do
-                if key~="name" then UITheme[key]=value end
-            end
-            for object, props in pairs(UIStyling.colors) do
-                if object.Parent then
-                    for property, themeKey in pairs(props) do
-                        pcall(function() object[property]=UITheme[themeKey] end)
-                    end
-                end
-            end
-            for button, enabled in pairs(UIStyling.buttons) do
-                if button.Parent then setButtonVisual(button, enabled) end
-            end
-            for i, stroke in ipairs(swatches) do stroke.Thickness = i==chosen and 2 or 0 end
-        end))
+        addConnection(btn.MouseButton1Click:Connect(function() applyPalette(index) end))
     end
     textRow("WindowSizeLabel", "WINDOW SIZE", 5, 23, 12)
     local sizeHolder = create("Frame", {Name="WindowSize", LayoutOrder=6,
@@ -5843,6 +5956,7 @@ do
         if UIRefs.fitDesktop then UIRefs.fitDesktop()
         elseif UIRefs.Main.Visible then UIRefs.WindowScale.Scale=UIStyling.userScale end
     end
+    UIRefs.setUIScale=updateSize
     local dragging=nil
     local function moveSize(x)
         local w=track.AbsoluteSize.X
@@ -5883,6 +5997,7 @@ do
             if sound.Parent then sound.Volume=(MenuAudio.volumes[key] or 0.4)*MenuAudio.volumeFactor end
         end
     end
+    UIRefs.setUIVolume=updateVolume
     addConnection(volumeMinus.MouseButton1Click:Connect(function() updateVolume(volume-10) end))
     addConnection(volumePlus.MouseButton1Click:Connect(function() updateVolume(volume+10) end))
     local reset=create("TextButton", {Name="ResetAppearance", LayoutOrder=9,
@@ -5891,18 +6006,7 @@ do
         BackgroundColor3=UITheme.item, BorderSizePixel=0},page)
     create("UICorner", {CornerRadius=UDim.new(0,9)},reset)
     addConnection(reset.MouseButton1Click:Connect(function()
-        local first=palettes[1]
-        chosen=1
-        for key,value in pairs(first) do if key~="name" then UITheme[key]=value end end
-        for object,props in pairs(UIStyling.colors) do
-            if object.Parent then for property,key in pairs(props) do
-                pcall(function() object[property]=UITheme[key] end)
-            end end
-        end
-        for button,enabled in pairs(UIStyling.buttons) do
-            if button.Parent then setButtonVisual(button,enabled) end
-        end
-        for i,stroke in ipairs(swatches) do stroke.Thickness=i==1 and 2 or 0 end
+        applyPalette(1)
         updateSize(100)
         updateVolume(100)
     end))
@@ -10867,6 +10971,7 @@ local function unload(reason)
     if state.unloaded then
         return
     end
+    if UIRefs.CFG then UIRefs.CFG.stop() end
     if UIRefs.HitboxPanther then UIRefs.HitboxPanther.stop() end
     if UIRefs.VersionChecker then UIRefs.VersionChecker.stop() end
     if UIRefs.Loading then UIRefs.Loading.destroy() end
@@ -10945,7 +11050,7 @@ UIRefs.reloadStop.Name = "ScriptMM2Unload"
 UIRefs.reloadStop.OnInvoke = unload
 UIRefs.reloadStop.Parent = UIRefs.ScriptMM2
 
---// Travel: explicit spawn markers only. Never choose a random floor or another player.
+--// Travel: resolve replicated RegularLobby / named round maps by their real Spawns groups.
 do
     local function normalized(name)
         return string.lower(name):gsub("[^%w]", "")
@@ -10956,7 +11061,7 @@ do
         roundmap = true, gamemap = true,
     }
     local lobbyContainerNames = {
-        lobby = true, mainlobby = true, lobbymap = true,
+        lobby = true, regularlobby = true, mainlobby = true, lobbymap = true, currentlobby = true,
     }
     local mapSpawnNames = {
         spawn = true, spawnpoint = true, playerspawn = true,
@@ -10978,6 +11083,11 @@ do
         itemspawn = true, weapons = true, weaponspawn = true,
         dropspawn = true, coins = true, spectator = true,
     }
+
+    local function isLobbyContainer(item)
+        local name = normalized(item.Name)
+        return lobbyContainerNames[name] or name:match("lobby$") ~= nil
+    end
 
     local function findTopLevel(names)
         for _, item in ipairs(Workspace:GetChildren()) do
@@ -11037,7 +11147,7 @@ do
                 local ancestor = part.Parent
                 while ancestor and ancestor ~= container do
                     local ancestorName = normalized(ancestor.Name)
-                    if lobbyContainerNames[ancestorName] then nestedLobby = true end
+                    if isLobbyContainer(ancestor) then nestedLobby = true end
                     if mapContainerNames[ancestorName] then nestedMap = true end
                     if forbiddenSpawnNames[ancestorName] then excludedGroup = true end
                     ancestor = ancestor.Parent
@@ -11068,21 +11178,46 @@ do
             if math.abs(a.y - b.y) > 0.1 then return a.y < b.y end
             return a.path < b.path
         end)
-        return candidates[1] and candidates[1].part or nil
+        return candidates[1] and candidates[1].part or nil, candidates
     end
 
     local function resolveTravelSpawn(kind)
         if kind == "map" then
             local activeMap = findTopLevel(mapContainerNames)
+            if not activeMap then
+                -- Actual MM2 roots can be called Factory, House2, etc., instead of Map.
+                -- A direct Spawns Model/Folder with real player markers is the evidence.
+                local candidates = {}
+                for _,item in ipairs(Workspace:GetChildren()) do
+                    if (item:IsA("Model") or item:IsA("Folder")) and not isLobbyContainer(item)
+                        and not item:FindFirstChildOfClass("Humanoid") then
+                        for _,group in ipairs(item:GetChildren()) do
+                            if (group:IsA("Model") or group:IsA("Folder"))
+                                and spawnFolderNames[normalized(group.Name)]
+                                and findSpawn(group, "map", true) then
+                                table.insert(candidates,item);break
+                            end
+                        end
+                    end
+                end
+                if #candidates>1 then return nil,nil,"TP Map: multiple maps found; destination is ambiguous" end
+                activeMap=candidates[1]
+            end
             if not activeMap then return nil, nil, "TP Map: active map model not found" end
-            -- A marker is preferred, but an interior-floor fallback is allowed if the map
-            -- has no trustworthy spawn marker or its only marker is on a roof.
-            return findSpawn(activeMap, "map", true), activeMap
+            local marker,spawns=findSpawn(activeMap,"map",true)
+            return marker,activeMap,nil,spawns
         end
 
         local lobby = findTopLevel(lobbyContainerNames)
+        if not lobby then
+            for _,item in ipairs(Workspace:GetChildren()) do
+                if (item:IsA("Model") or item:IsA("Folder")) and isLobbyContainer(item)
+                    and not item:FindFirstChildOfClass("Humanoid") then lobby=item;break end
+            end
+        end
         if lobby then
-            return findSpawn(lobby, "lobby", true), lobby
+            local marker,spawns=findSpawn(lobby,"lobby",true)
+            return marker,lobby,nil,spawns
         end
         -- Explicit global lobby markers are still supported.
         local marker = findSpawn(Workspace, "lobby", false)
@@ -11091,7 +11226,12 @@ do
     end
 
     local function standingHeight(root, hum)
-        return hum.HipHeight + root.Size.Y * 0.5 + 1.25
+        local height=hum.HipHeight+root.Size.Y*0.5
+        if hum.RigType==Enum.HumanoidRigType.R6 then
+            local leg=root.Parent and (root.Parent:FindFirstChild("Left Leg") or root.Parent:FindFirstChild("Right Leg"))
+            if leg and leg:IsA("BasePart") then height+=leg.Size.Y else height+=2 end
+        end
+        return height+0.5
     end
 
     local function isLikelyRoof(container, y)
@@ -11110,7 +11250,9 @@ do
         params.FilterType = Enum.RaycastFilterType.Exclude
         params.FilterDescendantsInstances = {char, marker}
         params.IgnoreWater = true
-        local hit = Workspace:Raycast(center + Vector3.new(0, 10, 0),
+        params.RespectCanCollide = true
+        -- Start beside the marker, below normal ceilings. Ignore noncolliding triggers.
+        local hit = Workspace:Raycast(center + Vector3.new(0, math.min(3, marker.Size.Y*0.5+0.5), 0),
             Vector3.new(0, -42, 0), params)
         if hit and hit.Instance and hit.Instance.CanCollide and hit.Normal.Y >= 0.72
             and hit.Position.Y <= center.Y + marker.Size.Y * 0.5 + 3
@@ -11121,7 +11263,7 @@ do
                 return Vector3.new(center.X, y, center.Z)
             end
         end
-        if marker:IsA("SpawnLocation") and marker.CanCollide and marker.Anchored then
+        if marker.CanCollide and marker.Anchored then
             local y = center.Y + marker.Size.Y * 0.5 + stand
             if not isLikelyRoof(container, y) then
                 return Vector3.new(center.X, y, center.Z)
@@ -11141,6 +11283,7 @@ do
         params.FilterType = Enum.RaycastFilterType.Exclude
         params.FilterDescendantsInstances = {char}
         params.IgnoreWater = true
+        params.RespectCanCollide = true
         local offsets = {
             Vector2.new(0, 0), Vector2.new(0.18, 0), Vector2.new(-0.18, 0),
             Vector2.new(0, 0.18), Vector2.new(0, -0.18),
@@ -11179,18 +11322,31 @@ do
         stopRegularSpin()
         teleportBusy = true
         local ok, err = pcall(function()
-            local marker, container, reason = resolveTravelSpawn(kind)
+            local marker, container, reason, spawns = resolveTravelSpawn(kind)
             if marker and not marker.Parent then marker = nil end
             if not marker and not container then
                 UIRefs.Status.Text = reason or "TP: destination not replicated"
                 return
             end
             if state.unloaded or LocalPlayer.Character ~= char or hum.Health <= 0 then return end
-            local destination = marker and spawnDestination(char, root, hum, marker, container) or nil
+            local destination
+            for index,candidate in ipairs(spawns or (marker and {{part=marker}} or {})) do
+                if index>32 then break end
+                local part=candidate.part
+                if part.Parent and (not container or part:IsDescendantOf(container)) then
+                    destination=spawnDestination(char,root,hum,part,container)
+                    if destination then break end
+                end
+            end
             -- If the named spawn is on a roof / invalid, fall back to a walkable
             -- floor found from inside the replicated map or lobby bounds.
             if not destination and container then
                 destination = interiorDestination(char, root, hum, container)
+            end
+            if state.unloaded or LocalPlayer.Character~=char or getRoot()~=root or hum.Health<=0
+                or (container and not container.Parent) then
+                UIRefs.Status.Text="TP: character or destination changed; cancelled"
+                return
             end
             if not destination then
                 UIRefs.Status.Text = "TP " .. kind .. ": no safe interior floor found"
@@ -11325,6 +11481,8 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     if UIRefs.clearAttackSelection then UIRefs.clearAttackSelection() end
     Silent.stop()
     if UIRefs.setSilentGunToggle then UIRefs.setSilentGunToggle(false) end
+    if UIRefs.setPantherToggle then UIRefs.setPantherToggle(false) end
+    if UIRefs.HitboxPanther then UIRefs.HitboxPanther.setPlayer(nil) end
     finishMurdererShot()
     finishRevolverTrip()
     stopRoleFling()
@@ -11364,6 +11522,7 @@ addConnection(UIRefs.resetButton.MouseButton1Click:Connect(function()
     if UIRefs.setSilentLead then UIRefs.setSilentLead(0) end
     if UIRefs.setAutoPredictionToggle then UIRefs.setAutoPredictionToggle(true) end
     values.aimRadius = 115
+    if UIRefs.setPantherSize then UIRefs.setPantherSize(6) end
     values.aimSmooth = 9
     values.aimLeadMs = 140
     values.jumpLeadMs = 115
@@ -11394,6 +11553,313 @@ addConnection(UIRefs.crashButton.MouseButton1Click:Connect(function()
     setMainVisible(false)
     task.delay(0.32, function() unload("crash") end)
 end))
+
+--// BEGIN SYDJA CFG PROFILES
+-- Data-only JSON .cfg profiles. No script execution, HTTP, polling or automatic load.
+do
+    local C={busy=false,disposed=false,generation=0,links={},listLinks={},listButtons={}}
+    UIRefs.CFG=C
+    local ok,http=pcall(function()return game:GetService("HttpService")end)
+    if not ok then http=nil end
+    local PREFIX="SYDJA_HUB_"
+    local toggles={
+        {"speed","setSpeedToggle"},{"jump","setJumpToggle"},{"noclip","setNoclipToggle"},
+        {"fly","setFlyToggle"},{"infiniteJump","setInfiniteToggle"},{"fullBright","setFullBrightToggle"},
+        {"lowGravity","setGravityToggle"},{"spin","setSpinToggle"},{"bunnyHop","setBunnyToggle"},
+        {"strafe","setStrafeToggle"},{"airStrafe","setAirStrafeToggle"},{"longJump","setLongJumpToggle"},
+        {"ultraLongJump","setUltraLongJumpToggle"},{"esp","setESPToggle"},{"roleESP","setRoleESPToggle"},
+        {"innocentESP","setInnocentESPToggle"},{"espLines","setESPLinesToggle"},{"espNames","setESPNamesToggle"},
+        {"espInfoCards","setESPInfoCardsToggle"},{"watermark","setWatermarkToggle"},{"aimLock","setAimLockToggle"},
+        {"silentAutoPredict","setAutoPredictionToggle"},{"aimVisibleOnly","setAimVisibleToggle"},
+        {"wallbang","setWallbangToggle"},{"antiFling","setAntiFlingToggle"},{"silentGun","setSilentGunToggle"},
+        {"hitboxPanther","setPantherToggle"},{"fovIndicator","setFOVIndicatorToggle"},{"coinFarm","setCoinFarmToggle"},
+    }
+    local sliders={
+        {"walkSpeed","setWalkSpeedSlider",CONFIG.MinWalkSpeed,CONFIG.MaxWalkSpeed},
+        {"jumpPower","setJumpPowerSlider",CONFIG.MinJumpPower,CONFIG.MaxJumpPower},
+        {"flySpeed","setFlySpeedSlider",CONFIG.MinFlySpeed,CONFIG.MaxFlySpeed},
+        {"spinSpeed","setSpinSpeedSlider",CONFIG.MinSpinSpeed,CONFIG.MaxSpinSpeed},
+        {"coinFarmSpeed","setCoinFarmSpeedSlider",CONFIG.MinCoinFarmSpeed,CONFIG.MaxCoinFarmSpeed},
+        {"longJumpSpeed","setLongJumpSpeedSlider",CONFIG.MinLongJumpSpeed,CONFIG.MaxLongJumpSpeed},
+        {"fov","setFOVSlider",CONFIG.MinFOV,CONFIG.MaxFOV},{"silentLeadMs","setSilentLead",0,200},
+        {"aimRadius","setAimRadius",35,350},{"hitboxPantherSize","setPantherSize",2,30},
+        {"aimSmooth","setAimSmooth",2,30},{"aimLeadMs","setAimLead",0,300},{"jumpLeadMs","setJumpAimLead",0,250},
+    }
+    local palettes={WHITE=true,BLUE=true,PURPLE=true,PINK=true,AMBER=true,RED=true}
+    local languages={en=true,ru=true,uk=true,de=true}
+    local function finite(value)return type(value)=="number" and value==value and math.abs(value)<math.huge end
+    local function disconnect(bucket)
+        for i=#bucket,1,-1 do pcall(function()bucket[i]:Disconnect()end);bucket[i]=nil end
+    end
+    function C.active(generation)
+        return not C.disposed and not state.unloaded and (generation==nil or generation==C.generation)
+    end
+    function C.message(message,detail)
+        if C.active() and UIRefs.cfgStatus then Localization.setText(UIRefs.cfgStatus,message) end
+        if detail then warn("[SYDJA HUB CFG] "..tostring(detail)) end
+    end
+    function C.name(text)
+        if type(text)~="string" then return nil end
+        text=text:match("^%s*(.-)%s*$")
+        if text:lower():sub(-4)==".cfg" then text=text:sub(1,-5):match("^%s*(.-)%s*$") end
+        if #text==0 or #text>64 or text:find('[\\/:*?"<>|%c]')
+            or text:find("..",1,true) or text:sub(1,1)=="." or text:sub(-1)=="." then return nil end
+        return text,PREFIX..text..".cfg"
+    end
+    function C.capture()
+        local settings={toggles={},sliders={},ui={language=Localization.language,
+            palette=UIRefs.appearancePalette or "WHITE",size=math.floor(UIStyling.userScale*100+.5),
+            volume=math.floor((MenuAudio.volumeFactor or 1)*100+.5)},cameraFOV=fovState.active==true,pantherUserId=0}
+        for _,spec in ipairs(toggles)do settings.toggles[spec[1]]=state[spec[1]]==true end
+        -- Store the user's manual Fly/Noclip preference, not the farm's temporary actuators.
+        if state.coinFarm then settings.toggles.fly=coinFarm.savedFly==true;settings.toggles.noclip=coinFarm.savedNoclip==true end
+        for _,spec in ipairs(sliders)do settings.sliders[spec[1]]=values[spec[1]] end
+        local player=UIRefs.HitboxPanther and UIRefs.HitboxPanther.selected
+        if player and player.Parent==Players then settings.pantherUserId=player.UserId end
+        return {format="SYDJA_HUB_CFG",schema=1,version=CURRENT_VERSION,settings=settings}
+    end
+    function C.validate(profile)
+        if type(profile)~="table" or profile.format~="SYDJA_HUB_CFG" or profile.schema~=1
+            or type(profile.settings)~="table" then return nil,"CFG: incompatible profile format." end
+        local src=profile.settings
+        for _,key in ipairs({"toggles","sliders","ui"})do
+            if src[key]~=nil and type(src[key])~="table" then return nil,"CFG: invalid settings." end
+        end
+        local result=C.capture().settings
+        for _,spec in ipairs(toggles)do
+            local value=src.toggles and src.toggles[spec[1]]
+            if value~=nil then
+                if type(value)~="boolean" then return nil,"CFG: invalid settings." end
+                result.toggles[spec[1]]=value
+            end
+        end
+        for _,spec in ipairs(sliders)do
+            local value=src.sliders and src.sliders[spec[1]]
+            if value~=nil then
+                if not finite(value) then return nil,"CFG: invalid settings." end
+                result.sliders[spec[1]]=math.clamp(math.floor(value+.5),spec[3],spec[4])
+            end
+        end
+        if src.cameraFOV~=nil then
+            if type(src.cameraFOV)~="boolean" then return nil,"CFG: invalid settings." end
+            result.cameraFOV=src.cameraFOV
+        end
+        if src.pantherUserId~=nil then
+            if not finite(src.pantherUserId) or src.pantherUserId<0 or src.pantherUserId>9007199254740991
+                or src.pantherUserId~=math.floor(src.pantherUserId) then return nil,"CFG: invalid settings." end
+            result.pantherUserId=src.pantherUserId
+        end
+        if src.ui then
+            if src.ui.language~=nil then
+                if type(src.ui.language)~="string" or not languages[src.ui.language] then return nil,"CFG: invalid settings." end
+                result.ui.language=src.ui.language
+            end
+            if src.ui.palette~=nil then
+                if type(src.ui.palette)~="string" or not palettes[src.ui.palette] then return nil,"CFG: invalid settings." end
+                result.ui.palette=src.ui.palette
+            end
+            for _,spec in ipairs({{"size",75,125,5},{"volume",0,100,1}})do
+                local value=src.ui[spec[1]]
+                if value~=nil then
+                    if not finite(value) then return nil,"CFG: invalid settings." end
+                    result.ui[spec[1]]=math.clamp(math.floor(value/spec[4]+.5)*spec[4],spec[2],spec[3])
+                end
+            end
+        end
+        if result.toggles.ultraLongJump then result.toggles.longJump=true end
+        return result
+    end
+    function C.apply(settings)
+        -- Resolve ALL controls before any mutation; profiles never address arbitrary UIRefs.
+        for _,group in ipairs({toggles,sliders})do
+            for _,spec in ipairs(group)do assert(type(UIRefs[spec[2]])=="function","CFG control unavailable: "..spec[2]) end
+        end
+        for _,key in ipairs({"setAppearancePalette","setUIScale","setUIVolume"})do
+            assert(type(UIRefs[key])=="function","CFG appearance control unavailable: "..key)
+        end
+        local function active()assert(C.active(),"CFG load cancelled")end
+        active()
+        if state.coinFarm then UIRefs.setCoinFarmToggle(false) end
+        UIRefs.setPantherToggle(false)
+        local selected
+        for _,player in ipairs(Players:GetPlayers())do
+            if player~=LocalPlayer and player.UserId==settings.pantherUserId then selected=player;break end
+        end
+        assert(UIRefs.HitboxPanther.setPlayer(selected),"CFG Panther target could not be restored")
+        for _,spec in ipairs(sliders)do
+            active()
+            if spec[1]=="fov" and not settings.cameraFOV then
+                -- Keep the value label in sync without enabling an inactive camera override.
+                values.fov=settings.sliders.fov;UIRefs.setFOVSlider(values.fov,true);restoreCameraFOV()
+            else UIRefs[spec[2]](settings.sliders[spec[1]]) end
+        end
+        for _,spec in ipairs(toggles)do active();UIRefs[spec[2]](settings.toggles[spec[1]]) end
+        active();assert(UIRefs.setAppearancePalette(settings.ui.palette),"CFG palette unavailable")
+        UIRefs.setUIScale(settings.ui.size);UIRefs.setUIVolume(settings.ui.volume)
+        Localization.setLanguage(settings.ui.language)
+        return settings.pantherUserId>0 and selected==nil
+    end
+    function C.setBusy(busy)
+        C.busy=busy
+        if not C.active() then return end
+        for _,button in ipairs({UIRefs.cfgSaveButton,UIRefs.cfgLoadButton,UIRefs.cfgRefreshButton})do button.Active=not busy end
+        UIRefs.cfgName.TextEditable=not busy
+    end
+    function C.run(action)
+        if not C.active() or C.busy then return false end
+        C.generation+=1;local generation=C.generation
+        C.setBusy(true)
+        task.spawn(function()
+            if not C.active(generation) then return end
+            local success,err=pcall(action,generation)
+            if not C.active(generation) then return end
+            if not success then C.message("CFG: operation failed. See console.",err) end
+            C.setBusy(false)
+        end)
+        return true
+    end
+    function C.refreshList(silent)
+        if not C.active() then return false end
+        if type(listfiles)~="function" then
+            if not silent then C.message("CFG: file listing unavailable. Enter the profile name manually.") end
+            return false
+        end
+        local listed,files=pcall(listfiles,".")
+        if not C.active() then return false end
+        if not listed or type(files)~="table" then
+            if not silent then C.message("CFG: could not list files.",files) end
+            return false
+        end
+        local names,seen={},{}
+        for _,path in ipairs(files)do
+            if type(path)=="string" then
+                local file=path:gsub("\\","/"):match("([^/]+)$")
+                local stem=file and file:match("^SYDJA_HUB_(.+)%.cfg$")
+                local name,expected
+                if stem then name,expected=C.name(stem) end
+                if name and expected==file and not seen[name] and #names<256 then seen[name]=true;table.insert(names,name) end
+            end
+        end
+        table.sort(names,function(a,b)return a:lower()<b:lower()end)
+        disconnect(C.listLinks)
+        for _,button in ipairs(C.listButtons)do button:Destroy()end
+        table.clear(C.listButtons)
+        UIRefs.cfgEmpty.Visible=#names==0
+        for index,name in ipairs(names)do
+            local button=create("TextButton",{Name="CFGProfile"..index,LayoutOrder=index,
+                Size=UDim2.new(1,-6,0,34),BackgroundColor3=UITheme.item,TextColor3=UITheme.text,
+                Text=name..".cfg",Font=Enum.Font.GothamSemibold,TextSize=12,BorderSizePixel=0,
+                AutoButtonColor=false,TextXAlignment=Enum.TextXAlignment.Left},UIRefs.cfgList)
+            create("UICorner",{CornerRadius=UDim.new(0,8)},button)
+            table.insert(C.listButtons,button)
+            table.insert(C.listLinks,button.MouseButton1Click:Connect(function()
+                if C.active() and not C.busy then UIRefs.cfgName.Text=name end
+            end))
+        end
+        if not silent then C.message("CFG: file list refreshed.") end
+        return true
+    end
+    function C.save()
+        return C.run(function(generation)
+            local name,path=C.name(UIRefs.cfgName.Text)
+            if not name then C.message("CFG: invalid profile name.");return end
+            if type(writefile)~="function" then C.message("CFG: executor cannot save files.");return end
+            if not http then C.message("CFG: JSON service unavailable.");return end
+            C.message("CFG: saving...")
+            local profile=C.capture()
+            local validated,message=C.validate(profile)
+            if not validated then C.message(message);return end
+            profile.settings=validated
+            local encoded,bytes=pcall(function()return http:JSONEncode(profile)end)
+            if not encoded or type(bytes)~="string" or #bytes>65536 then C.message("CFG: could not encode settings.",bytes);return end
+            local written,err=pcall(writefile,path,bytes)
+            if not C.active(generation) then return end
+            if not written or err==false then C.message("CFG: could not save file.",err);return end
+            if type(readfile)=="function" then
+                local verified,saved=pcall(readfile,path)
+                if not C.active(generation) then return end
+                if not verified or saved~=bytes then C.message("CFG: saved file verification failed.");return end
+            end
+            UIRefs.cfgName.Text=name;C.refreshList(true)
+            C.message("CFG saved: "..path)
+        end)
+    end
+    function C.load()
+        return C.run(function(generation)
+            local name,path=C.name(UIRefs.cfgName.Text)
+            if not name then C.message("CFG: invalid profile name.");return end
+            if type(readfile)~="function" then C.message("CFG: executor cannot read files.");return end
+            if not http then C.message("CFG: JSON service unavailable.");return end
+            C.message("CFG: loading...")
+            local read,bytes=pcall(readfile,path)
+            if not C.active(generation) then return end
+            if not read then C.message("CFG: file not found or unreadable.",bytes);return end
+            if type(bytes)~="string" or #bytes==0 or #bytes>65536 then C.message("CFG: empty or oversized file.");return end
+            local decoded,profile=pcall(function()return http:JSONDecode(bytes)end)
+            if not decoded then C.message("CFG: invalid JSON file.",profile);return end
+            local settings,message=C.validate(profile)
+            if not settings then C.message(message);return end
+            if flingBusy or teleportBusy or shootMurdererBusy then C.message("CFG: finish TP / Fling / shot first.");return end
+            local previous=C.capture().settings
+            local applied,missing=pcall(C.apply,settings)
+            if not C.active(generation) then return end
+            if not applied then
+                local restored,restoreError=pcall(C.apply,previous)
+                C.message(restored and "CFG: load failed; previous settings restored." or "CFG: load failed; restore incomplete. See console.",missing)
+                if not restored then warn("[SYDJA HUB CFG] Rollback: "..tostring(restoreError)) end
+                return
+            end
+            UIRefs.cfgName.Text=name
+            C.message((missing and "CFG loaded; Panther player is absent: " or "CFG loaded: ")..path)
+        end)
+    end
+    function C.stop()
+        C.disposed=true;C.busy=false;C.generation+=1
+        disconnect(C.links);disconnect(C.listLinks)
+    end
+    local page=UIRefs.SettingsContent
+    local function label(name,text,order,height,size)
+        return create("TextLabel",{Name=name,Text=text,LayoutOrder=order,Size=UDim2.new(1,-4,0,height),
+            BackgroundTransparency=1,TextColor3=UITheme.muted,Font=Enum.Font.GothamSemibold,
+            TextSize=size or 12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left},page)
+    end
+    label("CFGTitle","CFG PROFILES",14,26,16)
+    local inputRow=create("Frame",{Name="CFGNameRow",LayoutOrder=15,Size=UDim2.new(1,-4,0,70),
+        BackgroundColor3=UITheme.surface,BorderSizePixel=0},page)
+    create("UICorner",{CornerRadius=UDim.new(0,12)},inputRow)
+    create("TextLabel",{Name="CFGNameLabel",Text="CFG profile name",Position=UDim2.fromOffset(10,5),
+        Size=UDim2.new(1,-20,0,20),BackgroundTransparency=1,TextColor3=UITheme.muted,
+        Font=Enum.Font.GothamSemibold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left},inputRow)
+    UIRefs.cfgName=create("TextBox",{Name="CFGName",Text="default",ClearTextOnFocus=false,
+        Position=UDim2.fromOffset(10,29),Size=UDim2.new(1,-20,0,32),BackgroundColor3=UITheme.item,
+        TextColor3=UITheme.text,Font=Enum.Font.Gotham,TextSize=13,BorderSizePixel=0},inputRow)
+    create("UICorner",{CornerRadius=UDim.new(0,8)},UIRefs.cfgName)
+    local row=create("Frame",{Name="CFGButtons",LayoutOrder=16,Size=UDim2.new(1,-4,0,40),BackgroundTransparency=1},page)
+    local function button(name,text,index,callback)
+        local b=create("TextButton",{Name=name,Text=text,Position=UDim2.new((index-1)/3,2,0,0),
+            Size=UDim2.new(1/3,-5,0,40),BackgroundColor3=UITheme.item,TextColor3=UITheme.text,
+            BorderSizePixel=0,AutoButtonColor=false,Font=Enum.Font.GothamSemibold,TextSize=12},row)
+        create("UICorner",{CornerRadius=UDim.new(0,9)},b)
+        table.insert(C.links,b.MouseButton1Click:Connect(callback));return b
+    end
+    UIRefs.cfgSaveButton=button("SaveCFG","Save CFG",1,C.save)
+    UIRefs.cfgLoadButton=button("LoadCFG","Load CFG",2,C.load)
+    UIRefs.cfgRefreshButton=button("RefreshCFG","Refresh CFG",3,function()C.run(function()C.refreshList(false)end)end)
+    UIRefs.cfgStatus=label("CFGStatus","CFG: ready",17,48)
+    label("CFGListTitle","Saved CFG profiles",18,23)
+    UIRefs.cfgList=create("ScrollingFrame",{Name="CFGList",LayoutOrder=19,Size=UDim2.new(1,-4,0,130),
+        BackgroundColor3=UITheme.surface,BorderSizePixel=0,ScrollBarThickness=4,
+        CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y},page)
+    create("UICorner",{CornerRadius=UDim.new(0,12)},UIRefs.cfgList)
+    create("UIListLayout",{Padding=UDim.new(0,6),SortOrder=Enum.SortOrder.LayoutOrder},UIRefs.cfgList)
+    UIRefs.cfgEmpty=create("TextLabel",{Name="CFGEmpty",LayoutOrder=0,Text="No CFG files found",
+        Size=UDim2.new(1,-12,0,36),BackgroundTransparency=1,TextColor3=UITheme.muted,
+        Font=Enum.Font.Gotham,TextSize=12,TextWrapped=true},UIRefs.cfgList)
+    label("CFGHint","Save CFG writes SYDJA_HUB_<name>.cfg to your executor workspace. Load CFG restores saved settings. Auto Run is saved separately.",20,86,11)
+    C.refreshList(true)
+    if type(writefile)~="function" then C.message("CFG: executor cannot save files.") end
+end
+--// END SYDJA CFG PROFILES
 
 if UIRefs.Loading then UIRefs.Loading.step(0.92, "Finishing setup...") end
 
